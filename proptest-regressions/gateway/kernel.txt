@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 95d87276ecd17b485bc880b13c8b6c4bdceec044b5e235ea16594cb089da9e50 # shrinks to events = [WorkerRegistered { worker_id: "w0" }, HttpChatRequested { client_stream_id: "s2", payload: Object {"model": String("demo")}, stream: true }, WorkerRegistered { worker_id: "w0" }, HttpChatRequested { client_stream_id: "s2", payload: Object {"model": String("demo")}, stream: true }]
