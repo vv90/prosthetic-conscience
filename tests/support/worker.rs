@@ -53,7 +53,6 @@ impl MockWorker {
         self.ws.send(Message::Text(text)).await.unwrap();
     }
 
-    #[allow(dead_code)]
     pub async fn send_error(&mut self, message: &str) {
         let msg = WorkerMessage::Error {
             message: message.to_owned(),
@@ -62,7 +61,6 @@ impl MockWorker {
         self.ws.send(Message::Text(text)).await.unwrap();
     }
 
-    #[allow(dead_code)]
     pub async fn disconnect(mut self) {
         let _ = self.ws.close(None).await;
     }

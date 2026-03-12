@@ -38,6 +38,15 @@ impl Default for GatewayConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StateSnapshot {
+    pub tick: u64,
+    pub available_workers: usize,
+    pub active_streams: usize,
+    pub worker_registry_count: usize,
+    pub stream_registry_count: usize,
+}
+
 type KernelEvent = Event<WorkerId, ClientStreamId>;
 type KernelEffect = Effect<WorkerId, ClientStreamId>;
 type ResolvedSId = (ClientStreamId, StreamHandle);
@@ -70,6 +79,9 @@ pub enum RuntimeCommand {
         client_stream_id: ClientStreamId,
         payload: Value,
         stream: bool,
+    },
+    QueryState {
+        reply_tx: oneshot::Sender<StateSnapshot>,
     },
 }
 
@@ -159,6 +171,13 @@ impl RuntimeHandle {
             stream,
         })
         .await
+    }
+
+    pub async fn query_state(&self) -> Result<StateSnapshot, RuntimeSendError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.submit_command(RuntimeCommand::QueryState { reply_tx })
+            .await?;
+        reply_rx.await.map_err(|_| RuntimeSendError)
     }
 }
 
@@ -362,6 +381,17 @@ impl GatewayRuntime {
                     payload,
                     stream,
                 } => self.handle_http_chat_requested(client_stream_id, payload, stream),
+                RuntimeCommand::QueryState { reply_tx } => {
+                    let snapshot = StateSnapshot {
+                        tick: self.state.tick,
+                        available_workers: self.state.available.len(),
+                        active_streams: self.state.active_streams.len(),
+                        worker_registry_count: self.registry.worker_count(),
+                        stream_registry_count: self.registry.stream_count(),
+                    };
+                    let _ = reply_tx.send(snapshot);
+                    (self, Vec::new())
+                }
             },
             RuntimeMessage::Event(event) => self.apply_event(event),
         };

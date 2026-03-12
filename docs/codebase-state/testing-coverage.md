@@ -63,16 +63,21 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (4 tests)
+### Integration tests (9 tests)
 
 Location: `tests/integration.rs` with helpers in `tests/support/`.
 
-| Test                                                | What it proves                                                                                                                                                                                        |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                  |
-| `stream_timeout_sends_error_and_done`               | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                             |
-| `long_running_stream_survives_with_heartbeats`      | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work |
-| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                    |
+| Test                                                | What it proves                                                                                                                                                                                            |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                      |
+| `no_workers_returns_sse_error`                      | No workers connected → kernel rejects with `SendClientError` + `CloseStream` → client sees error event, no `[DONE]`                                                                                       |
+| `worker_error_sends_error_and_done`                 | Worker sends chunk then `{"type":"error"}` → relay sends error directly + handler calls `assignment_failed` → client sees chunk + 2 errors + `[DONE]`                                                     |
+| `worker_re_registration_handles_second_job`         | Worker completes first job, re-registers with fresh ID, receives and completes second job on same WS connection                                                                                           |
+| `concurrent_streams_no_cross_contamination`         | 10 workers, 10 clients, 20 chunks each — all spawned concurrently. Each chunk tagged with `client_stream_id:index`. Asserts: no cross-contamination, chunk ordering preserved, all 10 stream IDs distinct |
+| `completed_streams_drain_from_state`                | 3 jobs (success, error, timeout) then assert all state drains: active_streams=0, stream_registry=0, available_workers=0, worker_registry=0                                                                |
+| `stream_timeout_sends_error_and_done`               | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                                 |
+| `long_running_stream_survives_with_heartbeats`      | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work     |
+| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                        |
 
 Test harness components:
 
@@ -87,10 +92,10 @@ Test harness components:
 | Runtime message loop     | No tests for command dispatch, effect resolution, tick driver                                                 | Medium — logic is simple but wires everything together           |
 | Effect executors         | No tests for `DispatchJob`, `SendClientError`, `SendClientDone`, `CloseStream`, `ProtocolViolation` execution | Low — each is a few lines, but dispatch failure path matters     |
 | Worker WS handler        | Only happy path tested via integration test                                                                   | Medium — `select!` races, disconnect, re-registration need tests |
-| Chat completions handler | Only happy path tested via integration test                                                                   | Medium — error responses (stream=false, no workers) not tested   |
-| Relay (`relay_job`)      | Only happy path tested via integration test                                                                   | Medium — malformed messages, heartbeat, error relay not tested   |
-| Fault tolerance          | No tests for worker disconnect mid-stream, client disconnect, timeout under real conditions, dispatch failure | High — failure modes only tested at kernel abstraction level     |
-| Leak detection           | No tests verifying registry/kernel state drains to zero after workload completion                             | Medium — leaks would be slow-burn production issues              |
+| Chat completions handler | Happy path + no-workers error tested; `stream=false` rejection not yet tested                                 | Low — remaining gap is a simple HTTP 400 path                    |
+| Relay (`relay_job`)      | Happy path, error relay, disconnect, timeout, heartbeat all tested                                            | Low — malformed messages not yet tested                          |
+| Fault tolerance          | Worker disconnect, timeout, worker error all tested; client disconnect and dispatch failure not yet tested    | Medium — client disconnect and dispatch failure gaps remain      |
+| Leak detection           | `completed_streams_drain_from_state` covers success/error/timeout paths → all state drains to zero            | Low — channel close propagation not yet tested separately        |
 | Performance              | No benchmarks for throughput, latency, backpressure, or concurrent stream scaling                             | Low for correctness, medium for production readiness             |
 
 ## Methodology
@@ -221,7 +226,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 ## Known Issues
 
 - ~~TTLs are not yet configurable~~ — resolved: `GatewayConfig` struct threads `tick_interval`, `worker_ttl`, `stream_ttl` from `TestGateway::start_with_config()` to kernel.
-- No state inspection API exists for leak detection assertions.
+- ~~No state inspection API~~ — resolved: `RuntimeHandle::query_state()` returns `StateSnapshot` with tick, worker/stream counts from kernel and registry. `TestGateway` exposes `RuntimeHandle`. Made unconditional (not `#[cfg(test)]`) because integration tests are an external crate.
 - `worker-lifecycle.md` lists 15 transition scenarios (T1–T15), all marked "Tested? No".
 
 ## Status
@@ -229,7 +234,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - Kernel: strong coverage (44 unit + 6 property tests).
 - Registry: adequate coverage (6 tests).
 - Protocol: strong coverage (14 serde tests).
-- Integration: harness implemented, 4 tests passing (happy path, stream timeout, long-running stream heartbeat, worker disconnect). Remaining fault tolerance, leak detection, and performance tests not yet written.
+- Integration: 9 tests passing (happy path, no-workers error, worker error, re-registration, concurrent streams, leak detection, stream timeout, heartbeat survival, worker disconnect). Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
 ## Load into context when
 

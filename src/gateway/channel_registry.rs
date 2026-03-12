@@ -95,6 +95,10 @@ impl<WorkerHandle, StreamHandle> ChannelRegistry<WorkerHandle, StreamHandle> {
         self.workers.len()
     }
 
+    pub fn stream_count(&self) -> usize {
+        self.streams.len()
+    }
+
     /// Remove and return the worker handle, consuming it.
     /// Used for oneshot dispatch — the handle is gone after this.
     pub fn take_worker(&mut self, worker_id: &WorkerId) -> Option<WorkerHandle> {

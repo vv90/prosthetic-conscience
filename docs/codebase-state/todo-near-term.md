@@ -9,7 +9,7 @@ See `testing-coverage.md` for full methodology and current gaps.
 ### Phase A: prerequisites and first tests
 
 1. ~~Make TTLs and heartbeat intervals configurable via `GatewayConfig`~~ (done). `GatewayConfig` in `runtime.rs` bundles `tick_interval`, `worker_ttl`, `stream_ttl`, `stream_heartbeat_interval`, `worker_heartbeat_interval`. `RuntimeHandle` carries both heartbeat intervals. `relay_job` accepts `stream_heartbeat_interval` parameter (was hardcoded 10s). Worker WS handler uses `runtime.worker_heartbeat_interval` (was hardcoded 15s). All 74 tests pass.
-2. Add `#[cfg(test)]` state inspection on runtime (or kernel query command) to read active worker count, stream count, and registry entry counts. Required for leak detection assertions.
+2. ~~`#[cfg(test)]` state inspection~~ (done). `RuntimeHandle::query_state()` returns `StateSnapshot { tick, available_workers, active_streams, worker_registry_count, stream_registry_count }`. `QueryState` command + handler in runtime message loop. `ChannelRegistry::stream_count()` added. `TestGateway` now stores `RuntimeHandle`. Made unconditional (not `#[cfg(test)]`) because integration tests are an external crate and cannot see `#[cfg(test)]` items.
 3. ~~Build integration test harness~~ (done). `TestGateway`, `MockWorker`, `SseClient` in `tests/support/`. Each test gets isolated state on random port.
 4. ~~Happy path integration test~~ (done). `happy_path_streams_chunks_and_done` in `tests/integration.rs`. 2 chunks + end → 2 SSE data events + `[DONE]`.
 5. ~~Worker disconnect integration test~~ (done). `worker_disconnect_mid_stream_sends_error_and_done` in `tests/integration.rs`. Worker sends 1 chunk, closes WS → client gets chunk, error, `[DONE]`.
@@ -18,10 +18,10 @@ See `testing-coverage.md` for full methodology and current gaps.
 
 ### Phase B: core integration coverage
 
-7. Pre-dispatch rejection tests: `stream=false` → 400; no workers → SSE error frame.
-8. Worker error propagation test: worker sends `{"type":"error"}` → client sees error + done.
-9. Multiple concurrent streams test: N workers, N clients, interleaved → no cross-contamination.
-10. Worker re-registration test: worker completes job, receives second job, second stream works.
+7. Pre-dispatch rejection tests: `stream=false` → 400; ~~no workers → SSE error frame~~ (7b done: `no_workers_returns_sse_error`).
+8. ~~Worker error propagation test~~ (done): `worker_error_sends_error_and_done`. Worker sends `{"type":"error"}` → client sees chunk + 2 errors (relay + kernel) + done.
+9. ~~Multiple concurrent streams test~~ (done): `concurrent_streams_no_cross_contamination`. 3 workers, 3 clients, interleaved chunks → each client receives exactly its own worker's data, all 3 workers used.
+10. ~~Worker re-registration test~~ (done): `worker_re_registration_handles_second_job`. Worker completes first job, re-registers, receives and completes second job.
 11. Client disconnect test: client drops connection mid-stream → relay detects `ClientGone`, worker re-registers.
 12. Malformed worker message test: garbage JSON skipped, valid chunks still arrive.
 13. Dispatch failure test: worker oneshot dropped before delivery → client gets error.
@@ -29,10 +29,7 @@ See `testing-coverage.md` for full methodology and current gaps.
 
 ### Phase B: leak detection
 
-15. Stream registry drain: complete N streams (success/error/timeout mix) → registry empty.
-16. Worker registry drain: N workers connect, do jobs, disconnect → registry empty.
-17. Kernel state drain: process N jobs to completion → `available` and `active_streams` both empty.
-18. Channel close propagation: timeout fires → client mpsc receiver is actually closed.
+15–17. ~~Stream/worker/kernel state drain~~ (done): `completed_streams_drain_from_state`. Runs 3 jobs (success, error, timeout) then asserts all state drains to zero (active_streams, stream_registry, available_workers, worker_registry). 18. Channel close propagation: timeout fires → client mpsc receiver is actually closed.
 
 ### Phase C: performance baseline
 
