@@ -3,13 +3,13 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::time::{Instant, interval_at};
 use tracing::{info, warn};
 
 use crate::gateway::channel_registry::WorkerJob;
 use crate::gateway::relay::{RelayOutcome, relay_job};
+use crate::protocol::GatewayToWorker;
 use crate::router::state::AppState;
 
 pub(crate) async fn worker_ws_upgrade(
@@ -63,12 +63,17 @@ async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
         let client_stream_id = job.client_stream_id.clone();
 
         // Send job frame to worker
-        let job_frame = json!({
-            "type": "job",
-            "client_stream_id": client_stream_id.to_string(),
-            "payload": job.payload,
-        })
-        .to_string();
+        let job_msg = GatewayToWorker::Job {
+            client_stream_id: client_stream_id.to_string(),
+            payload: job.payload,
+        };
+        let job_frame = match serde_json::to_string(&job_msg) {
+            Ok(s) => s,
+            Err(error) => {
+                warn!(%error, worker_id = %worker_id, "failed to serialize job frame");
+                break;
+            }
+        };
 
         if let Err(error) = socket.send(Message::Text(job_frame.into())).await {
             warn!(%error, worker_id = %worker_id, "failed to send job to worker");

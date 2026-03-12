@@ -2,22 +2,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::gateway::relay::StreamFrame;
+use crate::protocol::ChatRequest;
 use crate::router::state::AppState;
-
-#[derive(Deserialize)]
-pub(crate) struct ChatRequest {
-    #[serde(default)]
-    stream: Option<bool>,
-    #[serde(flatten)]
-    payload: Value,
-}
 
 pub(crate) async fn chat_completions(
     State(state): State<AppState>,

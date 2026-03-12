@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-11
+Snapshot date: 2026-03-12
 
 ## Integration testing (next)
 
@@ -43,17 +43,9 @@ See `testing-coverage.md` for full methodology and current gaps.
 
 The project is currently a single crate producing a single binary. The spec describes three separate components (gateway, worker agent, client sidecar) that share a wire protocol. The following changes prepare the codebase for that future without disrupting current work.
 
-### Step 1: extract protocol types (do before or alongside integration testing)
+### ~~Step 1: extract protocol types~~ (done)
 
-25. Create `src/protocol.rs` (or `src/protocol/mod.rs`) with typed wire message definitions. Currently the worker↔gateway wire format is ad-hoc JSON parsing in `relay.rs` (`parsed.get("type")`) and ad-hoc serialization in `worker_ws_upgrade.rs` (`serde_json::json!({"type":"job",...})`). Extract into:
-    - `WorkerMessage { Chunk { data }, End, Error { message } }` — worker→gateway, with serde
-    - `GatewayToWorker::Job { client_stream_id, payload }` — gateway→worker, with serde
-    - `ChatRequest { stream, payload }` — client→gateway (currently inlined in `chat_completions.rs`)
-    - Keep `StreamFrame` in `gateway/relay.rs` as the internal channel type (distinct from wire types)
-    - `relay.rs` converts `WorkerMessage` → `StreamFrame` explicitly
-26. Update `relay.rs` to deserialize `WorkerMessage` instead of ad-hoc `Value` field access.
-27. Update `worker_ws_upgrade.rs` to serialize `GatewayToWorker::Job` instead of inline `json!()`.
-28. Update `chat_completions.rs` to use the shared `ChatRequest` type.
+Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `ChatRequest` with serde derives. `relay.rs` deserializes `WorkerMessage` instead of ad-hoc `Value` field access. `worker_ws_upgrade.rs` serializes `GatewayToWorker::Job` instead of inline `json!()`. `chat_completions.rs` imports `ChatRequest` from the protocol module. 19 serde round-trip tests added. All 70 tests pass.
 
 ### Step 2: convert to Cargo workspace (do before worker agent work begins)
 

@@ -14,6 +14,7 @@ use tokio::time::{Instant, interval_at};
 
 use crate::gateway::channel_registry::{ClientStreamId, WorkerId};
 use crate::gateway::runtime::RuntimeHandle;
+use crate::protocol::WorkerMessage;
 
 /// A single frame sent from the relay to the client SSE response handler.
 #[derive(Debug, Clone)]
@@ -75,31 +76,23 @@ pub async fn relay_job(
             Err(_) => return RelayOutcome::WorkerDisconnected,
         };
 
-        let parsed: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue, // malformed frame — skip for now
+        let msg: WorkerMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(_) => continue, // malformed or unknown message type — skip
         };
 
-        let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match msg_type {
-            "chunk" => {
-                let data = parsed.get("data").cloned().unwrap_or(Value::Null);
+        match msg {
+            WorkerMessage::Chunk { data } => {
                 let frame = StreamFrame::Chunk { data };
                 if client_tx.send(frame).await.is_err() {
                     return RelayOutcome::ClientGone;
                 }
             }
-            "end" => {
+            WorkerMessage::End => {
                 let _ = client_tx.send(StreamFrame::Done).await;
                 return RelayOutcome::WorkerEnd;
             }
-            "error" => {
-                let message = parsed
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown worker error")
-                    .to_owned();
+            WorkerMessage::Error { message } => {
                 let _ = client_tx
                     .send(StreamFrame::Error {
                         message: message.clone(),
@@ -107,7 +100,6 @@ pub async fn relay_job(
                     .await;
                 return RelayOutcome::WorkerError { message };
             }
-            _ => continue, // unknown message type — skip
         }
     }
 }
