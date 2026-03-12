@@ -12,7 +12,7 @@ See `testing-coverage.md` for full methodology and current gaps.
 2. Add `#[cfg(test)]` state inspection on runtime (or kernel query command) to read active worker count, stream count, and registry entry counts. Required for leak detection assertions.
 3. ~~Build integration test harness~~ (done). `TestGateway`, `MockWorker`, `SseClient` in `tests/support/`. Each test gets isolated state on random port.
 4. ~~Happy path integration test~~ (done). `happy_path_streams_chunks_and_done` in `tests/integration.rs`. 2 chunks + end → 2 SSE data events + `[DONE]`.
-5. Worker disconnect integration test: worker closes WS mid-stream → client gets error frame + done.
+5. ~~Worker disconnect integration test~~ (done). `worker_disconnect_mid_stream_sends_error_and_done` in `tests/integration.rs`. Worker sends 1 chunk, closes WS → client gets chunk, error, `[DONE]`.
 6. Timeout integration test: worker accepts job but never responds → client gets "stream timed out" + done.
 
 ### Phase B: core integration coverage

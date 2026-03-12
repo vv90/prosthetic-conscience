@@ -63,13 +63,14 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (1 test)
+### Integration tests (2 tests)
 
 Location: `tests/integration.rs` with helpers in `tests/support/`.
 
-| Test                                 | What it proves                                                                                                                       |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `happy_path_streams_chunks_and_done` | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]` |
+| Test                                                | What it proves                                                                                                                       |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]` |
+| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`   |
 
 Test harness components:
 
@@ -226,7 +227,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - Kernel: strong coverage (44 unit + 6 property tests).
 - Registry: adequate coverage (6 tests).
 - Protocol: strong coverage (14 serde tests).
-- Integration: harness implemented, happy path passing (1 test). Fault tolerance, leak detection, and performance tests not yet written.
+- Integration: harness implemented, 2 tests passing (happy path + worker disconnect). Remaining fault tolerance, leak detection, and performance tests not yet written.
 
 ## Load into context when
 

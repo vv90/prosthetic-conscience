@@ -53,3 +53,47 @@ async fn happy_path_streams_chunks_and_done() {
     .await
     .expect("test timed out after 5 seconds");
 }
+
+#[tokio::test]
+async fn worker_disconnect_mid_stream_sends_error_and_done() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut client = SseClient::chat(gw.addr, json!({"model": "test"})).await;
+
+        // Worker receives job, sends one chunk, then disconnects.
+        let _job = worker.recv_job().await;
+        worker
+            .send_chunk(json!({"choices": [{"delta": {"content": "partial"}}]}))
+            .await;
+        worker.disconnect().await;
+
+        // Client should receive: the chunk, an error, and [DONE].
+        let events = client.collect_all().await;
+        assert!(
+            events.len() >= 2,
+            "expected at least error + done, got: {:?}",
+            events
+        );
+
+        // First event is the chunk that arrived before disconnect.
+        assert_eq!(
+            events[0],
+            SseEvent::Data(json!({"choices": [{"delta": {"content": "partial"}}]})),
+        );
+
+        // There should be an error event containing the disconnect message.
+        let has_error = events
+            .iter()
+            .any(|e| matches!(e, SseEvent::Data(v) if v.get("error").is_some()));
+        assert!(has_error, "expected an error event, got: {:?}", events);
+
+        // Last event should be [DONE].
+        assert_eq!(events.last().unwrap(), &SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
