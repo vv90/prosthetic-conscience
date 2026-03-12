@@ -51,9 +51,12 @@ pub async fn relay_job(
     _worker_id: &WorkerId,
     client_stream_id: &ClientStreamId,
     runtime: &RuntimeHandle,
+    stream_heartbeat_interval: Duration,
 ) -> RelayOutcome {
-    let heartbeat_period = Duration::from_secs(10);
-    let mut heartbeat_interval = interval_at(Instant::now() + heartbeat_period, heartbeat_period);
+    let mut heartbeat_interval = interval_at(
+        Instant::now() + stream_heartbeat_interval,
+        stream_heartbeat_interval,
+    );
 
     loop {
         let msg_result = tokio::select! {

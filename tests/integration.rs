@@ -2,6 +2,7 @@ mod support;
 
 use std::time::Duration;
 
+use prosthetic_conscience::gateway::runtime::GatewayConfig;
 use prosthetic_conscience::protocol::GatewayToWorker;
 use serde_json::json;
 
@@ -55,6 +56,45 @@ async fn happy_path_streams_chunks_and_done() {
 }
 
 #[tokio::test]
+async fn stream_timeout_sends_error_and_done() {
+    let config = GatewayConfig {
+        stream_ttl: 3,
+        tick_interval: Duration::from_millis(50),
+        ..GatewayConfig::default()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start_with_config(config).await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut client = SseClient::chat(
+            gw.addr,
+            json!({"model": "test", "messages": [{"role": "user", "content": "hello"}]}),
+        )
+        .await;
+
+        // Worker accepts the job but never responds.
+        let _job = worker.recv_job().await;
+
+        // Client should receive timeout error + done after ~150ms (3 ticks * 50ms).
+        let events = client.collect_all().await;
+
+        assert_eq!(events.len(), 2, "expected error + done, got: {:?}", events);
+
+        match &events[0] {
+            SseEvent::Data(v) => {
+                let msg = v["error"]["message"].as_str().unwrap();
+                assert_eq!(msg, "stream timed out");
+            }
+            other => panic!("expected error event, got: {:?}", other),
+        }
+        assert_eq!(events[1], SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
 async fn worker_disconnect_mid_stream_sends_error_and_done() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let gw = TestGateway::start().await;
@@ -93,6 +133,60 @@ async fn worker_disconnect_mid_stream_sends_error_and_done() {
 
         // Last event should be [DONE].
         assert_eq!(events.last().unwrap(), &SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn long_running_stream_survives_with_heartbeats() {
+    let config = GatewayConfig {
+        tick_interval: Duration::from_millis(50),
+        stream_ttl: 3, // would expire at ~150ms without heartbeats
+        stream_heartbeat_interval: Duration::from_millis(100), // resets deadline before expiry
+        ..GatewayConfig::default()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start_with_config(config).await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut client = SseClient::chat(gw.addr, json!({"model": "test"})).await;
+
+        let _job = worker.recv_job().await;
+
+        // Send first chunk immediately.
+        worker
+            .send_chunk(json!({"choices": [{"delta": {"content": "first"}}]}))
+            .await;
+
+        // Sleep well past the original TTL (150ms). Heartbeats keep the stream alive.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Stream is still alive — send second chunk and end.
+        worker
+            .send_chunk(json!({"choices": [{"delta": {"content": "second"}}]}))
+            .await;
+        worker.send_end().await;
+
+        let events = client.collect_all().await;
+
+        // Both chunks arrived, no timeout error.
+        assert_eq!(
+            events.len(),
+            3,
+            "expected 2 chunks + done, got: {:?}",
+            events
+        );
+        assert_eq!(
+            events[0],
+            SseEvent::Data(json!({"choices": [{"delta": {"content": "first"}}]})),
+        );
+        assert_eq!(
+            events[1],
+            SseEvent::Data(json!({"choices": [{"delta": {"content": "second"}}]})),
+        );
+        assert_eq!(events[2], SseEvent::Done);
     })
     .await
     .expect("test timed out after 5 seconds");

@@ -8,12 +8,13 @@ See `testing-coverage.md` for full methodology and current gaps.
 
 ### Phase A: prerequisites and first tests
 
-1. Make `stream_ttl` and `worker_ttl` configurable via a `GatewayConfig` struct passed to the kernel. Currently hardcoded in `GatewayState::new`. Required for fast, deterministic timeout tests.
+1. ~~Make TTLs and heartbeat intervals configurable via `GatewayConfig`~~ (done). `GatewayConfig` in `runtime.rs` bundles `tick_interval`, `worker_ttl`, `stream_ttl`, `stream_heartbeat_interval`, `worker_heartbeat_interval`. `RuntimeHandle` carries both heartbeat intervals. `relay_job` accepts `stream_heartbeat_interval` parameter (was hardcoded 10s). Worker WS handler uses `runtime.worker_heartbeat_interval` (was hardcoded 15s). All 74 tests pass.
 2. Add `#[cfg(test)]` state inspection on runtime (or kernel query command) to read active worker count, stream count, and registry entry counts. Required for leak detection assertions.
 3. ~~Build integration test harness~~ (done). `TestGateway`, `MockWorker`, `SseClient` in `tests/support/`. Each test gets isolated state on random port.
 4. ~~Happy path integration test~~ (done). `happy_path_streams_chunks_and_done` in `tests/integration.rs`. 2 chunks + end → 2 SSE data events + `[DONE]`.
 5. ~~Worker disconnect integration test~~ (done). `worker_disconnect_mid_stream_sends_error_and_done` in `tests/integration.rs`. Worker sends 1 chunk, closes WS → client gets chunk, error, `[DONE]`.
-6. Timeout integration test: worker accepts job but never responds → client gets "stream timed out" + done.
+6. ~~Timeout integration test~~ (done). `stream_timeout_sends_error_and_done` in `tests/integration.rs`. Gateway started with `stream_ttl: 3, tick_interval: 50ms`. Worker accepts job but never responds → client gets `{"error":{"message":"stream timed out"}}` + `[DONE]` after ~150ms.
+   6b. ~~Long-running stream heartbeat test~~ (done). `long_running_stream_survives_with_heartbeats` in `tests/integration.rs`. Gateway with `stream_ttl: 3, tick_interval: 50ms, stream_heartbeat_interval: 100ms`. Worker sends chunk, sleeps 250ms (past original TTL), sends second chunk + end → client gets both chunks + `[DONE]`, no timeout error.
 
 ### Phase B: core integration coverage
 

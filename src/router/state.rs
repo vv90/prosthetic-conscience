@@ -1,6 +1,4 @@
-use std::time::Duration;
-
-use crate::gateway::runtime::{GatewayRuntime, RuntimeHandle};
+use crate::gateway::runtime::{GatewayConfig, GatewayRuntime, RuntimeHandle};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,8 +13,12 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_config(GatewayConfig::default())
+    }
+
+    pub fn with_config(config: GatewayConfig) -> Self {
         Self {
-            runtime: GatewayRuntime::spawn(Duration::from_secs(1)),
+            runtime: GatewayRuntime::spawn(config),
         }
     }
 }

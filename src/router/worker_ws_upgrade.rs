@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -34,7 +32,7 @@ async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
 
     // Wait for a job (or detect early websocket close)
     let mut pending_job = job_rx;
-    let heartbeat_period = Duration::from_secs(15);
+    let heartbeat_period = state.runtime.worker_heartbeat_interval;
     let mut heartbeat_interval = interval_at(Instant::now() + heartbeat_period, heartbeat_period);
     loop {
         let job = tokio::select! {
@@ -86,6 +84,7 @@ async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
             &worker_id,
             &client_stream_id,
             &state.runtime,
+            state.runtime.stream_heartbeat_interval,
         )
         .await;
 

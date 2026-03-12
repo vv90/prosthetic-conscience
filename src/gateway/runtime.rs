@@ -12,6 +12,32 @@ use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
 use super::kernel::{Effect, Event, GatewayState, Transition, reduce};
 
+/// Configuration for the gateway runtime.
+pub struct GatewayConfig {
+    /// How often the runtime sends `Tick` events to the kernel.
+    pub tick_interval: Duration,
+    /// Ticks until an idle worker expires from the kernel.
+    pub worker_ttl: u64,
+    /// Ticks until an active stream expires (timeout).
+    pub stream_ttl: u64,
+    /// How often the relay sends `StreamHeartbeat` commands during active streaming.
+    pub stream_heartbeat_interval: Duration,
+    /// How often the worker WS handler sends `WorkerHeartbeat` commands while idle.
+    pub worker_heartbeat_interval: Duration,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            tick_interval: Duration::from_secs(1),
+            worker_ttl: 60,
+            stream_ttl: 30,
+            stream_heartbeat_interval: Duration::from_secs(10),
+            worker_heartbeat_interval: Duration::from_secs(15),
+        }
+    }
+}
+
 type KernelEvent = Event<WorkerId, ClientStreamId>;
 type KernelEffect = Effect<WorkerId, ClientStreamId>;
 type ResolvedSId = (ClientStreamId, StreamHandle);
@@ -55,6 +81,10 @@ enum RuntimeMessage {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     msg_tx: mpsc::Sender<RuntimeMessage>,
+    /// Relay uses this to schedule stream heartbeats during active streaming.
+    pub stream_heartbeat_interval: Duration,
+    /// Worker WS handler uses this to schedule idle heartbeats between jobs.
+    pub worker_heartbeat_interval: Duration,
 }
 
 impl RuntimeHandle {
@@ -350,15 +380,17 @@ impl GatewayRuntime {
         (updated_runtime, resolved_effects)
     }
 
-    pub fn spawn(tick_interval: Duration) -> RuntimeHandle {
+    pub fn spawn(config: GatewayConfig) -> RuntimeHandle {
         let mut runtime = GatewayRuntime {
-            state: GatewayState::default(),
+            state: GatewayState::new(config.worker_ttl, config.stream_ttl),
             registry: ChannelRegistry::new(),
         };
 
         let (msg_tx, mut msg_rx) = mpsc::channel::<RuntimeMessage>(256);
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
+            stream_heartbeat_interval: config.stream_heartbeat_interval,
+            worker_heartbeat_interval: config.worker_heartbeat_interval,
         };
         let effect_tx = msg_tx.clone();
         let effect_handle = handle.clone();
@@ -366,7 +398,7 @@ impl GatewayRuntime {
         // Tick task: sends Tick events on a timer, skipping when channel is congested.
         let tick_tx = msg_tx.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(tick_interval);
+            let mut ticker = tokio::time::interval(config.tick_interval);
             loop {
                 ticker.tick().await;
                 match tick_tx.try_send(RuntimeMessage::Event(Event::Tick)) {

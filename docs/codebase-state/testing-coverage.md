@@ -63,14 +63,16 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (2 tests)
+### Integration tests (4 tests)
 
 Location: `tests/integration.rs` with helpers in `tests/support/`.
 
-| Test                                                | What it proves                                                                                                                       |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]` |
-| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`   |
+| Test                                                | What it proves                                                                                                                                                                                        |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                  |
+| `stream_timeout_sends_error_and_done`               | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                             |
+| `long_running_stream_survives_with_heartbeats`      | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work |
+| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                    |
 
 Test harness components:
 
@@ -218,7 +220,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 
 ## Known Issues
 
-- TTLs are not yet configurable, blocking fast timeout tests.
+- ~~TTLs are not yet configurable~~ — resolved: `GatewayConfig` struct threads `tick_interval`, `worker_ttl`, `stream_ttl` from `TestGateway::start_with_config()` to kernel.
 - No state inspection API exists for leak detection assertions.
 - `worker-lifecycle.md` lists 15 transition scenarios (T1–T15), all marked "Tested? No".
 
@@ -227,7 +229,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - Kernel: strong coverage (44 unit + 6 property tests).
 - Registry: adequate coverage (6 tests).
 - Protocol: strong coverage (14 serde tests).
-- Integration: harness implemented, 2 tests passing (happy path + worker disconnect). Remaining fault tolerance, leak detection, and performance tests not yet written.
+- Integration: harness implemented, 4 tests passing (happy path, stream timeout, long-running stream heartbeat, worker disconnect). Remaining fault tolerance, leak detection, and performance tests not yet written.
 
 ## Load into context when
 
