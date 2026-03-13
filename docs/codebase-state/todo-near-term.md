@@ -14,8 +14,8 @@ Goal: deploy the gateway on a public host and have a worker + client connect ove
 
 ### Infrastructure
 
-49. Deploy gateway binary to a VPS (any small instance — gateway is CPU-light).
-50. TLS termination: put caddy or nginx in front of the gateway for automatic Let's Encrypt. Caddy is simplest — reverse proxy to `127.0.0.1:3000` with automatic HTTPS.
+49. ~~**CI/CD pipeline**~~ (done): GitHub Actions CI (fmt/clippy/test on push/PR) + release workflow (Docker image to GHCR on push to main). See `.github/workflows/ci.yml` and `release.yml`.
+50. ~~**Docker + Caddy setup**~~ (done): Multi-stage `Dockerfile` (gateway + worker targets), `docker-compose.yml` with Caddy for automatic TLS, `Caddyfile` with env-var domain. See `docs/deployment.md` for full guide.
 51. Worker runs wherever the GPU is (home machine, cloud GPU). Connects outbound to `wss://gateway-domain/ws/worker`. No inbound ports needed.
 52. Client connects to `https://gateway-domain/v1/chat/completions` from anywhere.
 
