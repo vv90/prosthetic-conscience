@@ -8,13 +8,9 @@ Goal: deploy the gateway on a public host and have a worker + client connect ove
 
 ### Prerequisites (code changes)
 
-46. **Configurable bind address**: gateway currently hardcodes `127.0.0.1:3000`. Make host/port configurable via CLI args or env vars (clap already in deps).
-47. **WSS support in worker**: `tokio-tungstenite` supports `wss://` URLs via its TLS feature. Verify `pc-worker` works with `--gateway-url wss://...`. May need `tokio-tungstenite` `native-tls` or `rustls` feature.
-48. **Basic auth / shared secret**: minimum access control for both endpoints:
-    - Worker WS upgrade: reject connections without a valid `Authorization: Bearer <token>` header.
-    - Client HTTP: reject requests without a valid `Authorization: Bearer <token>` header.
-    - Token configured via env var (`PC_AUTH_TOKEN`) on gateway, passed as `--auth-token` on worker.
-    - This is a stopgap — proper auth (item 43) comes later.
+46. ~~**Configurable bind address**~~ (done): `--host` and `--port` CLI args on gateway binary via clap. Defaults to `127.0.0.1:3000`.
+47. ~~**WSS support in worker**~~ (done): enabled `rustls-tls-webpki-roots` feature on `tokio-tungstenite`. Worker can now connect via `wss://` URLs. Consistent with `reqwest`'s `rustls-tls` — pure Rust, no system OpenSSL dependency.
+48. ~~**Basic auth / shared secret**~~ (done): axum middleware (`src/router/auth.rs`) checks `Authorization: Bearer <token>` on all routes. Gateway reads `PC_AUTH_TOKEN` env var — if set, auth required; if unset, auth disabled (open access). Worker accepts `--auth-token` CLI arg, sends header on WS connect. Tests unaffected (auth disabled by default in `TestGateway`).
 
 ### Infrastructure
 

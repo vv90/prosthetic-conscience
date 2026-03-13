@@ -15,6 +15,10 @@ struct Args {
     /// Inference server base URL (llama-server or any OpenAI-compatible endpoint).
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     inference_url: String,
+
+    /// Auth token for gateway connection.
+    #[arg(long)]
+    auth_token: Option<String>,
 }
 
 #[tokio::main]
@@ -31,7 +35,7 @@ async fn main() {
     );
 
     let inference = InferenceClient::new(args.inference_url);
-    let client = WorkerClient::new(args.gateway_url, inference);
+    let client = WorkerClient::new(args.gateway_url, inference, args.auth_token);
 
     client.run().await;
 }

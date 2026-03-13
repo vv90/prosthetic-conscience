@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info, warn};
 
 use crate::protocol::{GatewayToWorker, WorkerMessage};
@@ -14,14 +15,40 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub struct WorkerClient {
     gateway_url: String,
     inference: InferenceClient,
+    auth_token: Option<String>,
 }
 
 impl WorkerClient {
-    pub fn new(gateway_url: String, inference: InferenceClient) -> Self {
+    pub fn new(
+        gateway_url: String,
+        inference: InferenceClient,
+        auth_token: Option<String>,
+    ) -> Self {
         Self {
             gateway_url,
             inference,
+            auth_token,
         }
+    }
+
+    /// Build a WebSocket connection request, optionally with an auth header.
+    fn build_request(&self) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
+        let mut request = self
+            .gateway_url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| format!("invalid gateway URL: {e}"))?;
+
+        if let Some(token) = &self.auth_token {
+            request.headers_mut().insert(
+                "Authorization",
+                format!("Bearer {token}")
+                    .parse()
+                    .map_err(|e| format!("invalid auth token: {e}"))?,
+            );
+        }
+
+        Ok(request)
     }
 
     /// Run the worker loop forever: connect → process jobs → reconnect on failure.
@@ -31,7 +58,17 @@ impl WorkerClient {
         loop {
             info!(url = %self.gateway_url, "connecting to gateway");
 
-            match connect_async(&self.gateway_url).await {
+            let request = match self.build_request() {
+                Ok(r) => r,
+                Err(e) => {
+                    error!(error = %e, "failed to build connection request");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(BACKOFF_MAX);
+                    continue;
+                }
+            };
+
+            match connect_async(request).await {
                 Ok((ws, _response)) => {
                     info!("connected to gateway");
                     backoff = BACKOFF_INITIAL;
