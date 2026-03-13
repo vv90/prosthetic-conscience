@@ -1,8 +1,38 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-12
+Snapshot date: 2026-03-13
 
-## Integration testing (next)
+## Real-world deployment test (next)
+
+Goal: deploy the gateway on a public host and have a worker + client connect over the internet. This validates the reverse-connection architecture end-to-end.
+
+### Prerequisites (code changes)
+
+46. **Configurable bind address**: gateway currently hardcodes `127.0.0.1:3000`. Make host/port configurable via CLI args or env vars (clap already in deps).
+47. **WSS support in worker**: `tokio-tungstenite` supports `wss://` URLs via its TLS feature. Verify `pc-worker` works with `--gateway-url wss://...`. May need `tokio-tungstenite` `native-tls` or `rustls` feature.
+48. **Basic auth / shared secret**: minimum access control for both endpoints:
+    - Worker WS upgrade: reject connections without a valid `Authorization: Bearer <token>` header.
+    - Client HTTP: reject requests without a valid `Authorization: Bearer <token>` header.
+    - Token configured via env var (`PC_AUTH_TOKEN`) on gateway, passed as `--auth-token` on worker.
+    - This is a stopgap — proper auth (item 43) comes later.
+
+### Infrastructure
+
+49. Deploy gateway binary to a VPS (any small instance — gateway is CPU-light).
+50. TLS termination: put caddy or nginx in front of the gateway for automatic Let's Encrypt. Caddy is simplest — reverse proxy to `127.0.0.1:3000` with automatic HTTPS.
+51. Worker runs wherever the GPU is (home machine, cloud GPU). Connects outbound to `wss://gateway-domain/ws/worker`. No inbound ports needed.
+52. Client connects to `https://gateway-domain/v1/chat/completions` from anywhere.
+
+### Validation checklist
+
+53. Worker connects over WSS, shows "connected to gateway" in logs.
+54. Client `curl -N https://gateway-domain/v1/chat/completions ...` streams tokens from llama.cpp through the gateway.
+55. Kill the worker mid-stream → client gets error + done.
+56. Kill llama-server → worker sends error to gateway → client gets error.
+57. Kill the gateway → worker reconnects with backoff when gateway comes back.
+58. Unauthorized requests (wrong/missing token) get rejected.
+
+## Integration testing
 
 See `testing-coverage.md` for full methodology and current gaps.
 
@@ -71,13 +101,13 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 35. Worker agent decrypts `Payload::Encrypted` or reads `Payload::Plaintext`.
 36. Client sidecar encrypts to `Payload::Encrypted` or passes `Payload::Plaintext`.
 
-### Step 4: worker agent crate
+### Step 4: worker agent ~~crate~~ (initial implementation done as second binary)
 
-37. Create `crates/worker-agent/` with `InferenceBackend` trait:
-    - `async fn stream_completion(&self, payload) -> impl Stream<Item = Result<Chunk, Error>>`
-    - Adapters: `LlamaCppBackend`, `VllmBackend`, `EchoBackend` (testing)
-38. Implement gateway WS client: connect, reconnect, heartbeat, job receive, chunk streaming.
-39. Wire backend output → gateway protocol messages.
+37. ~~Create worker agent with inference backend~~: implemented as `src/worker/` module + `src/worker_agent.rs` binary (`pc-worker`). `InferenceClient` proxies to llama-server (or any OpenAI-compatible endpoint) via HTTP SSE streaming. No trait abstraction yet — single concrete backend.
+38. ~~Implement gateway WS client~~: `WorkerClient` in `src/worker/client.rs` — connect, reconnect with exponential backoff (1s→30s cap), job receive, chunk streaming.
+39. ~~Wire backend output → gateway protocol messages~~: `process_job` reads `InferenceClient::stream_completion()` stream, sends `WorkerMessage::Chunk`/`End`/`Error` over WebSocket.
+
+    **Not yet implemented**: `InferenceBackend` trait, `VllmBackend`, `EchoBackend`, auth/handshake, token counting, cancellation, worker binary integration tests.
 
 ### Step 5: client sidecar crate
 
@@ -95,7 +125,7 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 
 ## Other tasks
 
-43. Add worker handshake/version/capability validation.
+43. Add worker handshake/version/capability validation (supersedes stopgap auth in item 48).
 44. Remove `GatewayAdapter` once runtime coverage is confirmed complete.
 45. Keep behavior-state files synchronized as behavior transitions from placeholder -> partial -> implemented.
 

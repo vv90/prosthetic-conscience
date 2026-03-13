@@ -38,6 +38,8 @@
             rust-analyzer # LSP for editors
             cargo-edit # cargo add/rm/upgrade
             cargo-watch # auto rebuild/test
+
+            llama-cpp # for testing worker backends
           ];
 
           # Useful env vars for crates using openssl-sys / pkg-config:
