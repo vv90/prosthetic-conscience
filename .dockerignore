@@ -7,3 +7,5 @@ proptest-regressions/
 flake.*
 .gitignore
 .claude/
+.codex/
+.direnv/

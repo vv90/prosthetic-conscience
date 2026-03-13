@@ -41,6 +41,7 @@ cargo run --bin prosthetic-conscience
 ```
 
 Options:
+
 ```
 --host <HOST>  Host address to bind to [default: 127.0.0.1]
 --port <PORT>  Port to listen on [default: 3000]
@@ -53,15 +54,18 @@ cargo run --bin pc-worker
 ```
 
 Options:
+
 ```
 --gateway-url <URL>      Gateway WebSocket URL [default: ws://127.0.0.1:3000/ws/worker]
 --inference-url <URL>    Inference server base URL [default: http://127.0.0.1:8080]
+--auth-token <TOKEN>     Bearer token for gateway auth (must match PC_AUTH_TOKEN)
 ```
 
 ### 4. Send a request
 
 ```
 curl -N http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer <your-token>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "test",
@@ -70,6 +74,8 @@ curl -N http://127.0.0.1:3000/v1/chat/completions \
   }'
 ```
 
+(The `Authorization` header is only required when `PC_AUTH_TOKEN` is set on the gateway.)
+
 You should see SSE chunks streaming back:
 
 ```
@@ -77,6 +83,21 @@ data: {"choices":[{"delta":{"content":"Hi"},...}],...}
 data: {"choices":[{"delta":{"content":" there"},...}],...}
 data: [DONE]
 ```
+
+### 5. Or use Open WebUI
+
+Any OpenAI-compatible client works. For a full chat interface, run [Open WebUI](https://github.com/open-webui/open-webui):
+
+```
+docker run -d \
+  --name open-webui \
+  -p 8080:8080 \
+  -e OPENAI_API_BASE_URL=https://your-gateway-domain/v1 \
+  -e OPENAI_API_KEY=<your-auth-token> \
+  ghcr.io/open-webui/open-webui:main
+```
+
+Then open `http://localhost:8080`.
 
 ## Testing
 
