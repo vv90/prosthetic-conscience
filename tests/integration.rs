@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use prosthetic_conscience::client::gateway_client::GatewayClient;
 use prosthetic_conscience::client::response_assembler;
+use prosthetic_conscience::client::tool_loop;
+use prosthetic_conscience::client::tools::ToolRegistry;
+use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
 use prosthetic_conscience::gateway::runtime::GatewayConfig;
 use prosthetic_conscience::protocol::GatewayToWorker;
 use serde_json::json;
@@ -52,6 +55,138 @@ async fn happy_path_streams_chunks_and_done() {
             SseEvent::Data(json!({"choices": [{"delta": {"content": " world"}}]})),
         );
         assert_eq!(events[2], SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn tool_loop_executes_tool_and_re_requests() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = GatewayClient::new(format!("http://{}", gw.addr), None);
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(GetCurrentTime));
+
+        let mut messages = vec![json!({"role": "user", "content": "what time is it?"})];
+
+        // Run the tool loop in a background task.
+        let loop_handle = tokio::spawn(async move {
+            tool_loop::run(&client, &registry, &mut messages, "test", 10)
+                .await
+                .map(|msg| (msg, messages))
+        });
+
+        // Round 1: worker receives the request and responds with a tool call.
+        let job1 = worker.recv_job().await;
+        match &job1 {
+            GatewayToWorker::Job { payload, .. } => {
+                // Verify tools are included in the payload.
+                assert!(
+                    payload.get("tools").is_some(),
+                    "payload should include tools"
+                );
+                let tools = payload["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0]["function"]["name"], "get_current_time");
+            }
+        }
+
+        // Worker sends a response with a tool call.
+        worker
+            .send_chunk(json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_current_time",
+                                "arguments": "{}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }))
+            .await;
+        worker.send_end().await;
+
+        // The tool loop should execute get_current_time and re-request.
+        // Worker re-registers after completing the first job.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Round 2: worker receives the follow-up request with tool result.
+        let job2 = worker.recv_job().await;
+        match &job2 {
+            GatewayToWorker::Job { payload, .. } => {
+                let msgs = payload["messages"].as_array().unwrap();
+                // Should have: user, assistant (with tool_calls), tool result
+                assert!(
+                    msgs.len() >= 3,
+                    "expected at least 3 messages, got {}: {:?}",
+                    msgs.len(),
+                    msgs
+                );
+
+                // Last message should be the tool result.
+                let tool_msg = msgs.last().unwrap();
+                assert_eq!(tool_msg["role"], "tool");
+                assert_eq!(tool_msg["tool_call_id"], "call_abc123");
+                // Content should be an ISO 8601 UTC timestamp (e.g. "2026-03-16T11:02:08Z").
+                let content = tool_msg["content"].as_str().unwrap();
+                assert!(
+                    content.ends_with('Z') && content.contains('T'),
+                    "tool result should be an ISO 8601 UTC timestamp, got: {content}"
+                );
+            }
+        }
+
+        // Worker sends a final text response.
+        worker
+            .send_chunk(json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": "The current time is 12:00 UTC."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .await;
+        worker.send_end().await;
+
+        // The tool loop should return the final message.
+        let (msg, messages) = loop_handle
+            .await
+            .expect("tool loop task panicked")
+            .expect("tool loop failed");
+
+        assert_eq!(
+            msg.content,
+            Some("The current time is 12:00 UTC.".to_owned())
+        );
+        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert!(msg.tool_calls.is_empty());
+
+        // Conversation history should have 4 messages:
+        // user, assistant (tool_calls), tool result, assistant (final)
+        assert_eq!(
+            messages.len(),
+            4,
+            "expected 4 messages in history, got {}: {:?}",
+            messages.len(),
+            messages
+        );
     })
     .await
     .expect("test timed out after 5 seconds");

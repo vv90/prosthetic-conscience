@@ -10,7 +10,7 @@ Client (HTTP)  -->  Gateway (public)  <--  Worker (WebSocket)  -->  llama-server
 
 - **Gateway** accepts OpenAI-compatible HTTP requests and streams SSE responses back to clients. Dispatches jobs to workers over persistent WebSocket connections. Pure kernel architecture with tick-based timeouts and heartbeats.
 - **Worker** (`pc-worker`) connects outbound to the gateway, receives jobs, proxies them to a local llama-server (or any OpenAI-compatible inference endpoint), and streams chunks back.
-- **Client** (`pc-client`) interactive REPL that sends chat completion requests, assembles streamed responses, and maintains conversation history. Also usable via any OpenAI-compatible client (curl, Open WebUI, etc.).
+- **Client** (`pc-client`) interactive REPL that sends chat completion requests, assembles streamed responses, maintains conversation history, and executes tool calls locally. Supports a tool use loop with configurable tools including shell execution in Docker containers. Also usable via any OpenAI-compatible client (curl, Open WebUI, etc.).
 
 The gateway never persists prompt or completion content.
 
@@ -77,13 +77,30 @@ cargo run --bin pc-client
 Options:
 
 ```
---gateway-url <URL>    Gateway base URL [default: http://127.0.0.1:3000]
---auth-token <TOKEN>   Bearer token for gateway auth (must match PC_AUTH_TOKEN)
---model <MODEL>        Model name to include in requests [default: default]
---system <PROMPT>      Optional system prompt
+--gateway-url <URL>      Gateway base URL [default: http://127.0.0.1:3000]
+--auth-token <TOKEN>     Bearer token for gateway auth (must match PC_AUTH_TOKEN)
+--model <MODEL>          Model name to include in requests [default: default]
+--system <PROMPT>        Optional system prompt
+--max-rounds <N>         Maximum tool call rounds per user message [default: 10]
+--container <NAME>       Docker container name for shell tool (enables execute_shell)
+--shell-timeout <SECS>   Timeout in seconds for shell commands [default: 30]
+--max-output <BYTES>     Maximum output bytes per shell command [default: 51200]
 ```
 
-Type a message at the `> ` prompt and the model's response will be printed. Conversation history is maintained across turns.
+Type a message at the `> ` prompt and the model's response will be printed. Conversation history is maintained across turns. The `get_current_time` tool is always available. When `--container` is provided, the `execute_shell` tool lets the model run commands inside the specified Docker container.
+
+#### Using the shell tool with Docker
+
+```bash
+# Start a sandbox container
+docker run -d --name my-sandbox -v /path/to/project:/workspace ubuntu:24.04 sleep infinity
+
+# Start the client with shell tool enabled
+cargo run --bin pc-client -- --container my-sandbox
+
+> list the files in /workspace
+# Model calls execute_shell, tool runs "ls /workspace" in container, model reports results
+```
 
 ### 5. Or send a raw request
 
@@ -129,7 +146,7 @@ Then open `http://localhost:8080`.
 cargo test --all-targets --all-features
 ```
 
-96 tests: 85 unit (kernel + protocol + registry + response assembler), 11 integration (full pipeline through real HTTP/WebSocket).
+106 tests (102 run + 4 ignored): 94 unit (kernel + protocol + registry + response assembler + tool trait + tool implementations), 12 integration (full pipeline through real HTTP/WebSocket including tool loop round-trip). 4 Docker-dependent shell tool tests are `#[ignore]` by default.
 
 ## Project structure
 
@@ -155,6 +172,11 @@ src/
   client/
     gateway_client.rs  HTTP + SSE client for gateway communication
     response_assembler.rs  Assembles streamed delta chunks into complete messages
+    tool_loop.rs       Request-execute-request cycle for tool calling
+    tools/
+      mod.rs           Tool trait, ToolRegistry, ToolError
+      current_time.rs  Trivial tool (UTC timestamp) for testing the loop
+      shell.rs         Docker container shell execution tool
 tests/
   integration.rs       End-to-end tests
   support/             Test harness (TestGateway, MockWorker, SseClient)

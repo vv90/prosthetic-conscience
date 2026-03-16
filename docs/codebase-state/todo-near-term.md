@@ -111,7 +111,15 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 41. ~~Implement client binary~~: `src/client_agent.rs` (`pc-client`). Interactive REPL: reads stdin, sends to gateway, assembles streamed response, prints content, maintains conversation history. CLI args: `--gateway-url`, `--auth-token`, `--model`, `--system`.
 42. ~~Integration tests~~: `gateway_client_collects_chunks_and_assembles` and `gateway_client_returns_error_on_no_workers` in `tests/integration.rs`.
 
-    **Not yet implemented**: Tool use loop (detect `finish_reason: "tool_calls"`, execute tools locally, re-request). Tool trait and registry. Code execution tool. MCP support.
+    **Not yet implemented**: MCP support. Additional tools beyond shell and current_time.
+
+### Step 5b: tool use loop and tools (done)
+
+43b. ~~Tool trait + registry~~: `Tool` trait (sync `execute`), `ToolRegistry` with register/get/definitions/execute, `ToolError` enum. In `src/client/tools/mod.rs`.
+43c. ~~Tool loop~~: `tool_loop::run()` in `src/client/tool_loop.rs`. Sends chat requests with tool definitions, detects `tool_calls` in responses, executes tools locally, appends results to messages, re-requests until final answer or max rounds exceeded.
+43d. ~~`get_current_time` tool~~: trivial tool returning UTC timestamp. Used for testing tool loop mechanics.
+43e. ~~`execute_shell` tool~~: runs commands in a Docker container via `docker exec`. Configurable timeout (default 30s) and output truncation (default 50KB). Enabled by `--container` CLI arg on `pc-client`.
+43f. ~~Integration test~~: `tool_loop_executes_tool_and_re_requests` — two-round tool loop with MockWorker scripted to return tool_calls then verify tool result in follow-up request.
 
 ### What does NOT need to change
 
@@ -129,6 +137,7 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 
 ## Recently completed
 
+- **Tool use loop and tools implemented**: `Tool` trait (sync), `ToolRegistry`, `ToolError` in `src/client/tools/mod.rs`. `tool_loop::run()` implements the request-execute-request cycle. Two built-in tools: `get_current_time` (trivial, always registered) and `execute_shell` (Docker container shell, registered via `--container` CLI arg). Shell tool supports configurable timeout and output truncation. 17 tool tests (13 run + 4 Docker-gated `#[ignore]`), 1 integration test for tool loop round-trip. 106 total tests (102 run + 4 ignored).
 - **Client binary (`pc-client`) implemented**: Interactive REPL with `GatewayClient` (HTTP+SSE, typed errors, no panics) and `response_assembler` (pure domain logic for merging OpenAI streaming deltas into `CompletedMessage`). Handles both OpenAI fragmented tool call deltas and llama-server single-chunk responses. 15 assembler tests (11 unit + 4 property), 2 integration tests. Third binary added to `Cargo.toml`.
 - **Chat completions handler implemented**: `POST /v1/chat/completions` with `stream=true` registers stream, submits `HttpChatRequested` to kernel, returns SSE response. `StreamFrame` mapped to SSE events: `Chunk` → `data: {json}`, `Done` → `data: [DONE]`, `Error` → `data: {"error": {...}}`. Added `RuntimeCommand::HttpChatRequested` + handler + convenience method. `stream=false` returns 400. Runtime unavailable returns 503.
 - **Relay wired into worker ws handler**: Replaced `consume_until_terminal` stub with `relay_job` call. `RelayOutcome` mapped to kernel events: `WorkerEnd` → `assignment_cleared`, `WorkerError`/`WorkerDisconnected` → `assignment_failed`, `ClientGone` → no event (timeout handles cleanup). `WorkerDisconnected` exits the connection loop; other outcomes re-register. Stream heartbeats now active during job relay.

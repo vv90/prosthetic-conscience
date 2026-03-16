@@ -22,9 +22,13 @@ Snapshot date: 2026-03-16
 ### Client (`pc-client`)
 
 - Interactive REPL that sends chat completion requests to the gateway.
-- CLI args: `--gateway-url`, `--auth-token`, `--model`, `--system`.
-- Reads user input from stdin, sends to gateway, assembles streamed SSE response, prints content.
+- CLI args: `--gateway-url`, `--auth-token`, `--model`, `--system`, `--max-rounds`, `--container`, `--shell-timeout`, `--max-output`.
+- Reads user input from stdin, sends to gateway via tool use loop, assembles streamed SSE response, prints content.
 - Maintains conversation history across turns.
+- Tool use loop: detects `tool_calls` in model responses, executes tools locally, appends results, re-requests until final answer or max rounds exceeded.
+- Built-in tools:
+  - `get_current_time` — always registered, returns UTC timestamp.
+  - `execute_shell` — registered when `--container` is provided, runs shell commands in a Docker container via `docker exec`. Supports configurable timeout and output truncation.
 
 ## Status
 
@@ -45,3 +49,7 @@ Snapshot date: 2026-03-16
 - `src/router/state.rs`
 - `src/client/gateway_client.rs`
 - `src/client/response_assembler.rs`
+- `src/client/tool_loop.rs`
+- `src/client/tools/mod.rs`
+- `src/client/tools/current_time.rs`
+- `src/client/tools/shell.rs`

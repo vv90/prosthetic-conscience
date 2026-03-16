@@ -6,7 +6,10 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use prosthetic_conscience::client::gateway_client::GatewayClient;
-use prosthetic_conscience::client::response_assembler;
+use prosthetic_conscience::client::tool_loop;
+use prosthetic_conscience::client::tools::ToolRegistry;
+use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
+use prosthetic_conscience::client::tools::shell::ShellTool;
 
 #[derive(Parser)]
 #[command(name = "pc-client", about = "Prosthetic Conscience client")]
@@ -26,6 +29,22 @@ struct Args {
     /// Optional system prompt.
     #[arg(long)]
     system: Option<String>,
+
+    /// Maximum tool call rounds per user message.
+    #[arg(long, default_value = "10")]
+    max_rounds: usize,
+
+    /// Docker container name for shell tool. If omitted, shell tool is not registered.
+    #[arg(long)]
+    container: Option<String>,
+
+    /// Timeout in seconds for shell commands.
+    #[arg(long, default_value = "30")]
+    shell_timeout: u64,
+
+    /// Maximum output bytes per shell command.
+    #[arg(long, default_value = "51200")]
+    max_output: usize,
 }
 
 #[tokio::main]
@@ -42,6 +61,20 @@ async fn main() {
     );
 
     let client = GatewayClient::new(args.gateway_url, args.auth_token);
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(GetCurrentTime));
+
+    if let Some(container) = &args.container {
+        let timeout = std::time::Duration::from_secs(args.shell_timeout);
+        registry.register(Box::new(ShellTool::new(
+            container.clone(),
+            timeout,
+            args.max_output,
+        )));
+        info!(container = %container, "shell tool registered");
+    }
+
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     if let Some(system) = &args.system {
@@ -74,30 +107,24 @@ async fn main() {
 
         messages.push(json!({"role": "user", "content": line}));
 
-        let payload = json!({
-            "model": args.model,
-            "messages": messages,
-        });
-
-        match client.chat(payload).await {
-            Ok(chunks) => {
-                match response_assembler::assemble(&chunks) {
-                    Ok(msg) => {
-                        if let Some(content) = &msg.content {
-                            println!("{content}");
-                        }
-                        // Append assistant message to conversation history.
-                        messages.push(json!({"role": "assistant", "content": msg.content.unwrap_or_default()}));
-                    }
-                    Err(e) => {
-                        error!(error = %e, "failed to assemble response");
-                        // Remove the failed user message so conversation stays consistent.
-                        messages.pop();
-                    }
+        match tool_loop::run(
+            &client,
+            &registry,
+            &mut messages,
+            &args.model,
+            args.max_rounds,
+        )
+        .await
+        {
+            Ok(msg) => {
+                if let Some(content) = &msg.content {
+                    println!("{content}");
                 }
+                // The tool loop already appends assistant messages to history.
             }
             Err(e) => {
-                error!(error = %e, "request failed");
+                error!(error = %e, "tool loop failed");
+                // Remove the failed user message so conversation stays consistent.
                 messages.pop();
             }
         }
