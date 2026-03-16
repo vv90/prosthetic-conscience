@@ -63,10 +63,6 @@ fn tool_result_message(tool_call_id: &str, content: &str) -> Value {
     })
 }
 
-cargo run --bin pc-client -- \
-  --container pc-test-sandbox \
-  --system "You have access to tools. Use them directly — do not ask the user to run commands. When you need to create files, run code, or check results, call execute_shell yourself. Never print code for the user to run manually."
-
 /// Run the tool use loop: send a chat request, detect tool calls, execute
 /// tools, re-request, repeat until a final answer or max rounds exceeded.
 ///
