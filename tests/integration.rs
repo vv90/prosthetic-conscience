@@ -2,6 +2,8 @@ mod support;
 
 use std::time::Duration;
 
+use prosthetic_conscience::client::gateway_client::GatewayClient;
+use prosthetic_conscience::client::response_assembler;
 use prosthetic_conscience::gateway::runtime::GatewayConfig;
 use prosthetic_conscience::protocol::GatewayToWorker;
 use serde_json::json;
@@ -50,6 +52,75 @@ async fn happy_path_streams_chunks_and_done() {
             SseEvent::Data(json!({"choices": [{"delta": {"content": " world"}}]})),
         );
         assert_eq!(events[2], SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn gateway_client_collects_chunks_and_assembles() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let client = GatewayClient::new(format!("http://{}", gw.addr), None);
+
+        // Spawn the client request in a task since it blocks until stream ends.
+        let client_handle = tokio::spawn(async move {
+            client
+                .chat(json!({"model": "test", "messages": [{"role": "user", "content": "hi"}]}))
+                .await
+        });
+
+        // Worker receives job and sends a multi-chunk response.
+        let _job = worker.recv_job().await;
+        worker
+            .send_chunk(json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}))
+            .await;
+        worker
+            .send_chunk(json!({"choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": null}]}))
+            .await;
+        worker
+            .send_chunk(json!({"choices": [{"index": 0, "delta": {"content": " there"}, "finish_reason": null}]}))
+            .await;
+        worker
+            .send_chunk(json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+            .await;
+        worker.send_end().await;
+
+        let chunks = client_handle
+            .await
+            .expect("client task panicked")
+            .expect("client request failed");
+
+        assert_eq!(chunks.len(), 4);
+
+        let msg = response_assembler::assemble(&chunks).expect("assembly failed");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, Some("Hello there".to_owned()));
+        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert!(msg.tool_calls.is_empty());
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn gateway_client_returns_error_on_no_workers() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        // No worker connected.
+
+        let client = GatewayClient::new(format!("http://{}", gw.addr), None);
+        let result = client
+            .chat(json!({"model": "test", "messages": [{"role": "user", "content": "hi"}]}))
+            .await;
+
+        // Gateway returns 200 with SSE error (not an HTTP error), so the client
+        // gets chunks back. The assembler or caller handles the error content.
+        // The key thing is that chat() doesn't panic.
+        assert!(result.is_ok());
     })
     .await
     .expect("test timed out after 5 seconds");

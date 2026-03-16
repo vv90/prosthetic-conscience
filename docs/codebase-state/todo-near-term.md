@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-13
+Snapshot date: 2026-03-16
 
 ## Real-world deployment test (next)
 
@@ -105,11 +105,13 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 
     **Not yet implemented**: `InferenceBackend` trait, `VllmBackend`, `EchoBackend`, auth/handshake, token counting, cancellation, worker binary integration tests.
 
-### Step 5: client sidecar crate
+### Step 5: client binary (initial implementation done)
 
-40. Create `crates/client-sidecar/` with local OpenAI-compatible HTTP endpoint.
-41. Implement gateway HTTP/SSE client: forward requests, stream responses.
-42. Add `envelope` module for Phase 2 encryption (encrypt request payload, decrypt streaming chunks).
+40. ~~Create client module~~: `src/client/` with `gateway_client.rs` (HTTP+SSE client with typed errors) and `response_assembler.rs` (pure domain logic for assembling streamed delta chunks into complete messages). Handles both OpenAI fragmented deltas and llama-server single-chunk tool calls.
+41. ~~Implement client binary~~: `src/client_agent.rs` (`pc-client`). Interactive REPL: reads stdin, sends to gateway, assembles streamed response, prints content, maintains conversation history. CLI args: `--gateway-url`, `--auth-token`, `--model`, `--system`.
+42. ~~Integration tests~~: `gateway_client_collects_chunks_and_assembles` and `gateway_client_returns_error_on_no_workers` in `tests/integration.rs`.
+
+    **Not yet implemented**: Tool use loop (detect `finish_reason: "tool_calls"`, execute tools locally, re-request). Tool trait and registry. Code execution tool. MCP support.
 
 ### What does NOT need to change
 
@@ -127,6 +129,7 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 
 ## Recently completed
 
+- **Client binary (`pc-client`) implemented**: Interactive REPL with `GatewayClient` (HTTP+SSE, typed errors, no panics) and `response_assembler` (pure domain logic for merging OpenAI streaming deltas into `CompletedMessage`). Handles both OpenAI fragmented tool call deltas and llama-server single-chunk responses. 15 assembler tests (11 unit + 4 property), 2 integration tests. Third binary added to `Cargo.toml`.
 - **Chat completions handler implemented**: `POST /v1/chat/completions` with `stream=true` registers stream, submits `HttpChatRequested` to kernel, returns SSE response. `StreamFrame` mapped to SSE events: `Chunk` → `data: {json}`, `Done` → `data: [DONE]`, `Error` → `data: {"error": {...}}`. Added `RuntimeCommand::HttpChatRequested` + handler + convenience method. `stream=false` returns 400. Runtime unavailable returns 503.
 - **Relay wired into worker ws handler**: Replaced `consume_until_terminal` stub with `relay_job` call. `RelayOutcome` mapped to kernel events: `WorkerEnd` → `assignment_cleared`, `WorkerError`/`WorkerDisconnected` → `assignment_failed`, `ClientGone` → no event (timeout handles cleanup). `WorkerDisconnected` exits the connection loop; other outcomes re-register. Stream heartbeats now active during job relay.
 - **Client effect executors implemented**: `SendClientError` sends `StreamFrame::Error` via cloned handle. `SendClientDone` sends `StreamFrame::Done` via taken handle (removes registry entry). `CloseStream` drops the taken handle without sending a frame. Added `take_stream` to registry. Terminal effects use `take_stream` in `resolve_effects`; non-terminal `SendClientError` uses `clone_stream`. Closed-channel sends are benign (debug-logged). 2 new registry tests. All 5 effect executors now implemented.

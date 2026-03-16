@@ -1,6 +1,6 @@
 # Testing Coverage and Methodology
 
-Snapshot date: 2026-03-12
+Snapshot date: 2026-03-16
 
 ## Overview
 
@@ -53,6 +53,22 @@ Location: `src/gateway/channel_registry.rs` (inline `#[cfg(test)]` module).
 | `take_stream`              | Removes entry                      |
 | Property test              | All registered handles retrievable |
 
+### Response assembler tests (11 unit + 4 property = 15 tests)
+
+Location: `src/client/response_assembler.rs` (inline `#[cfg(test)]` module).
+
+| Area             | Count | What is tested                                                                                       |
+| ---------------- | ----- | ---------------------------------------------------------------------------------------------------- |
+| Content assembly | 2     | Single chunk, multiple chunks concatenation                                                          |
+| Tool calls       | 3     | Single-chunk llama-server style, fragmented arguments OpenAI style, multiple concurrent tool calls   |
+| Mixed            | 1     | Content + tool calls in same response                                                                |
+| Edge cases       | 3     | Empty delta chunks, missing finish_reason, empty input                                               |
+| Error paths      | 2     | Missing `choices` array, empty `choices` array                                                       |
+| Property: P1     | 1     | Content concatenation is split-invariant (any string split into N fragments reassembles identically) |
+| Property: P2     | 1     | Arguments concatenation is split-invariant                                                           |
+| Property: P3     | 1     | Tool call count is preserved regardless of delta interleaving                                        |
+| Property: P4     | 1     | Finish reason captured from whichever chunk has one                                                  |
+
 ### Protocol serde tests (14 tests)
 
 Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
@@ -63,7 +79,7 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (9 tests)
+### Integration tests (11 tests)
 
 Location: `tests/integration.rs` with helpers in `tests/support/`.
 
@@ -78,6 +94,8 @@ Location: `tests/integration.rs` with helpers in `tests/support/`.
 | `stream_timeout_sends_error_and_done`               | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                                 |
 | `long_running_stream_survives_with_heartbeats`      | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work     |
 | `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                        |
+| `gateway_client_collects_chunks_and_assembles`      | `GatewayClient` sends request, collects 4 SSE chunks, `response_assembler::assemble()` produces correct `CompletedMessage` with content "Hello there" and finish_reason "stop"                            |
+| `gateway_client_returns_error_on_no_workers`        | `GatewayClient.chat()` does not panic when gateway returns SSE error (no workers available). Returns Ok with error chunks.                                                                                |
 
 Test harness components:
 
@@ -233,8 +251,9 @@ Testing-level invariants (properties the test suite itself must maintain):
 
 - Kernel: strong coverage (44 unit + 6 property tests).
 - Registry: adequate coverage (6 tests).
+- Response assembler: strong coverage (11 unit + 4 property tests).
 - Protocol: strong coverage (14 serde tests).
-- Integration: 9 tests passing (happy path, no-workers error, worker error, re-registration, concurrent streams, leak detection, stream timeout, heartbeat survival, worker disconnect). Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
+- Integration: 11 tests passing (happy path, no-workers error, worker error, re-registration, concurrent streams, leak detection, stream timeout, heartbeat survival, worker disconnect, gateway client chunk collection, gateway client error handling). Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
 ## Load into context when
 
@@ -247,6 +266,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 
 - `src/gateway/kernel.rs` (unit + property tests)
 - `src/gateway/channel_registry.rs` (registry tests)
+- `src/client/response_assembler.rs` (assembler unit + property tests)
 - `src/protocol.rs` (serde round-trip tests)
 - `tests/integration.rs` (integration tests)
 - `tests/support/` (test harness: `gateway.rs`, `worker.rs`, `client.rs`)

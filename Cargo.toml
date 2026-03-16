@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "pc-worker"
 path = "src/worker_agent.rs"
 
+[[bin]]
+name = "pc-client"
+path = "src/client_agent.rs"
+
 [dependencies]
 async-stream = "0.3"
 axum = { version = "0.8", features = ["ws", "json"] }

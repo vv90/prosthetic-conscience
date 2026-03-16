@@ -10,7 +10,7 @@ Client (HTTP)  -->  Gateway (public)  <--  Worker (WebSocket)  -->  llama-server
 
 - **Gateway** accepts OpenAI-compatible HTTP requests and streams SSE responses back to clients. Dispatches jobs to workers over persistent WebSocket connections. Pure kernel architecture with tick-based timeouts and heartbeats.
 - **Worker** (`pc-worker`) connects outbound to the gateway, receives jobs, proxies them to a local llama-server (or any OpenAI-compatible inference endpoint), and streams chunks back.
-- **Client** sends standard `POST /v1/chat/completions` requests with `"stream": true`.
+- **Client** (`pc-client`) interactive REPL that sends chat completion requests, assembles streamed responses, and maintains conversation history. Also usable via any OpenAI-compatible client (curl, Open WebUI, etc.).
 
 The gateway never persists prompt or completion content.
 
@@ -22,7 +22,7 @@ Requires Rust 2024 edition (1.85+).
 cargo build --release
 ```
 
-This produces two binaries: `prosthetic-conscience` (gateway) and `pc-worker` (worker agent).
+This produces three binaries: `prosthetic-conscience` (gateway), `pc-worker` (worker agent), and `pc-client` (interactive client).
 
 ## Running
 
@@ -32,6 +32,13 @@ Any OpenAI-compatible endpoint works. With llama.cpp:
 
 ```
 llama-server -m model.gguf --port 8080
+```
+
+```
+llama-server \
+  -hf bartowski/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M \
+  --ctx-size 4096 \
+  --port 8080
 ```
 
 ### 2. Start the gateway
@@ -61,7 +68,24 @@ Options:
 --auth-token <TOKEN>     Bearer token for gateway auth (must match PC_AUTH_TOKEN)
 ```
 
-### 4. Send a request
+### 4. Start the client
+
+```
+cargo run --bin pc-client
+```
+
+Options:
+
+```
+--gateway-url <URL>    Gateway base URL [default: http://127.0.0.1:3000]
+--auth-token <TOKEN>   Bearer token for gateway auth (must match PC_AUTH_TOKEN)
+--model <MODEL>        Model name to include in requests [default: default]
+--system <PROMPT>      Optional system prompt
+```
+
+Type a message at the `> ` prompt and the model's response will be printed. Conversation history is maintained across turns.
+
+### 5. Or send a raw request
 
 ```
 curl -N http://127.0.0.1:3000/v1/chat/completions \
@@ -84,7 +108,7 @@ data: {"choices":[{"delta":{"content":" there"},...}],...}
 data: [DONE]
 ```
 
-### 5. Or use Open WebUI
+### 6. Or use Open WebUI
 
 Any OpenAI-compatible client works. For a full chat interface, run [Open WebUI](https://github.com/open-webui/open-webui):
 
@@ -105,7 +129,7 @@ Then open `http://localhost:8080`.
 cargo test --all-targets --all-features
 ```
 
-79 tests: 70 unit (kernel + protocol + registry), 9 integration (full pipeline through real HTTP/WebSocket).
+96 tests: 85 unit (kernel + protocol + registry + response assembler), 11 integration (full pipeline through real HTTP/WebSocket).
 
 ## Project structure
 
@@ -113,6 +137,7 @@ cargo test --all-targets --all-features
 src/
   main.rs              Gateway binary
   worker_agent.rs      Worker binary
+  client_agent.rs      Client binary (interactive REPL)
   lib.rs
   protocol.rs          Shared wire types (WorkerMessage, GatewayToWorker, ChatRequest)
   gateway/
@@ -127,6 +152,9 @@ src/
   worker/
     client.rs          Gateway WS client with reconnection
     inference.rs       HTTP SSE proxy to inference server
+  client/
+    gateway_client.rs  HTTP + SSE client for gateway communication
+    response_assembler.rs  Assembles streamed delta chunks into complete messages
 tests/
   integration.rs       End-to-end tests
   support/             Test harness (TestGateway, MockWorker, SseClient)
