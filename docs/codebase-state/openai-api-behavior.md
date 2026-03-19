@@ -1,6 +1,6 @@
 # OpenAI-Compatible API Behavior
 
-Snapshot date: 2026-03-18
+Snapshot date: 2026-03-19
 
 ## Behavior
 
@@ -52,11 +52,22 @@ Snapshot date: 2026-03-18
 - Extending toward broader OpenAI compatibility.
 - Adding non-streaming support.
 
+### Transcription Test UI (`GET /`)
+
+- Serves a self-contained HTML page (`static/transcribe.html`, embedded at compile time via `include_str!`).
+- Push-to-talk audio recording using the browser's `MediaRecorder` API.
+- Submits recordings to `POST /v1/audio/transcriptions` via `fetch` + `FormData`.
+- Handles auth token input (stored in `sessionStorage`, sent as `Authorization: Bearer` header).
+- Displays transcription result or error. Previous results shown in a history list.
+- No server-side state — purely a browser-side adapter to the existing transcription endpoint.
+
 ## Relevant files
 
 - `src/router/chat_completions.rs`
 - `src/router/audio_transcriptions.rs`
+- `src/router/ui.rs`
 - `src/router/mod.rs`
+- `static/transcribe.html`
 - `src/router/state.rs`
 - `src/gateway/runtime.rs` (`HttpChatRequested` command, `register_stream`)
 - `src/gateway/relay.rs` (`StreamFrame`)

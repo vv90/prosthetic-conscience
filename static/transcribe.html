@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Transcribe</title>
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                font-family: system-ui, sans-serif;
+                background: #111;
+                color: #eee;
+                display: flex;
+                justify-content: center;
+                padding: 2rem;
+            }
+            .container {
+                max-width: 480px;
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                gap: 1.25rem;
+            }
+            h1 {
+                font-size: 1.25rem;
+                font-weight: 600;
+            }
+            label {
+                font-size: 0.8rem;
+                color: #999;
+                display: block;
+                margin-bottom: 0.25rem;
+            }
+            input[type="text"],
+            input[type="password"] {
+                width: 100%;
+                padding: 0.5rem;
+                background: #222;
+                border: 1px solid #333;
+                border-radius: 4px;
+                color: #eee;
+                font-size: 0.9rem;
+                outline: none;
+            }
+            input:focus {
+                border-color: #666;
+            }
+            .fields {
+                display: flex;
+                gap: 0.75rem;
+            }
+            .fields > div {
+                flex: 1;
+            }
+            .ptt-btn {
+                width: 100%;
+                padding: 1.5rem;
+                font-size: 1rem;
+                font-weight: 600;
+                border: 2px solid #444;
+                border-radius: 8px;
+                background: #1a1a1a;
+                color: #aaa;
+                cursor: pointer;
+                user-select: none;
+                -webkit-user-select: none;
+                touch-action: none;
+                transition: all 0.15s;
+            }
+            .ptt-btn.recording {
+                background: #3a1111;
+                border-color: #c33;
+                color: #f88;
+            }
+            .ptt-btn.sending {
+                background: #1a2a1a;
+                border-color: #3a3;
+                color: #8d8;
+            }
+            .ptt-btn:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            .status {
+                font-size: 0.8rem;
+                color: #666;
+                text-align: center;
+            }
+            .result {
+                background: #1a1a1a;
+                border: 1px solid #333;
+                border-radius: 6px;
+                padding: 1rem;
+                min-height: 3rem;
+                font-size: 0.95rem;
+                line-height: 1.5;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .result.error {
+                color: #f88;
+                border-color: #633;
+            }
+            .result.success {
+                color: #eee;
+            }
+            .auth-section {
+                display: flex;
+                gap: 0.5rem;
+                align-items: end;
+            }
+            .auth-section > div {
+                flex: 1;
+            }
+            .auth-section button {
+                padding: 0.5rem 1rem;
+                background: #333;
+                border: 1px solid #444;
+                border-radius: 4px;
+                color: #eee;
+                cursor: pointer;
+                font-size: 0.85rem;
+                white-space: nowrap;
+            }
+            .history {
+                display: flex;
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+            .history-item {
+                background: #1a1a1a;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+                padding: 0.6rem 0.8rem;
+                font-size: 0.85rem;
+                color: #bbb;
+                line-height: 1.4;
+            }
+            .history-item .ts {
+                font-size: 0.7rem;
+                color: #555;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Transcribe</h1>
+
+            <div class="auth-section" id="authSection">
+                <div>
+                    <label for="tokenInput">Auth token</label>
+                    <input
+                        type="password"
+                        id="tokenInput"
+                        placeholder="leave empty if auth disabled"
+                    />
+                </div>
+                <button id="saveTokenBtn">Save</button>
+            </div>
+
+            <div class="fields">
+                <div>
+                    <label for="modelInput">Model</label>
+                    <input type="text" id="modelInput" value="whisper-1" />
+                </div>
+                <div>
+                    <label for="langInput">Language (optional)</label>
+                    <input type="text" id="langInput" placeholder="en" />
+                </div>
+            </div>
+
+            <button class="ptt-btn" id="pttBtn" disabled>
+                Initializing mic...
+            </button>
+            <div class="status" id="status"></div>
+            <div class="result" id="result"></div>
+            <div class="history" id="history"></div>
+        </div>
+
+        <script>
+            (function () {
+                var pttBtn = document.getElementById("pttBtn");
+                var statusEl = document.getElementById("status");
+                var resultEl = document.getElementById("result");
+                var historyEl = document.getElementById("history");
+                var tokenInput = document.getElementById("tokenInput");
+                var saveTokenBtn = document.getElementById("saveTokenBtn");
+                var modelInput = document.getElementById("modelInput");
+                var langInput = document.getElementById("langInput");
+
+                var mediaStream = null;
+                var recorder = null;
+                var chunks = [];
+                var mimeType = "audio/webm";
+                var recording = false;
+                var sending = false;
+
+                // --- MIME type to file extension ---
+                var EXT_MAP = {
+                    "audio/webm": "webm",
+                    "audio/ogg": "ogg",
+                    "audio/mp4": "mp4",
+                    "audio/mpeg": "mp3",
+                    "audio/wav": "wav",
+                };
+
+                function extForMime(mime) {
+                    // Strip codec suffix: "audio/webm;codecs=opus" -> "audio/webm"
+                    var base = mime.split(";")[0].trim();
+                    return EXT_MAP[base] || "bin";
+                }
+
+                // --- Auth ---
+                var savedToken = sessionStorage.getItem("pc_auth_token");
+                if (savedToken) tokenInput.value = savedToken;
+
+                saveTokenBtn.addEventListener("click", function () {
+                    var t = tokenInput.value.trim();
+                    if (t) sessionStorage.setItem("pc_auth_token", t);
+                    else sessionStorage.removeItem("pc_auth_token");
+                    statusEl.textContent = t ? "Token saved" : "Token cleared";
+                });
+
+                function authHeaders() {
+                    var t = tokenInput.value.trim();
+                    if (!t) return {};
+                    return { Authorization: "Bearer " + t };
+                }
+
+                // --- Mic init ---
+                function pickMimeType() {
+                    if (typeof MediaRecorder === "undefined") return null;
+                    var types = [
+                        "audio/webm;codecs=opus",
+                        "audio/webm",
+                        "audio/mp4",
+                        "audio/ogg;codecs=opus",
+                    ];
+                    for (var i = 0; i < types.length; i++) {
+                        if (MediaRecorder.isTypeSupported(types[i]))
+                            return types[i];
+                    }
+                    return null;
+                }
+
+                async function initMic() {
+                    try {
+                        mediaStream = await navigator.mediaDevices.getUserMedia(
+                            { audio: true },
+                        );
+                        mimeType = pickMimeType() || "audio/webm";
+                        pttBtn.disabled = false;
+                        pttBtn.textContent = "Hold to talk (or hold Space)";
+                        statusEl.textContent = "";
+                    } catch (e) {
+                        pttBtn.textContent = "Mic access denied";
+                        statusEl.textContent = e.message;
+                    }
+                }
+                initMic();
+
+                // --- Recording (native MediaRecorder, no manual encoding) ---
+                function startRecording() {
+                    if (recording || sending || !mediaStream) return;
+                    recording = true;
+                    chunks = [];
+
+                    recorder = new MediaRecorder(mediaStream, {
+                        mimeType: mimeType,
+                    });
+                    recorder.ondataavailable = function (e) {
+                        if (e.data.size > 0) chunks.push(e.data);
+                    };
+                    recorder.onstop = function () {
+                        var blob = new Blob(chunks, { type: mimeType });
+                        chunks = [];
+                        if (blob.size > 0) sendAudio(blob);
+                        else {
+                            statusEl.textContent = "Empty recording, try again";
+                            pttBtn.textContent = "Hold to talk (or hold Space)";
+                        }
+                    };
+                    recorder.start();
+
+                    pttBtn.classList.add("recording");
+                    pttBtn.textContent = "Recording...";
+                    statusEl.textContent = "";
+                }
+
+                function stopRecording() {
+                    if (!recording || !recorder) return;
+                    recording = false;
+                    recorder.stop();
+                    pttBtn.classList.remove("recording");
+                }
+
+                // --- Submit ---
+                async function sendAudio(blob) {
+                    sending = true;
+                    pttBtn.classList.add("sending");
+                    pttBtn.textContent = "Transcribing...";
+                    pttBtn.disabled = true;
+                    resultEl.textContent = "";
+                    resultEl.className = "result";
+
+                    var ext = extForMime(mimeType);
+                    statusEl.textContent =
+                        (blob.size / 1024).toFixed(1) + " KB (" + ext + ")";
+
+                    var fd = new FormData();
+                    fd.append("file", blob, "recording." + ext);
+                    fd.append("model", modelInput.value.trim() || "whisper-1");
+                    var lang = langInput.value.trim();
+                    if (lang) fd.append("language", lang);
+
+                    try {
+                        var resp = await fetch("/v1/audio/transcriptions", {
+                            method: "POST",
+                            headers: authHeaders(),
+                            body: fd,
+                        });
+
+                        var data = await resp.json();
+
+                        if (resp.status === 401) {
+                            resultEl.textContent =
+                                "Unauthorized -- check your auth token";
+                            resultEl.className = "result error";
+                            sessionStorage.removeItem("pc_auth_token");
+                            tokenInput.value = "";
+                            tokenInput.focus();
+                        } else if (!resp.ok) {
+                            var msg =
+                                (data.error && data.error.message) ||
+                                resp.statusText;
+                            resultEl.textContent = "Error: " + msg;
+                            resultEl.className = "result error";
+                        } else {
+                            var text = data.text || JSON.stringify(data);
+                            resultEl.textContent = text;
+                            resultEl.className = "result success";
+                            addHistory(text);
+                        }
+                    } catch (e) {
+                        resultEl.textContent = "Network error: " + e.message;
+                        resultEl.className = "result error";
+                    } finally {
+                        sending = false;
+                        pttBtn.classList.remove("sending");
+                        pttBtn.disabled = false;
+                        pttBtn.textContent = "Hold to talk (or hold Space)";
+                    }
+                }
+
+                function addHistory(text) {
+                    var item = document.createElement("div");
+                    item.className = "history-item";
+                    var ts = new Date().toLocaleTimeString();
+                    item.innerHTML =
+                        '<span class="ts">' +
+                        ts +
+                        "</span> " +
+                        escapeHtml(text);
+                    historyEl.prepend(item);
+                }
+
+                function escapeHtml(s) {
+                    var d = document.createElement("div");
+                    d.textContent = s;
+                    return d.innerHTML;
+                }
+
+                // --- PTT events ---
+                pttBtn.addEventListener("mousedown", function (e) {
+                    e.preventDefault();
+                    startRecording();
+                });
+                pttBtn.addEventListener("mouseup", function (e) {
+                    e.preventDefault();
+                    stopRecording();
+                });
+                pttBtn.addEventListener("mouseleave", function () {
+                    if (recording) stopRecording();
+                });
+
+                pttBtn.addEventListener(
+                    "touchstart",
+                    function (e) {
+                        e.preventDefault();
+                        startRecording();
+                    },
+                    { passive: false },
+                );
+                pttBtn.addEventListener(
+                    "touchend",
+                    function (e) {
+                        e.preventDefault();
+                        stopRecording();
+                    },
+                    { passive: false },
+                );
+                pttBtn.addEventListener("touchcancel", function () {
+                    if (recording) stopRecording();
+                });
+
+                var spaceHeld = false;
+                document.addEventListener("keydown", function (e) {
+                    if (
+                        e.code === "Space" &&
+                        !spaceHeld &&
+                        e.target.tagName !== "INPUT"
+                    ) {
+                        e.preventDefault();
+                        spaceHeld = true;
+                        startRecording();
+                    }
+                });
+                document.addEventListener("keyup", function (e) {
+                    if (e.code === "Space" && spaceHeld) {
+                        e.preventDefault();
+                        spaceHeld = false;
+                        stopRecording();
+                    }
+                });
+            })();
+        </script>
+    </body>
+</html>

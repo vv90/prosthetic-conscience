@@ -30,6 +30,32 @@
           ];
         };
 
+        whisper-cpp-local = pkgs.stdenv.mkDerivation rec {
+          pname = "whisper-cpp";
+          version = "1.8.3";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "ggml-org";
+            repo = "whisper.cpp";
+            rev = "v${version}";
+            hash = "sha256-TeS1lGKEzkHOoBemy/tMGtIsy0iouj9DTYIgTjUNcQk=";
+          };
+
+          nativeBuildInputs = [ pkgs.cmake ];
+
+          buildInputs = [ ];
+
+          cmakeFlags = [
+            "-DWHISPER_BUILD_EXAMPLES=ON"
+            "-DWHISPER_BUILD_SERVER=ON"
+            "-DGGML_METAL=ON"
+            "-DGGML_COREML=OFF"
+            "-DGGML_NATIVE=OFF"
+          ];
+
+          meta.mainProgram = "whisper-server";
+        };
+
       in
       {
         devShells.default = pkgs.mkShell {
@@ -40,6 +66,8 @@
             cargo-watch # auto rebuild/test
 
             llama-cpp # for testing worker backends
+            whisper-cpp-local # for testing transcription backend
+            ffmpeg # for audio processing in transcription backend
           ];
 
           # Useful env vars for crates using openssl-sys / pkg-config:

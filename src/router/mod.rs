@@ -2,6 +2,7 @@ mod audio_transcriptions;
 mod auth;
 mod chat_completions;
 pub mod state;
+mod ui;
 mod worker_ws_upgrade;
 
 use axum::Json;
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use self::audio_transcriptions::audio_transcriptions;
 use self::auth::require_auth;
 use self::chat_completions::chat_completions;
+use self::ui::transcribe_ui;
 use self::worker_ws_upgrade::worker_ws_upgrade;
 
 pub use state::AppState;
@@ -32,6 +34,7 @@ async fn list_models() -> Json<Value> {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(transcribe_ui))
         .route("/ws/worker", get(worker_ws_upgrade))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))

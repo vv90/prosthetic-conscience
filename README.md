@@ -9,7 +9,7 @@ Client (HTTP)  -->  Gateway (public)  <--  Worker (WebSocket)  -->  llama-server
 ```
 
 - **Gateway** accepts OpenAI-compatible HTTP requests and streams SSE responses back to clients. Dispatches jobs to workers over persistent WebSocket connections. Pure kernel architecture with tick-based timeouts and heartbeats.
-- **Worker** (`pc-worker`) connects outbound to the gateway, receives jobs, proxies them to a local llama-server (or any OpenAI-compatible inference endpoint), and streams chunks back.
+- **Worker** (`pc-worker`) connects outbound to the gateway, receives jobs, proxies them to a local llama-server (chat) or whisper.cpp server (transcription), and streams chunks back. Declares capabilities based on configured backend URLs.
 - **Client** (`pc-client`) interactive REPL that sends chat completion requests, assembles streamed responses, maintains conversation history, and executes tool calls locally. Supports a tool use loop with configurable tools including shell execution in Docker containers. Also usable via any OpenAI-compatible client (curl, Open WebUI, etc.).
 
 The gateway never persists prompt or completion content.
@@ -41,6 +41,33 @@ llama-server \
   --port 8080
 ```
 
+### 1b. (Optional) Start a whisper server for transcription
+
+Any OpenAI Whisper-compatible endpoint works. With whisper.cpp:
+
+```bash
+# Download a model
+mkdir -p models
+curl -L -o models/ggml-tiny.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+
+# Start the server (--convert requires ffmpeg, handles any audio format)
+whisper-server --model ./models/ggml-tiny.en.bin --host 127.0.0.1 --port 8090 \
+  --inference-path /v1/audio/transcriptions --convert
+```
+
+The `--inference-path` flag sets the endpoint to match the OpenAI API path the worker expects. The `--convert` flag enables ffmpeg-based transcoding so the server accepts any audio format (webm, mp4, ogg, wav, etc.) — required when audio comes from a browser's MediaRecorder.
+
+Available models (from [ggerganov/whisper.cpp on HuggingFace](https://huggingface.co/ggerganov/whisper.cpp)):
+
+| Model    | File                | Size    |
+| -------- | ------------------- | ------- |
+| tiny.en  | `ggml-tiny.en.bin`  | ~75 MB  |
+| base.en  | `ggml-base.en.bin`  | ~142 MB |
+| small.en | `ggml-small.en.bin` | ~466 MB |
+
+If using the nix devshell, `whisper-server` is already on your path.
+
 ### 2. Start the gateway
 
 ```
@@ -64,8 +91,26 @@ Options:
 
 ```
 --gateway-url <URL>      Gateway WebSocket URL [default: ws://127.0.0.1:3000/ws/worker]
---inference-url <URL>    Inference server base URL [default: http://127.0.0.1:8080]
+--inference-url <URL>    Inference server URL (enables chat capability)
+--whisper-url <URL>      Whisper server URL (enables transcription capability)
 --auth-token <TOKEN>     Bearer token for gateway auth (must match PC_AUTH_TOKEN)
+```
+
+At least one of `--inference-url` or `--whisper-url` must be provided. The worker declares capabilities based on which URLs are configured.
+
+Examples:
+
+```bash
+# Chat only
+cargo run --bin pc-worker -- --inference-url http://127.0.0.1:8080
+
+# Transcription only
+cargo run --bin pc-worker -- --whisper-url http://127.0.0.1:8090
+
+# Both
+cargo run --bin pc-worker -- \
+  --inference-url http://127.0.0.1:8080 \
+  --whisper-url http://127.0.0.1:8090
 ```
 
 ### 4. Start the client
@@ -140,6 +185,16 @@ docker run -d \
 
 Then open `http://localhost:8080`.
 
+### 7. Built-in transcription UI
+
+The gateway serves a minimal web UI for testing audio transcription at the root URL. Open `http://127.0.0.1:3000/` in a browser.
+
+- Hold the push-to-talk button (or hold spacebar) to record audio
+- Release to send to the transcription endpoint
+- Requires a worker with transcription capability connected to the gateway
+
+If `PC_AUTH_TOKEN` is set, enter the token in the auth field before recording.
+
 ## Testing
 
 ```
@@ -165,7 +220,9 @@ src/
   router/
     mod.rs             Axum router setup
     chat_completions.rs  POST /v1/chat/completions handler
+    audio_transcriptions.rs  POST /v1/audio/transcriptions handler
     worker_ws_upgrade.rs  WS /ws/worker upgrade handler
+    ui.rs              Serves embedded transcription test UI
   worker/
     client.rs          Gateway WS client with reconnection
     inference.rs       HTTP SSE proxy to inference server
@@ -177,6 +234,8 @@ src/
       mod.rs           Tool trait, ToolRegistry, ToolError
       current_time.rs  Trivial tool (UTC timestamp) for testing the loop
       shell.rs         Docker container shell execution tool
+static/
+  transcribe.html      Self-contained transcription test UI (embedded at compile time)
 tests/
   integration.rs       End-to-end tests
   support/             Test harness (TestGateway, MockWorker, SseClient)

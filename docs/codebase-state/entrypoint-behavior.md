@@ -1,6 +1,6 @@
 # Entrypoint Behavior
 
-Snapshot date: 2026-03-18
+Snapshot date: 2026-03-19
 
 ## Binaries
 
@@ -10,6 +10,7 @@ Snapshot date: 2026-03-18
 - CLI args: `--host` (default `127.0.0.1`), `--port` (default `3000`).
 - Reads `PC_AUTH_TOKEN` env var for optional bearer auth.
 - Exposes:
+  - transcription test UI: `GET /` (self-contained HTML embedded via `include_str!`)
   - worker websocket endpoint: `/ws/worker`
   - chat completions endpoint: `POST /v1/chat/completions`
   - audio transcriptions endpoint: `POST /v1/audio/transcriptions`
@@ -48,7 +49,9 @@ Snapshot date: 2026-03-18
 - `src/worker_agent.rs` (worker)
 - `src/client_agent.rs` (client)
 - `src/router/mod.rs`
+- `src/router/ui.rs`
 - `src/router/state.rs`
+- `static/transcribe.html`
 - `src/client/gateway_client.rs`
 - `src/client/response_assembler.rs`
 - `src/client/tool_loop.rs`
