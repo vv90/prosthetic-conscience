@@ -1,37 +1,48 @@
-use std::collections::{BTreeMap, BTreeSet};
+use im::{OrdMap, OrdSet};
 
+use crate::gateway::session;
+pub use crate::protocol::Capability;
 use serde_json::Value;
 
-pub use crate::protocol::Capability;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(pub String);
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerEntry {
     pub deadline: u64,
-    pub capabilities: BTreeSet<Capability>,
+    pub capabilities: OrdSet<Capability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GatewayState<WId, SId> {
+pub struct GatewayState<WId: Clone + Ord, SId: Clone + Ord> {
     pub tick: u64,
     pub worker_ttl: u64,
     pub stream_ttl: u64,
-    pub available: BTreeMap<WId, WorkerEntry>,
-    pub active_streams: BTreeMap<SId, u64>,
+    pub available: OrdMap<WId, WorkerEntry>,
+    pub active_streams: OrdMap<SId, u64>,
+    pub sessions: OrdMap<SessionId, session::State<SId>>,
 }
 
-impl<WId, SId> GatewayState<WId, SId> {
+impl<WId: Clone + Ord, SId: Clone + Ord> GatewayState<WId, SId> {
     pub fn new(worker_ttl: u64, stream_ttl: u64) -> Self {
         Self {
             tick: 0,
             worker_ttl,
             stream_ttl,
-            available: BTreeMap::new(),
-            active_streams: BTreeMap::new(),
+            available: OrdMap::new(),
+            active_streams: OrdMap::new(),
+            sessions: OrdMap::new(),
         }
     }
 }
 
-impl<WId, SId> Default for GatewayState<WId, SId> {
+impl<WId: Clone + Ord, SId: Clone + Ord> Default for GatewayState<WId, SId> {
     fn default() -> Self {
         Self::new(60, 30)
     }
@@ -47,7 +58,7 @@ pub enum Event<WId, SId> {
     },
     WorkerRegistered {
         worker_id: WId,
-        capabilities: BTreeSet<Capability>,
+        capabilities: OrdSet<Capability>,
     },
     AssignmentCleared {
         client_stream_id: SId,
@@ -63,6 +74,10 @@ pub enum Event<WId, SId> {
         client_stream_id: SId,
     },
     Tick,
+    SessionEvent {
+        session_id: SessionId,
+        event: session::Event<SId>,
+    },
 }
 
 use super::effects::{
@@ -75,16 +90,21 @@ pub enum Effect<WId, SId> {
     DispatchJob(DispatchJob<WId, SId>),
     SendClientError(SendClientError<SId>),
     SendClientDone(SendClientDone<SId>),
+    SessionEffect(session::Effect<SId>),
     ProtocolViolation(ProtocolViolation),
 }
 
-pub struct Transition<WId, SId> {
+pub struct Transition<WId: Clone + Ord, SId: Clone + Ord> {
     pub state: GatewayState<WId, SId>,
     pub effects: Vec<Effect<WId, SId>>,
 }
 
+// impl<WId, SId> Transition<WId, SId> {
+//     fn map(self, )
+// }
+
 pub fn reduce<WId, SId>(
-    mut state: GatewayState<WId, SId>,
+    state: GatewayState<WId, SId>,
     event: Event<WId, SId>,
 ) -> Transition<WId, SId>
 where
@@ -124,34 +144,35 @@ where
                 };
             }
 
-            let worker_id = first_capable_worker_id(&state, &required_capability);
-
-            if let Some(worker_id) = worker_id {
-                state.available.remove(&worker_id);
-                let deadline = state.tick + state.stream_ttl;
-                state
-                    .active_streams
-                    .insert(client_stream_id.clone(), deadline);
-                return Transition {
+            match first_capable_worker_id(&state, &required_capability) {
+                Some(worker_id) => {
+                    let deadline = state.tick + state.stream_ttl;
+                    Transition {
+                        state: GatewayState {
+                            available: state.available.without(&worker_id),
+                            active_streams: state
+                                .active_streams
+                                .update(client_stream_id.clone(), deadline),
+                            ..state
+                        },
+                        effects: vec![Effect::DispatchJob(DispatchJob {
+                            worker_id,
+                            client_stream_id,
+                            capability: required_capability,
+                            payload,
+                        })],
+                    }
+                }
+                None => Transition {
                     state,
-                    effects: vec![Effect::DispatchJob(DispatchJob {
-                        worker_id,
-                        client_stream_id,
-                        capability: required_capability,
-                        payload,
-                    })],
-                };
-            }
-
-            Transition {
-                state,
-                effects: vec![
-                    Effect::SendClientError(SendClientError {
-                        client_stream_id: client_stream_id.clone(),
-                        message: String::from("no idle worker available"),
-                    }),
-                    Effect::SendClientDone(SendClientDone { client_stream_id }),
-                ],
+                    effects: vec![
+                        Effect::SendClientError(SendClientError {
+                            client_stream_id: client_stream_id.clone(),
+                            message: String::from("no idle worker available"),
+                        }),
+                        Effect::SendClientDone(SendClientDone { client_stream_id }),
+                    ],
+                },
             }
         }
         Event::WorkerRegistered {
@@ -168,20 +189,22 @@ where
                 };
             }
             let deadline = state.tick + state.worker_ttl;
-            state.available.insert(
-                worker_id,
-                WorkerEntry {
-                    deadline,
-                    capabilities,
-                },
-            );
             Transition {
-                state,
+                state: GatewayState {
+                    available: state.available.update(
+                        worker_id,
+                        WorkerEntry {
+                            deadline,
+                            capabilities,
+                        },
+                    ),
+                    ..state
+                },
                 effects: Vec::new(),
             }
         }
         Event::AssignmentCleared { client_stream_id } => {
-            if state.active_streams.remove(&client_stream_id).is_none() {
+            if !state.active_streams.contains_key(&client_stream_id) {
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
@@ -195,7 +218,10 @@ where
             }
 
             Transition {
-                state,
+                state: GatewayState {
+                    active_streams: state.active_streams.without(&client_stream_id),
+                    ..state
+                },
                 effects: vec![Effect::SendClientDone(SendClientDone { client_stream_id })],
             }
         }
@@ -203,7 +229,7 @@ where
             client_stream_id,
             message,
         } => {
-            if state.active_streams.remove(&client_stream_id).is_none() {
+            if !state.active_streams.contains_key(&client_stream_id) {
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
@@ -217,7 +243,10 @@ where
             }
 
             Transition {
-                state,
+                state: GatewayState {
+                    active_streams: state.active_streams.without(&client_stream_id),
+                    ..state
+                },
                 effects: vec![
                     Effect::SendClientError(SendClientError {
                         client_stream_id: client_stream_id.clone(),
@@ -227,83 +256,128 @@ where
                 ],
             }
         }
-        Event::WorkerHeartbeat { worker_id } => {
-            if let Some(entry) = state.available.get_mut(&worker_id) {
-                entry.deadline = state.tick + state.worker_ttl;
-                Transition {
-                    state,
-                    effects: Vec::new(),
-                }
-            } else {
-                Transition {
-                    state,
-                    effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        worker_description: worker_id.to_string(),
-                        message: String::from("heartbeat from unknown worker"),
-                    })],
-                }
-            }
-        }
+        Event::WorkerHeartbeat { worker_id } => match state.available.extract(&worker_id) {
+            Some((entry, available)) => Transition {
+                state: GatewayState {
+                    available: available.update(
+                        worker_id,
+                        WorkerEntry {
+                            deadline: state.tick + state.worker_ttl,
+                            ..entry
+                        },
+                    ),
+                    ..state
+                },
+                effects: Vec::new(),
+            },
+            None => Transition {
+                state,
+                effects: vec![Effect::ProtocolViolation(ProtocolViolation {
+                    worker_description: worker_id.to_string(),
+                    message: String::from("heartbeat from unknown worker"),
+                })],
+            },
+        },
         Event::StreamHeartbeat { client_stream_id } => {
-            if let Some(deadline) = state.active_streams.get_mut(&client_stream_id) {
-                *deadline = state.tick + state.stream_ttl;
-                Transition {
-                    state,
-                    effects: Vec::new(),
-                }
-            } else {
-                Transition {
+            if !state.active_streams.contains_key(&client_stream_id) {
+                return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
                         worker_description: String::from("unknown"),
                         message: format!("heartbeat for unknown stream {}", client_stream_id),
                     })],
-                }
+                };
+            }
+
+            let new_deadline = state.tick + state.stream_ttl;
+            Transition {
+                state: GatewayState {
+                    active_streams: state.active_streams.update(client_stream_id, new_deadline),
+                    ..state
+                },
+                effects: Vec::new(),
             }
         }
         Event::Tick => {
-            state.tick += 1;
-            let mut effects = Vec::new();
+            let tick = state.tick + 1;
 
-            // Expire stale workers — no client effects needed
-            state
+            let available: OrdMap<WId, WorkerEntry> = state
                 .available
-                .retain(|_, entry| entry.deadline > state.tick);
-
-            // Expire timed-out streams — emit terminal effects for each
-            let expired_streams: Vec<SId> = state
-                .active_streams
-                .iter()
-                .filter(|(_, deadline)| **deadline <= state.tick)
-                .map(|(sid, _)| sid.clone())
+                .into_iter()
+                .filter(|(_, entry)| entry.deadline > tick)
                 .collect();
 
-            for sid in &expired_streams {
-                state.active_streams.remove(sid);
+            let mut kept: OrdMap<SId, u64> = OrdMap::new();
+            let mut expired: Vec<SId> = Vec::new();
+            for (sid, deadline) in state.active_streams {
+                if deadline > tick {
+                    kept.insert(sid, deadline);
+                } else {
+                    expired.push(sid);
+                }
             }
 
-            for sid in expired_streams {
-                effects.push(Effect::SendClientError(SendClientError {
-                    client_stream_id: sid.clone(),
-                    message: String::from("stream timed out"),
-                }));
-                effects.push(Effect::SendClientDone(SendClientDone {
-                    client_stream_id: sid,
-                }));
-            }
+            let effects: Vec<Effect<WId, SId>> = expired
+                .into_iter()
+                .flat_map(|sid| {
+                    [
+                        Effect::SendClientError(SendClientError {
+                            client_stream_id: sid.clone(),
+                            message: String::from("stream timed out"),
+                        }),
+                        Effect::SendClientDone(SendClientDone {
+                            client_stream_id: sid,
+                        }),
+                    ]
+                })
+                .collect();
 
-            Transition { state, effects }
+            Transition {
+                state: GatewayState {
+                    tick,
+                    available,
+                    active_streams: kept,
+                    ..state
+                },
+                effects,
+            }
         }
+        Event::SessionEvent {
+            session_id,
+            event: session_event,
+        } => match state.sessions.extract(&session_id) {
+            Some((session_state, sessions)) => {
+                let session::Transition {
+                    state: updated_session_state,
+                    effects: session_effects,
+                } = session::kernel::reduce(session_state, session_event);
+
+                Transition {
+                    state: GatewayState {
+                        sessions: sessions.update(session_id, updated_session_state),
+                        ..state
+                    },
+                    effects: session_effects
+                        .into_iter()
+                        .map(Effect::SessionEffect)
+                        .collect(),
+                }
+            }
+            None => Transition {
+                state,
+                effects: vec![Effect::ProtocolViolation(ProtocolViolation {
+                    worker_description: String::from("unknown"),
+                    message: format!("event for unknown session {}", session_id),
+                })],
+            },
+        },
     }
 }
 
-fn first_capable_worker_id<WId, SId>(
+fn first_capable_worker_id<WId: Clone + Ord, SId: Clone + Ord>(
     state: &GatewayState<WId, SId>,
     required: &Capability,
-) -> Option<WId>
-where
-    WId: Clone + Ord,
-{
+) -> Option<WId> {
     state
         .available
         .iter()
@@ -328,16 +402,18 @@ mod tests {
         String::from(value)
     }
 
-    fn chat_caps() -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::Chat])
+    fn chat_caps() -> OrdSet<Capability> {
+        OrdSet::unit(Capability::Chat)
     }
 
-    fn transcription_caps() -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::Transcription])
+    fn transcription_caps() -> OrdSet<Capability> {
+        OrdSet::unit(Capability::Transcription)
     }
 
-    fn both_caps() -> BTreeSet<Capability> {
-        BTreeSet::from([Capability::Chat, Capability::Transcription])
+    fn both_caps() -> OrdSet<Capability> {
+        vec![Capability::Chat, Capability::Transcription]
+            .into_iter()
+            .collect()
     }
 
     fn chat_entry(deadline: u64) -> WorkerEntry {
@@ -1668,13 +1744,15 @@ mod tests {
         // Small ID pools to encourage collisions and interesting interactions
         const WORKER_IDS: &[&str] = &["w0", "w1", "w2"];
         const STREAM_IDS: &[&str] = &["s0", "s1", "s2"];
+        const SESSION_IDS: &[&str] = &["sess0", "sess1"];
 
         fn arb_capability() -> impl Strategy<Value = Capability> {
             prop_oneof![Just(Capability::Chat), Just(Capability::Transcription),]
         }
 
-        fn arb_capabilities() -> impl Strategy<Value = BTreeSet<Capability>> {
+        fn arb_capabilities() -> impl Strategy<Value = OrdSet<Capability>> {
             proptest::collection::btree_set(arb_capability(), 1..=2)
+                .prop_map(|s| s.into_iter().collect())
         }
 
         fn arb_event() -> impl Strategy<Value = Event<WId, SId>> {
@@ -1719,6 +1797,29 @@ mod tests {
                 }),
                 // Tick
                 Just(Event::Tick),
+                // SessionEvent
+                (
+                    prop::sample::select(SESSION_IDS),
+                    prop_oneof![
+                        Just(crate::gateway::session::Event::EntryAppended {
+                            payload: json!({"data": "test"}),
+                        }),
+                        prop::sample::select(STREAM_IDS).prop_map(|sub| {
+                            crate::gateway::session::Event::Subscribed {
+                                subscriber_id: s(sub),
+                            }
+                        }),
+                        prop::sample::select(STREAM_IDS).prop_map(|sub| {
+                            crate::gateway::session::Event::Unsubscribed {
+                                subscriber_id: s(sub),
+                            }
+                        }),
+                    ],
+                )
+                    .prop_map(|(sess, event)| Event::SessionEvent {
+                        session_id: SessionId(String::from(sess)),
+                        event,
+                    }),
             ]
         }
 
@@ -2027,7 +2128,7 @@ mod tests {
 
                 for event in events {
                     // Snapshot worker capabilities before the transition
-                    let worker_caps_before: std::collections::BTreeMap<WId, BTreeSet<Capability>> =
+                    let worker_caps_before: std::collections::BTreeMap<WId, OrdSet<Capability>> =
                         state
                             .available
                             .iter()

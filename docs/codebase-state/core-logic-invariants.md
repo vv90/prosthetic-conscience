@@ -1,6 +1,6 @@
 # Core Logic Invariants
 
-Snapshot date: 2026-03-09
+Snapshot date: 2026-03-19
 
 ## Design Philosophy
 
@@ -30,6 +30,18 @@ That's it. Everything else (channel types, registry, handler structure, relay im
 | **Adapters** | Transport concerns: websocket framing, SSE formatting, HTTP status codes, re-registration after job completion    | Impure, no system-state decisions |
 
 The principle: **if it's a decision, it belongs in the kernel. If it's I/O, it belongs in the runtime/adapters. The runtime should be so simple that its correctness is obvious by inspection.**
+
+### Pure immutable state transitions
+
+The kernel uses exclusively pure immutable data manipulations. `reduce` takes owned `state` (not `mut state`) and returns a new `GatewayState` constructed via struct literals. No in-place mutation is used anywhere in the reducer.
+
+This is enforced through:
+
+- **Persistent collections**: `im::OrdMap` and `im::OrdSet` provide O(log n) immutable updates with O(1) clone via structural sharing. Operations like `update`, `without`, `extract`, and `into_iter().filter().collect()` produce new collections without mutating the original.
+- **Ownership-based extraction**: `OrdMap::extract` takes ownership of a value from the map, returning `(value, new_map)`. This avoids cloning when a value must be transformed and re-inserted (e.g., session state delegation, worker heartbeat deadline update).
+- **Struct literal construction**: every match arm builds a new state with `GatewayState { changed_field: new_value, ..state }`.
+
+This is a non-negotiable design constraint. All future kernel logic must follow the same pattern. No `&mut` on state, no `.insert()`, `.remove()`, `.retain()`, or field assignment on state fields.
 
 ## Scope
 
@@ -103,8 +115,9 @@ See `gateway-state-machine.md` for the full list. These are properties of the re
 - **I3**: Every `DispatchJob` is emitted in the same transition that removes the worker from `available` and adds the stream to `active_streams`. Duplicate stream IDs are rejected before dispatch (no silent overwrite).
 - **I4**: No silent state changes without corresponding effects.
 - **I5**: Every `client_stream_id` that enters the kernel eventually gets terminal effects -- either immediately (pre-dispatch error), via `AssignmentCleared` (normal completion), or via tick expiration (timeout).
+- **I6**: Dispatch only targets workers whose capabilities include the required capability.
 
-All five invariants are covered by property tests over arbitrary event sequences.
+All six invariants are covered by property tests over arbitrary event sequences.
 
 ### Runtime
 
@@ -144,7 +157,7 @@ Note: adapters do **not** need to send unregister commands, guarantee delivery o
 ### Current state
 
 - **One-use worker IDs implemented.** Worker registers, gets dispatched, is consumed. No Idle/Busy lifecycle. After job completion, worker handler re-registers with a fresh ID and fresh oneshot. From the kernel's perspective, it's a new worker.
-- **Kernel state**: `available: BTreeMap<WId, u64>` (workers waiting, deadline tick) + `active_streams: BTreeMap<SId, u64>` (streams with jobs in flight, deadline tick). Orthogonal collections (different ID types).
+- **Kernel state**: `available: OrdMap<WId, WorkerEntry>` (workers waiting, with deadline and capabilities) + `active_streams: OrdMap<SId, u64>` (streams with jobs in flight, deadline tick) + `sessions: OrdMap<SessionId, session::State<SId>>` (active sessions). All collections are `im` persistent types. Orthogonal collections (different ID types).
 - `AssignmentCleared { client_stream_id }` event removes stream from `active_streams` and emits `SendClientDone` (success path).
 - `AssignmentFailed { client_stream_id, message }` event removes stream from `active_streams` and emits `SendClientError` + `SendClientDone` (failure path).
 - Runtime forwards `AssignmentCleared` commands to kernel and resolves effects. No `RelayOutcome` mapping, no `WorkerJobCompleted`, no `set_worker_handle`.
@@ -167,7 +180,7 @@ None.
 
 ## Status
 
-- Core kernel: implemented with one-use worker IDs, tick-counted deadlines, heartbeat events, timeout expiration, duplicate stream ID rejection. 44 unit tests + 6 property tests (I2-I5, tick monotonicity, stream timeout error+done pair).
+- Core kernel: pure immutable reducer with persistent collections (`im::OrdMap`, `im::OrdSet`). Capability-based dispatch, session delegation, one-use worker IDs, tick-counted deadlines, heartbeat events, timeout expiration, duplicate stream ID rejection. 49 unit tests + 7 property tests (I2-I6, tick monotonicity, stream timeout error+done pair, request terminal effects).
 - Runtime: implemented. `AssignmentCleared`, `AssignmentFailed`, `WorkerHeartbeat`, and `StreamHeartbeat` commands, tick task with `try_send`. No `WorkerJobCompleted` or `set_worker_handle`.
 - Channel registry: implemented. `register_worker` + `take_worker` only.
 - Effect execution: four effect executors implemented. `DispatchJob` constructs `WorkerJob` (passing `Capability` through) and sends via oneshot; signals `AssignmentFailed` on dispatch failure. `ProtocolViolation` logs via `tracing::warn!`. `SendClientError` sends `StreamFrame::Error` via cloned handle. `SendClientDone` sends `StreamFrame::Done` and drops the taken handle.
@@ -185,6 +198,7 @@ None.
 ## Relevant files
 
 - `src/gateway/kernel.rs`
+- `src/gateway/session/kernel.rs`
 - `src/gateway/runtime.rs`
 - `src/gateway/channel_registry.rs`
 - `src/gateway/effects/` (effect struct definitions)

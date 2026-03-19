@@ -5,7 +5,7 @@ Snapshot date: 2026-03-18
 ## Behavior
 
 - `GET /ws/worker?capabilities=chat,transcription` upgrades to websocket. The `capabilities` query parameter is required and declares which job types the worker can handle. Unknown capability values or missing parameter returns HTTP 400.
-- Workers declare capabilities via the URL query string. The gateway parses these using `parse_capabilities()` and passes the resulting `BTreeSet<Capability>` through registration.
+- Workers declare capabilities via the URL query string. The gateway parses these using `parse_capabilities()` which returns `BTreeSet<Capability>` at the API boundary. The runtime converts to `OrdSet<Capability>` when constructing the kernel event in `handle_register_worker`.
 - On connect, worker route allocates a per-job `oneshot::Sender<WorkerJob>` and registers it via runtime (`RuntimeHandle::register_worker`), receiving an opaque `WorkerId`.
 - The oneshot channel enforces one-job-at-a-time structurally — the runtime cannot queue multiple jobs to a single worker.
 - Idle phase uses `tokio::select!` to race job arrival against websocket activity and a heartbeat timer. While idle, the handler sends `WorkerHeartbeat` to the runtime every 15 seconds (via `tokio::time::interval_at` starting one period after registration). The interval resets after each re-registration to avoid stale heartbeats with the old worker ID.

@@ -12,6 +12,7 @@ use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
 use super::kernel::Capability;
 use super::kernel::{Effect, Event, GatewayState, Transition, reduce};
+use super::session;
 
 /// Configuration for the gateway runtime.
 pub struct GatewayConfig {
@@ -239,7 +240,7 @@ impl GatewayRuntime {
 
         self.apply_event(Event::WorkerRegistered {
             worker_id,
-            capabilities,
+            capabilities: capabilities.into_iter().collect(),
         })
     }
 
@@ -358,6 +359,29 @@ impl GatewayRuntime {
                     }
                 }
                 Effect::ProtocolViolation(e) => resolved.push(Effect::ProtocolViolation(e)),
+                Effect::SessionEffect(e) => match e {
+                    session::Effect::NotifySubscribers {
+                        entry_index,
+                        payload,
+                        subscribers,
+                    } => {
+                        let resolved_subscribers: Vec<_> = subscribers
+                            .into_iter()
+                            .filter_map(|sid| {
+                                self.registry.clone_stream(&sid).map(|handle| (sid, handle))
+                            })
+                            .collect();
+                        if !resolved_subscribers.is_empty() {
+                            resolved.push(Effect::SessionEffect(
+                                session::Effect::NotifySubscribers {
+                                    entry_index,
+                                    payload,
+                                    subscribers: resolved_subscribers,
+                                },
+                            ));
+                        }
+                    }
+                },
             }
         }
 
@@ -487,6 +511,9 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                 Effect::SendClientError(e) => e.execute().await,
                 Effect::SendClientDone(e) => e.execute().await,
                 Effect::ProtocolViolation(e) => e.execute().await,
+                Effect::SessionEffect(_) => {
+                    // No-op until session adapters are wired
+                }
             }
         }
     });

@@ -129,6 +129,46 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 - **Effect system** — gateway-internal.
 - **Timeout/heartbeat mechanism** — gateway-internal.
 
+## Sessions: append-only shared log (next feature)
+
+Goal: introduce a "session" primitive — an ordered, append-only log that multiple clients can connect to, append entries, and receive real-time updates. This is the minimal coordination substrate needed for multi-source workflows (e.g., summary engines, collaborative annotation) without requiring a separate orchestrator binary.
+
+### Design
+
+- A **session** is an ordered sequence of entries: `(seq: u64, client_id, payload: Value)`.
+- `seq` is assigned by the gateway on append (monotonically increasing per session).
+- Clients connect to a session and can:
+  - **Append** an entry → returns the assigned `seq`.
+  - **Read** entries with cursor: `?after=seq` returns only entries with `seq > after`.
+  - **Subscribe** for real-time push of new entries as they are appended.
+- The gateway never truncates, compacts, or interprets entry payloads.
+- Sessions are created on demand and are in-memory (lost on gateway restart, consistent with existing job semantics).
+
+### Kernel integration
+
+The session logic will live in the kernel as pure state transitions, following the existing `reduce(state, event) -> (state, effects)` pattern:
+
+- **New events**: `SessionCreated`, `SessionEntryAppended`, `SessionSubscribed`, `SessionUnsubscribed`.
+- **New effects**: `NotifySessionSubscribers` (push new entry to connected clients).
+- **New state**: session registry mapping `SessionId -> Vec<(seq, client_id, payload)>` + subscriber set.
+
+### Implementation process
+
+1. Define types and kernel interface (event/effect variants) — no logic yet.
+2. Verify all existing tests still pass with the new types added.
+3. Write tests for session invariants (should fail since logic is not implemented).
+4. Implement session logic in kernel `reduce()`.
+5. Wire up HTTP/WS adapters for session operations.
+
+### Key invariants (to be encoded as property tests)
+
+- `seq` values within a session are strictly monotonically increasing with no gaps.
+- Appending to a session always succeeds if the session exists.
+- `?after=seq` returns exactly the entries with `seq > after`, in order.
+- Subscribers receive exactly the entries appended after their subscription, in order.
+- Creating an already-existing session is idempotent (or returns the existing one).
+- Session state is independent — operations on one session never affect another.
+
 ## Other tasks
 
 43. Add worker handshake/version/capability validation (supersedes stopgap auth in item 48).

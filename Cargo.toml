@@ -9,6 +9,7 @@ base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "json", "multipart"] }
 clap = { version = "4", features = ["derive"] }
 either = "1.15.0"
+im = "15"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 serde = { version = "1", features = ["derive"] }
