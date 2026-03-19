@@ -7,8 +7,83 @@
 //! Internal channel types (`StreamFrame`, `RelayOutcome`, `WorkerJob`) live
 //! in their respective gateway modules — they are not wire types.
 
+use std::collections::BTreeSet;
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Capability — shared protocol type
+// ---------------------------------------------------------------------------
+
+/// A capability that a worker can declare and a job can require.
+///
+/// Used across the entire stack: routers, kernel, effects, wire protocol,
+/// and worker agent. Serializes to/from lowercase strings (`"chat"`,
+/// `"transcription"`) for wire compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    Chat,
+    Transcription,
+}
+
+impl Capability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Chat => "chat",
+            Capability::Transcription => "transcription",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseCapabilityError(String);
+
+impl fmt::Display for ParseCapabilityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown capability: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for ParseCapabilityError {}
+
+impl FromStr for Capability {
+    type Err = ParseCapabilityError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "chat" => Ok(Capability::Chat),
+            "transcription" => Ok(Capability::Transcription),
+            other => Err(ParseCapabilityError(other.to_owned())),
+        }
+    }
+}
+
+impl fmt::Display for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parse a comma-separated capability string (e.g., "chat,transcription")
+/// into a `BTreeSet<Capability>`. Returns an error if any token is unknown
+/// or if the result is empty.
+pub fn parse_capabilities(s: &str) -> Result<BTreeSet<Capability>, ParseCapabilityError> {
+    let caps: Result<BTreeSet<Capability>, _> = s
+        .split(',')
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(Capability::from_str)
+        .collect();
+    let caps = caps?;
+    if caps.is_empty() {
+        return Err(ParseCapabilityError(String::new()));
+    }
+    Ok(caps)
+}
 
 // ---------------------------------------------------------------------------
 // Worker → Gateway (WebSocket)
@@ -45,6 +120,7 @@ pub enum WorkerMessage {
 pub enum GatewayToWorker {
     Job {
         client_stream_id: String,
+        capability: Capability,
         payload: Value,
     },
 }
@@ -171,6 +247,7 @@ mod tests {
     fn gateway_to_worker_job_round_trip() {
         let msg = GatewayToWorker::Job {
             client_stream_id: String::from("abc-123"),
+            capability: Capability::Chat,
             payload: json!({"model": "llama", "messages": []}),
         };
         let json_str = serde_json::to_string(&msg).unwrap();
@@ -179,17 +256,30 @@ mod tests {
     }
 
     #[test]
-    fn gateway_to_worker_job_matches_current_wire_format() {
+    fn gateway_to_worker_transcription_job_round_trip() {
+        let msg = GatewayToWorker::Job {
+            client_stream_id: String::from("xyz-789"),
+            capability: Capability::Transcription,
+            payload: json!({"audio_base64": "AAAA", "model": "whisper-1"}),
+        };
+        let json_str = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayToWorker = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn gateway_to_worker_job_matches_wire_format() {
         let msg = GatewayToWorker::Job {
             client_stream_id: String::from("abc-123"),
+            capability: Capability::Chat,
             payload: json!({"model": "demo"}),
         };
         let json_str = serde_json::to_string(&msg).unwrap();
         let parsed: Value = serde_json::from_str(&json_str).unwrap();
 
-        // Must match the shape previously produced by json!() in worker_ws_upgrade.rs
         assert_eq!(parsed["type"], "job");
         assert_eq!(parsed["client_stream_id"], "abc-123");
+        assert_eq!(parsed["capability"], "chat");
         assert_eq!(parsed["payload"], json!({"model": "demo"}));
     }
 
@@ -224,5 +314,80 @@ mod tests {
         let req: ChatRequest = serde_json::from_str(input).unwrap();
         assert_eq!(req.payload["model"], "llama");
         assert_eq!(req.payload["messages"][0]["role"], "user");
+    }
+
+    // -- Capability tests --
+
+    #[test]
+    fn capability_as_str_round_trip() {
+        assert_eq!("chat".parse::<Capability>().unwrap(), Capability::Chat);
+        assert_eq!(
+            "transcription".parse::<Capability>().unwrap(),
+            Capability::Transcription
+        );
+        assert_eq!(Capability::Chat.as_str(), "chat");
+        assert_eq!(Capability::Transcription.as_str(), "transcription");
+    }
+
+    #[test]
+    fn capability_display_matches_as_str() {
+        assert_eq!(format!("{}", Capability::Chat), "chat");
+        assert_eq!(format!("{}", Capability::Transcription), "transcription");
+    }
+
+    #[test]
+    fn capability_parse_rejects_unknown() {
+        assert!("unknown".parse::<Capability>().is_err());
+        assert!("Chat".parse::<Capability>().is_err()); // case-sensitive
+        assert!("CHAT".parse::<Capability>().is_err());
+        assert!("".parse::<Capability>().is_err());
+    }
+
+    #[test]
+    fn capability_serde_round_trip() {
+        let chat_json = serde_json::to_string(&Capability::Chat).unwrap();
+        assert_eq!(chat_json, r#""chat""#);
+        let parsed: Capability = serde_json::from_str(&chat_json).unwrap();
+        assert_eq!(parsed, Capability::Chat);
+
+        let trans_json = serde_json::to_string(&Capability::Transcription).unwrap();
+        assert_eq!(trans_json, r#""transcription""#);
+        let parsed: Capability = serde_json::from_str(&trans_json).unwrap();
+        assert_eq!(parsed, Capability::Transcription);
+    }
+
+    #[test]
+    fn parse_capabilities_single() {
+        let caps = parse_capabilities("chat").unwrap();
+        assert_eq!(caps, std::collections::BTreeSet::from([Capability::Chat]));
+    }
+
+    #[test]
+    fn parse_capabilities_multiple() {
+        let caps = parse_capabilities("chat,transcription").unwrap();
+        assert_eq!(caps.len(), 2);
+    }
+
+    #[test]
+    fn parse_capabilities_trims_whitespace() {
+        let caps = parse_capabilities(" chat , transcription ").unwrap();
+        assert_eq!(caps.len(), 2);
+    }
+
+    #[test]
+    fn parse_capabilities_deduplicates() {
+        let caps = parse_capabilities("chat,chat").unwrap();
+        assert_eq!(caps.len(), 1);
+    }
+
+    #[test]
+    fn parse_capabilities_rejects_empty() {
+        assert!(parse_capabilities("").is_err());
+        assert!(parse_capabilities(",,,").is_err());
+    }
+
+    #[test]
+    fn parse_capabilities_rejects_unknown_token() {
+        assert!(parse_capabilities("chat,bogus").is_err());
     }
 }

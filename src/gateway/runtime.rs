@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -6,10 +7,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::gateway::channel_registry::WorkerHandle;
 
 use super::channel_registry::{ChannelRegistry, ClientStreamId, StreamHandle, WorkerId};
-use super::effects::close_stream::CloseStream;
 use super::effects::dispatch_job::DispatchJob;
 use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
+use super::kernel::Capability;
 use super::kernel::{Effect, Event, GatewayState, Transition, reduce};
 
 /// Configuration for the gateway runtime.
@@ -56,6 +57,7 @@ type ResolvedEffect = Effect<WorkerHandle, ResolvedSId>;
 pub enum RuntimeCommand {
     RegisterWorker {
         handle: WorkerHandle,
+        capabilities: BTreeSet<Capability>,
         reply_tx: oneshot::Sender<WorkerId>,
     },
     WorkerHeartbeat {
@@ -79,6 +81,7 @@ pub enum RuntimeCommand {
         client_stream_id: ClientStreamId,
         payload: Value,
         stream: bool,
+        required_capability: Capability,
     },
     QueryState {
         reply_tx: oneshot::Sender<StateSnapshot>,
@@ -107,10 +110,18 @@ impl RuntimeHandle {
             .map_err(|_| RuntimeSendError)
     }
 
-    pub async fn register_worker(&self, handle: WorkerHandle) -> Result<WorkerId, RegisterError> {
+    pub async fn register_worker(
+        &self,
+        handle: WorkerHandle,
+        capabilities: BTreeSet<Capability>,
+    ) -> Result<WorkerId, RegisterError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.submit_command(RuntimeCommand::RegisterWorker { handle, reply_tx })
-            .await?;
+        self.submit_command(RuntimeCommand::RegisterWorker {
+            handle,
+            capabilities,
+            reply_tx,
+        })
+        .await?;
         let worker_id = reply_rx.await?;
         Ok(worker_id)
     }
@@ -164,11 +175,13 @@ impl RuntimeHandle {
         client_stream_id: ClientStreamId,
         payload: Value,
         stream: bool,
+        required_capability: Capability,
     ) -> Result<(), RuntimeSendError> {
         self.submit_command(RuntimeCommand::HttpChatRequested {
             client_stream_id,
             payload,
             stream,
+            required_capability,
         })
         .await
     }
@@ -213,6 +226,7 @@ impl GatewayRuntime {
     pub fn handle_register_worker(
         mut self,
         worker_handle: WorkerHandle,
+        capabilities: BTreeSet<Capability>,
         reply_tx: oneshot::Sender<WorkerId>,
     ) -> (Self, Vec<KernelEffect>) {
         let worker_id = self.registry.register_worker(worker_handle);
@@ -223,7 +237,10 @@ impl GatewayRuntime {
         // unregister semantics.
         let _ = reply_tx.send(worker_id.clone());
 
-        self.apply_event(Event::WorkerRegistered { worker_id })
+        self.apply_event(Event::WorkerRegistered {
+            worker_id,
+            capabilities,
+        })
     }
 
     pub fn handle_worker_heartbeat(self, worker_id: WorkerId) -> (Self, Vec<KernelEffect>) {
@@ -260,11 +277,13 @@ impl GatewayRuntime {
         client_stream_id: ClientStreamId,
         payload: Value,
         stream: bool,
+        required_capability: Capability,
     ) -> (Self, Vec<KernelEffect>) {
         self.apply_event(Event::HttpChatRequested {
             client_stream_id,
             payload,
             stream,
+            required_capability,
         })
     }
 
@@ -292,6 +311,7 @@ impl GatewayRuntime {
                     let DispatchJob {
                         worker_id,
                         client_stream_id,
+                        capability,
                         payload,
                     } = e;
                     // Take the oneshot sender out of the registry (consumed on use)
@@ -318,6 +338,7 @@ impl GatewayRuntime {
                     resolved.push(Effect::DispatchJob(DispatchJob {
                         worker_id: worker_handle,
                         client_stream_id: (client_stream_id, stream_handle),
+                        capability,
                         payload,
                     }));
                 }
@@ -336,13 +357,6 @@ impl GatewayRuntime {
                         }));
                     }
                 }
-                Effect::CloseStream(e) => {
-                    if let Some(stream_handle) = self.registry.take_stream(&e.client_stream_id) {
-                        resolved.push(Effect::CloseStream(CloseStream {
-                            client_stream_id: (e.client_stream_id, stream_handle),
-                        }));
-                    }
-                }
                 Effect::ProtocolViolation(e) => resolved.push(Effect::ProtocolViolation(e)),
             }
         }
@@ -357,9 +371,11 @@ impl GatewayRuntime {
     ) -> (Self, Vec<ResolvedEffect>) {
         let (mut updated_runtime, effects) = match message {
             RuntimeMessage::Command(command) => match command {
-                RuntimeCommand::RegisterWorker { handle, reply_tx } => {
-                    self.handle_register_worker(handle, reply_tx)
-                }
+                RuntimeCommand::RegisterWorker {
+                    handle,
+                    capabilities,
+                    reply_tx,
+                } => self.handle_register_worker(handle, capabilities, reply_tx),
                 RuntimeCommand::WorkerHeartbeat { worker_id } => {
                     self.handle_worker_heartbeat(worker_id)
                 }
@@ -380,7 +396,13 @@ impl GatewayRuntime {
                     client_stream_id,
                     payload,
                     stream,
-                } => self.handle_http_chat_requested(client_stream_id, payload, stream),
+                    required_capability,
+                } => self.handle_http_chat_requested(
+                    client_stream_id,
+                    payload,
+                    stream,
+                    required_capability,
+                ),
                 RuntimeCommand::QueryState { reply_tx } => {
                     let snapshot = StateSnapshot {
                         tick: self.state.tick,
@@ -464,7 +486,6 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                 Effect::DispatchJob(e) => e.execute(&runtime).await,
                 Effect::SendClientError(e) => e.execute().await,
                 Effect::SendClientDone(e) => e.execute().await,
-                Effect::CloseStream(e) => e.execute().await,
                 Effect::ProtocolViolation(e) => e.execute().await,
             }
         }

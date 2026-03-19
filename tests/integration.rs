@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use prosthetic_conscience::client::gateway_client::GatewayClient;
@@ -8,10 +9,11 @@ use prosthetic_conscience::client::tool_loop;
 use prosthetic_conscience::client::tools::ToolRegistry;
 use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
 use prosthetic_conscience::gateway::runtime::GatewayConfig;
+use prosthetic_conscience::protocol::Capability;
 use prosthetic_conscience::protocol::GatewayToWorker;
 use serde_json::json;
 
-use support::client::{SseClient, SseEvent};
+use support::client::{SseClient, SseEvent, transcribe};
 use support::gateway::TestGateway;
 use support::worker::MockWorker;
 
@@ -55,6 +57,172 @@ async fn happy_path_streams_chunks_and_done() {
             SseEvent::Data(json!({"choices": [{"delta": {"content": " world"}}]})),
         );
         assert_eq!(events[2], SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+// --- Transcription integration tests ---
+
+#[tokio::test]
+async fn transcription_happy_path() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        // Connect a transcription-capable worker.
+        let mut worker = MockWorker::connect_with_capabilities(
+            gw.addr,
+            BTreeSet::from([Capability::Transcription]),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send a transcription request (small fake audio bytes).
+        let audio_bytes = b"fake audio data";
+        let response_future = transcribe(gw.addr, audio_bytes, "whisper-1");
+
+        // Worker receives job, verifies capability, sends response.
+        let (response, _) = tokio::join!(response_future, async {
+            let job = worker.recv_job().await;
+            let GatewayToWorker::Job {
+                capability,
+                payload,
+                ..
+            } = job;
+            assert_eq!(
+                capability,
+                prosthetic_conscience::protocol::Capability::Transcription
+            );
+            assert!(payload["audio_base64"].is_string());
+            assert_eq!(payload["model"], "whisper-1");
+
+            worker.send_chunk(json!({"text": "hello world"})).await;
+            worker.send_end().await;
+        });
+
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["text"], "hello world");
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn transcription_no_worker_returns_error() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        // No transcription worker connected.
+        let response = transcribe(gw.addr, b"audio", "whisper-1").await;
+
+        // Should get an error — dispatched via SSE internally, collected as error response.
+        assert_eq!(response.status(), 500);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["message"], "no idle worker available");
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn transcription_worker_error() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let mut worker = MockWorker::connect_with_capabilities(
+            gw.addr,
+            BTreeSet::from([Capability::Transcription]),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let response_future = transcribe(gw.addr, b"audio", "whisper-1");
+
+        let (response, _) = tokio::join!(response_future, async {
+            let _job = worker.recv_job().await;
+            worker.send_error("whisper backend unavailable").await;
+        });
+
+        assert_eq!(response.status(), 500);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("whisper backend unavailable"),
+        );
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn transcription_worker_does_not_receive_chat_jobs() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        // Connect a worker declaring only Transcription capability.
+        let _worker = MockWorker::connect_with_capabilities(
+            gw.addr,
+            BTreeSet::from([Capability::Transcription]),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send a chat request — should fail because no chat-capable worker exists.
+        let mut client = SseClient::chat(gw.addr, json!({"model": "test"})).await;
+        let events = client.collect_all().await;
+
+        assert_eq!(events.len(), 2, "expected error + done, got: {:?}", events);
+        match &events[0] {
+            SseEvent::Data(v) => {
+                let msg = v["error"]["message"].as_str().unwrap();
+                assert_eq!(msg, "no idle worker available");
+            }
+            other => panic!("expected error event, got: {:?}", other),
+        }
+        assert_eq!(events[1], SseEvent::Done);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn chat_worker_alongside_transcription_worker() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        // Connect a transcription-only worker.
+        let _transcription_worker = MockWorker::connect_with_capabilities(
+            gw.addr,
+            BTreeSet::from([Capability::Transcription]),
+        )
+        .await;
+
+        // Connect a chat-capable worker.
+        let mut chat_worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Send a chat request — the chat worker should get it.
+        let mut client = SseClient::chat(gw.addr, json!({"model": "test"})).await;
+
+        let job = chat_worker.recv_job().await;
+        let GatewayToWorker::Job { payload, .. } = job;
+        assert_eq!(payload["model"], "test");
+
+        chat_worker
+            .send_chunk(json!({"choices": [{"delta": {"content": "hello"}}]}))
+            .await;
+        chat_worker.send_end().await;
+
+        let events = client.collect_all().await;
+        assert_eq!(events.len(), 2, "expected chunk + done, got: {:?}", events);
+        assert_eq!(
+            events[0],
+            SseEvent::Data(json!({"choices": [{"delta": {"content": "hello"}}]})),
+        );
+        assert_eq!(events[1], SseEvent::Done);
     })
     .await
     .expect("test timed out after 5 seconds");
@@ -394,10 +562,9 @@ async fn no_workers_returns_sse_error() {
         let mut client = SseClient::chat(gw.addr, json!({"model": "test"})).await;
         let events = client.collect_all().await;
 
-        // Kernel emits SendClientError + CloseStream (not SendClientDone).
-        // CloseStream drops the handle without sending [DONE], so the stream
-        // just ends after the error event.
-        assert_eq!(events.len(), 1, "expected error only, got: {:?}", events);
+        // Kernel emits SendClientError + SendClientDone.
+        // Client receives the error event followed by [DONE].
+        assert_eq!(events.len(), 2, "expected error + done, got: {:?}", events);
         match &events[0] {
             SseEvent::Data(v) => {
                 let msg = v["error"]["message"].as_str().unwrap();
@@ -405,6 +572,7 @@ async fn no_workers_returns_sse_error() {
             }
             other => panic!("expected error event, got: {:?}", other),
         }
+        assert_eq!(events[1], SseEvent::Done);
     })
     .await
     .expect("test timed out after 5 seconds");

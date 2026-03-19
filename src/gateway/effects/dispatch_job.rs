@@ -3,11 +3,13 @@ use tokio::sync::oneshot;
 
 use crate::gateway::channel_registry::{ClientStreamId, StreamHandle, WorkerJob};
 use crate::gateway::runtime::RuntimeHandle;
+use crate::protocol::Capability;
 
 #[derive(Debug, PartialEq)]
 pub struct DispatchJob<WId, SId> {
     pub worker_id: WId,
     pub client_stream_id: SId,
+    pub capability: Capability,
     pub payload: Value,
 }
 
@@ -16,6 +18,7 @@ impl DispatchJob<oneshot::Sender<WorkerJob>, (ClientStreamId, StreamHandle)> {
         let (client_stream_id, client_tx) = self.client_stream_id;
         let job = WorkerJob {
             client_stream_id: client_stream_id.clone(),
+            capability: self.capability,
             payload: self.payload,
             client_tx,
         };

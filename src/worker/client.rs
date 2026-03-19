@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -6,8 +7,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info, warn};
 
+use crate::protocol::Capability;
 use crate::protocol::{GatewayToWorker, WorkerMessage};
 use crate::worker::inference::InferenceClient;
+use crate::worker::whisper::WhisperClient;
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -15,26 +18,48 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub struct WorkerClient {
     gateway_url: String,
     inference: InferenceClient,
+    whisper: Option<WhisperClient>,
     auth_token: Option<String>,
+    capabilities: BTreeSet<Capability>,
 }
 
 impl WorkerClient {
     pub fn new(
         gateway_url: String,
         inference: InferenceClient,
+        whisper: Option<WhisperClient>,
         auth_token: Option<String>,
+        capabilities: BTreeSet<Capability>,
     ) -> Self {
         Self {
             gateway_url,
             inference,
+            whisper,
             auth_token,
+            capabilities,
         }
     }
 
     /// Build a WebSocket connection request, optionally with an auth header.
     fn build_request(&self) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
-        let mut request = self
-            .gateway_url
+        let caps_param: String = self
+            .capabilities
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let separator = if self.gateway_url.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
+        let url_with_caps = format!(
+            "{}{}capabilities={}",
+            self.gateway_url, separator, caps_param
+        );
+
+        let mut request = url_with_caps
             .as_str()
             .into_client_request()
             .map_err(|e| format!("invalid gateway URL: {e}"))?;
@@ -128,13 +153,18 @@ impl WorkerClient {
 
             let GatewayToWorker::Job {
                 client_stream_id,
+                capability,
                 payload,
             } = job;
 
-            info!(client_stream_id = %client_stream_id, "received job");
+            info!(client_stream_id = %client_stream_id, capability = %capability, "received job");
 
-            // Stream inference and forward chunks to gateway.
-            let result = self.process_job(&mut sink, payload).await;
+            let result = match capability {
+                Capability::Chat => self.process_chat_job(&mut sink, payload).await,
+                Capability::Transcription => {
+                    self.process_transcription_job(&mut sink, payload).await
+                }
+            };
 
             match &result {
                 Ok(()) => {
@@ -160,8 +190,12 @@ impl WorkerClient {
         }
     }
 
-    /// Run inference for a single job and stream results back.
-    async fn process_job<S>(&self, sink: &mut S, payload: serde_json::Value) -> Result<(), String>
+    /// Run chat inference for a single job and stream results back.
+    async fn process_chat_job<S>(
+        &self,
+        sink: &mut S,
+        payload: serde_json::Value,
+    ) -> Result<(), String>
     where
         S: SinkExt<Message> + Unpin,
         S::Error: std::fmt::Display,
@@ -204,5 +238,62 @@ impl WorkerClient {
             .map_err(|e| format!("websocket send error: {e}"))?;
 
         Ok(())
+    }
+
+    /// Run a transcription job: call whisper backend and send result back.
+    async fn process_transcription_job<S>(
+        &self,
+        sink: &mut S,
+        payload: serde_json::Value,
+    ) -> Result<(), String>
+    where
+        S: SinkExt<Message> + Unpin,
+        S::Error: std::fmt::Display,
+    {
+        let whisper = match &self.whisper {
+            Some(w) => w,
+            None => {
+                let msg = WorkerMessage::Error {
+                    message: String::from("transcription not configured on this worker"),
+                };
+                let text =
+                    serde_json::to_string(&msg).map_err(|e| format!("serialization error: {e}"))?;
+                sink.send(Message::Text(text))
+                    .await
+                    .map_err(|e| format!("websocket send error: {e}"))?;
+                return Err(String::from("transcription not configured"));
+            }
+        };
+
+        match whisper.transcribe(payload).await {
+            Ok(data) => {
+                let chunk = WorkerMessage::Chunk { data };
+                let text = serde_json::to_string(&chunk)
+                    .map_err(|e| format!("serialization error: {e}"))?;
+                sink.send(Message::Text(text))
+                    .await
+                    .map_err(|e| format!("websocket send error: {e}"))?;
+
+                let end = WorkerMessage::End;
+                let text =
+                    serde_json::to_string(&end).map_err(|e| format!("serialization error: {e}"))?;
+                sink.send(Message::Text(text))
+                    .await
+                    .map_err(|e| format!("websocket send error: {e}"))?;
+
+                Ok(())
+            }
+            Err(e) => {
+                let msg = WorkerMessage::Error {
+                    message: e.to_string(),
+                };
+                let text =
+                    serde_json::to_string(&msg).map_err(|e| format!("serialization error: {e}"))?;
+                sink.send(Message::Text(text))
+                    .await
+                    .map_err(|e| format!("websocket send error: {e}"))?;
+                Err(format!("transcription error: {e}"))
+            }
+        }
     }
 }

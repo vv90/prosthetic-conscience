@@ -17,7 +17,7 @@ The central safety property of the system: **every client stream that enters the
 
 ### How it works
 
-1. **Pre-dispatch**: if no worker is available or `stream=false`, the kernel emits terminal effects (`SendClientError` + `CloseStream`) immediately. Client gets an error response.
+1. **Pre-dispatch**: if no worker is available or `stream=false`, the kernel emits terminal effects (`SendClientError` + `SendClientDone`) immediately. Client gets an error response followed by `[DONE]`.
 
 2. **Post-dispatch**: the kernel tracks the assignment (`worker_id -> stream_id`) and sets a deadline. Three paths to termination:
    - **Normal path**: relay delivers data via `client_tx`, sends `AssignmentCleared` to kernel, kernel emits `SendClientDone`.
@@ -31,7 +31,7 @@ The central safety property of the system: **every client stream that enters the
 - Pre-dispatch error handling: **implemented** in kernel.
 - Post-dispatch assignment tracking: **implemented** (`active_streams` in kernel).
 - Timeout mechanism: **implemented**. Tick-counted deadlines, stream heartbeats reset deadline. Timeout emits `SendClientError` + `SendClientDone`.
-- Channel-based cancellation: **implemented**. Terminal effects (`SendClientDone`, `CloseStream`) use `take_stream` to remove the registry entry, then drop the handle — closing the channel if no other senders remain. `SendClientError` uses `clone_stream` (non-terminal; the terminal effect that follows takes the handle).
+- Channel-based cancellation: **implemented**. The terminal effect (`SendClientDone`) uses `take_stream` to remove the registry entry, then drops the handle — closing the channel if no other senders remain. `SendClientError` uses `clone_stream` (non-terminal; `SendClientDone` follows and takes the handle).
 - Relay wiring: **implemented**. `relay_job` called from worker ws handler, outcome mapped to kernel events.
 
 ## Invariants

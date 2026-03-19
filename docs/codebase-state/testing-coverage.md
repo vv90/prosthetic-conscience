@@ -135,7 +135,7 @@ Location: `tests/integration.rs` with helpers in `tests/support/`.
 | Test                                                | What it proves                                                                                                                                                                                                                                        |
 | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                                                                  |
-| `no_workers_returns_sse_error`                      | No workers connected → kernel rejects with `SendClientError` + `CloseStream` → client sees error event, no `[DONE]`                                                                                                                                   |
+| `no_workers_returns_sse_error`                      | No workers connected → kernel rejects with `SendClientError` + `SendClientDone` → client sees error event + `[DONE]`                                                                                                                                  |
 | `worker_error_sends_error_and_done`                 | Worker sends chunk then `{"type":"error"}` → relay sends error directly + handler calls `assignment_failed` → client sees chunk + 2 errors + `[DONE]`                                                                                                 |
 | `worker_re_registration_handles_second_job`         | Worker completes first job, re-registers with fresh ID, receives and completes second job on same WS connection                                                                                                                                       |
 | `concurrent_streams_no_cross_contamination`         | 10 workers, 10 clients, 20 chunks each — all spawned concurrently. Each chunk tagged with `client_stream_id:index`. Asserts: no cross-contamination, chunk ordering preserved, all 10 stream IDs distinct                                             |
@@ -155,16 +155,16 @@ Test harness components:
 
 ### What is NOT tested
 
-| Area                     | Gap                                                                                                           | Risk                                                             |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Runtime message loop     | No tests for command dispatch, effect resolution, tick driver                                                 | Medium — logic is simple but wires everything together           |
-| Effect executors         | No tests for `DispatchJob`, `SendClientError`, `SendClientDone`, `CloseStream`, `ProtocolViolation` execution | Low — each is a few lines, but dispatch failure path matters     |
-| Worker WS handler        | Only happy path tested via integration test                                                                   | Medium — `select!` races, disconnect, re-registration need tests |
-| Chat completions handler | Happy path + no-workers error tested; `stream=false` rejection not yet tested                                 | Low — remaining gap is a simple HTTP 400 path                    |
-| Relay (`relay_job`)      | Happy path, error relay, disconnect, timeout, heartbeat all tested                                            | Low — malformed messages not yet tested                          |
-| Fault tolerance          | Worker disconnect, timeout, worker error all tested; client disconnect and dispatch failure not yet tested    | Medium — client disconnect and dispatch failure gaps remain      |
-| Leak detection           | `completed_streams_drain_from_state` covers success/error/timeout paths → all state drains to zero            | Low — channel close propagation not yet tested separately        |
-| Performance              | No benchmarks for throughput, latency, backpressure, or concurrent stream scaling                             | Low for correctness, medium for production readiness             |
+| Area                     | Gap                                                                                                        | Risk                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Runtime message loop     | No tests for command dispatch, effect resolution, tick driver                                              | Medium — logic is simple but wires everything together           |
+| Effect executors         | No tests for `DispatchJob`, `SendClientError`, `SendClientDone`, `ProtocolViolation` execution             | Low — each is a few lines, but dispatch failure path matters     |
+| Worker WS handler        | Only happy path tested via integration test                                                                | Medium — `select!` races, disconnect, re-registration need tests |
+| Chat completions handler | Happy path + no-workers error tested; `stream=false` rejection not yet tested                              | Low — remaining gap is a simple HTTP 400 path                    |
+| Relay (`relay_job`)      | Happy path, error relay, disconnect, timeout, heartbeat all tested                                         | Low — malformed messages not yet tested                          |
+| Fault tolerance          | Worker disconnect, timeout, worker error all tested; client disconnect and dispatch failure not yet tested | Medium — client disconnect and dispatch failure gaps remain      |
+| Leak detection           | `completed_streams_drain_from_state` covers success/error/timeout paths → all state drains to zero         | Low — channel close propagation not yet tested separately        |
+| Performance              | No benchmarks for throughput, latency, backpressure, or concurrent stream scaling                          | Low for correctness, medium for production readiness             |
 
 ## Methodology
 

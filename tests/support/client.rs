@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use reqwest::multipart;
 use serde_json::{Value, json};
 
 #[derive(Debug, PartialEq)]
@@ -126,4 +127,25 @@ impl SseClient {
         }
         events
     }
+}
+
+/// Send a multipart transcription request and return the raw response.
+pub async fn transcribe(addr: SocketAddr, file_bytes: &[u8], model: &str) -> reqwest::Response {
+    let url = format!("http://{}/v1/audio/transcriptions", addr);
+
+    let file_part = multipart::Part::bytes(file_bytes.to_vec())
+        .file_name("test.wav")
+        .mime_str("audio/wav")
+        .expect("valid mime type");
+
+    let form = multipart::Form::new()
+        .part("file", file_part)
+        .text("model", model.to_owned());
+
+    reqwest::Client::new()
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .expect("failed to send transcription request")
 }

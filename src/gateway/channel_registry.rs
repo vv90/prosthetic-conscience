@@ -5,6 +5,8 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::protocol::Capability;
+
 use super::relay::StreamFrame;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,6 +39,7 @@ pub type StreamHandle = mpsc::Sender<StreamFrame>;
 #[derive(Debug)]
 pub struct WorkerJob {
     pub client_stream_id: ClientStreamId,
+    pub capability: Capability,
     pub payload: Value,
     pub client_tx: StreamHandle,
 }

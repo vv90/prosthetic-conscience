@@ -1,16 +1,18 @@
 # OpenAI-Compatible API Behavior
 
-Snapshot date: 2026-03-11
+Snapshot date: 2026-03-18
 
 ## Behavior
 
-- `POST /v1/chat/completions` accepts streaming chat completion requests.
+### Chat Completions (`POST /v1/chat/completions`)
+
+- Accepts streaming chat completion requests.
 - Request body is parsed as JSON. The `stream` field is extracted; all other fields are passed through as an opaque `Value` payload to the kernel and ultimately to the worker.
 - `stream=true` is required. Requests with `stream=false` or omitted `stream` receive a `400 Bad Request` with `{"error": {"message": "stream=true is required"}}`.
 - On acceptance, the handler:
   1. Creates an `mpsc::channel<StreamFrame>(32)` for the client stream.
   2. Registers the sender with the runtime via `register_stream`, receiving a `ClientStreamId`.
-  3. Submits `HttpChatRequested { client_stream_id, payload, stream: true }` to the kernel.
+  3. Submits `HttpChatRequested { client_stream_id, payload, stream: true, required_capability: Chat }` to the kernel.
   4. Returns an SSE response that reads from the `mpsc::Receiver<StreamFrame>`.
 - SSE output mapping:
   - `StreamFrame::Chunk { data }` → `data: {json}\n\n` (worker's chunk data passed through as-is).
@@ -20,6 +22,19 @@ Snapshot date: 2026-03-11
 - `KeepAlive::default()` sends periodic SSE comments to prevent proxy timeouts.
 - If the runtime channel is closed (gateway shutting down), the handler returns `503 Service Unavailable`.
 
+### Audio Transcriptions (`POST /v1/audio/transcriptions`)
+
+- Accepts multipart/form-data requests (OpenAI Whisper API compatible).
+- Required fields: `file` (audio binary, max 25 MB), `model` (string).
+- Optional fields: `language`, `prompt`, `response_format`, `temperature`.
+- On acceptance, the handler:
+  1. Base64-encodes the audio file and packages it with metadata into a JSON payload.
+  2. Registers a stream channel and submits `HttpChatRequested { required_capability: Transcription, ... }` to the kernel.
+  3. Collects the worker's response (single `Chunk` + `Done`) into a JSON response body.
+- Returns a single JSON response (not SSE streaming) — e.g., `{"text": "transcribed text"}`.
+- Error responses: `400` for missing fields or oversized files, `500` for worker errors, `504` for timeout (120s).
+- Internally reuses the existing `StreamFrame` channel mechanism — no changes to kernel or relay.
+
 ## Invariants
 
 - The handler never decides whether to dispatch — it always submits `HttpChatRequested` and lets the kernel decide. Pre-dispatch errors (no worker, duplicate stream) are delivered as `StreamFrame::Error` + channel close via kernel effects.
@@ -28,7 +43,8 @@ Snapshot date: 2026-03-11
 
 ## Status
 
-- Implemented (streaming only). Non-streaming mode (`stream=false`) is rejected at the handler level; the kernel also has a safety guard for `stream=false`.
+- Chat completions: Implemented (streaming only). Non-streaming mode (`stream=false`) is rejected at the handler level; the kernel also has a safety guard for `stream=false`.
+- Audio transcriptions: Implemented (complete-clip, non-streaming response). Audio is base64-encoded through the JSON worker protocol.
 
 ## Load into context when
 
@@ -39,6 +55,7 @@ Snapshot date: 2026-03-11
 ## Relevant files
 
 - `src/router/chat_completions.rs`
+- `src/router/audio_transcriptions.rs`
 - `src/router/mod.rs`
 - `src/router/state.rs`
 - `src/gateway/runtime.rs` (`HttpChatRequested` command, `register_stream`)

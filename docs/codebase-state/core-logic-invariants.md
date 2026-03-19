@@ -64,15 +64,16 @@ Everything outside these three modules is **adapter code**.
 
 ## Key Guarantee: Stream Termination
 
-**Every `client_stream_id` that enters the kernel via `HttpChatRequested` eventually gets terminal effects emitted by the kernel.** This is the kernel's central safety property.
+**Every `client_stream_id` that enters the kernel via `HttpChatRequested` gets terminal effects.** This is the kernel's central safety property. Every terminal path ends with `SendClientDone`, which sends a `[DONE]` frame and closes the stream. This matches the OpenAI SSE convention.
 
-Terminal effects are: `SendClientDone` (success), or `SendClientError` + `SendClientDone` (failure), or `SendClientError` + `CloseStream` (pre-dispatch rejection).
+Terminal patterns:
 
-The kernel guarantees this through three mechanisms:
+- **Success** (`AssignmentCleared`): `SendClientDone`.
+- **Failure** (`AssignmentFailed`, tick expiration, or pre-dispatch rejection): `SendClientError` + `SendClientDone`.
 
-1. **Pre-dispatch errors**: no worker available, stream=false, duplicate stream ID -> terminal effects immediately in the same transition.
-2. **Post-dispatch completion**: `AssignmentCleared` triggers `SendClientDone`. Stream removed from kernel state.
-3. **Timeout**: if no `AssignmentCleared` arrives, tick expiration triggers `SendClientError("stream timed out")` + `SendClientDone`. The client is never left hanging.
+Pre-dispatch rejections (stream=false, duplicate stream ID, no capable worker) emit terminal effects immediately in the same transition. Post-dispatch terminations remove the stream from `active_streams` in the same transition.
+
+Property test coverage: `invariant_i2_stream_removal_produces_done` checks post-dispatch termination. `every_http_chat_requested_produces_terminal_effects` checks that every request produces either `DispatchJob` (post-dispatch) or `SendClientError` + `SendClientDone` (pre-dispatch rejection).
 
 The channel is the cancellation mechanism: when the kernel emits terminal effects for a stream, the effect executor delivers them and drops the client-side receiver. The relay's next `client_tx.send()` fails, relay stops, worker handler detects the dead channel and either re-registers or exits. The kernel doesn't kill the relay directly -- it kills the stream, and the relay dies as a consequence.
 
@@ -152,7 +153,7 @@ Note: adapters do **not** need to send unregister commands, guarantee delivery o
 - **Heartbeat events.** `WorkerHeartbeat` and `StreamHeartbeat` reset deadlines.
 - **Worker heartbeat wired.** Worker ws handler sends `WorkerHeartbeat` every 15 seconds while idle via `tokio::time::interval_at`. Interval resets after re-registration.
 - **Stream heartbeat wired.** `relay_job` sends `StreamHeartbeat` every 10 seconds while relaying chunks. Not yet active (relay not wired into worker handler — `consume_until_terminal` stub is used). Heartbeat failure is non-fatal (ignored with `let _ =`; timeout is the correct fallback).
-- **Duplicate stream ID rejection.** `HttpChatRequested` with a `client_stream_id` already in `active_streams` is rejected with `SendClientError` + `CloseStream`. No silent overwrite.
+- **Duplicate stream ID rejection.** `HttpChatRequested` with a `client_stream_id` already in `active_streams` is rejected with `SendClientError` + `SendClientDone`. No silent overwrite.
 - **Completion signals are optional optimization.** If `AssignmentCleared` arrives before timeout, the stream is cleared early. If it never arrives, timeout handles it.
 
 ### Target state (remaining work)
@@ -169,8 +170,8 @@ None.
 - Core kernel: implemented with one-use worker IDs, tick-counted deadlines, heartbeat events, timeout expiration, duplicate stream ID rejection. 44 unit tests + 6 property tests (I2-I5, tick monotonicity, stream timeout error+done pair).
 - Runtime: implemented. `AssignmentCleared`, `AssignmentFailed`, `WorkerHeartbeat`, and `StreamHeartbeat` commands, tick task with `try_send`. No `WorkerJobCompleted` or `set_worker_handle`.
 - Channel registry: implemented. `register_worker` + `take_worker` only.
-- Effect execution: all five effect executors implemented. `DispatchJob` constructs `WorkerJob` and sends via oneshot; signals `AssignmentFailed` on dispatch failure. `ProtocolViolation` logs via `tracing::warn!`. `SendClientError` sends `StreamFrame::Error` via cloned handle. `SendClientDone` sends `StreamFrame::Done` and drops the taken handle. `CloseStream` drops the taken handle without sending a frame.
-- Stream handle resolution: `resolve_effects` resolves both worker IDs and stream IDs. Resolved type is `Effect<WorkerHandle, (ClientStreamId, StreamHandle)>`. Non-terminal effects (`SendClientError`) use `clone_stream`; terminal effects (`SendClientDone`, `CloseStream`) use `take_stream` to remove the registry entry so the channel closes when the handle is dropped.
+- Effect execution: four effect executors implemented. `DispatchJob` constructs `WorkerJob` (passing `Capability` through) and sends via oneshot; signals `AssignmentFailed` on dispatch failure. `ProtocolViolation` logs via `tracing::warn!`. `SendClientError` sends `StreamFrame::Error` via cloned handle. `SendClientDone` sends `StreamFrame::Done` and drops the taken handle.
+- Stream handle resolution: `resolve_effects` resolves both worker IDs and stream IDs. Resolved type is `Effect<WorkerHandle, (ClientStreamId, StreamHandle)>`. Non-terminal effects (`SendClientError`) use `clone_stream`; terminal effects (`SendClientDone`) use `take_stream` to remove the registry entry so the channel closes when the handle is dropped.
 - Adapter-side heartbeat signals: worker heartbeat wired (15s while idle), stream heartbeat wired in `relay_job` (10s while relaying, now active).
 
 ## Load into context when

@@ -1,13 +1,21 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
+
+pub use crate::protocol::Capability;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerEntry {
+    pub deadline: u64,
+    pub capabilities: BTreeSet<Capability>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayState<WId, SId> {
     pub tick: u64,
     pub worker_ttl: u64,
     pub stream_ttl: u64,
-    pub available: BTreeMap<WId, u64>,
+    pub available: BTreeMap<WId, WorkerEntry>,
     pub active_streams: BTreeMap<SId, u64>,
 }
 
@@ -35,9 +43,11 @@ pub enum Event<WId, SId> {
         client_stream_id: SId,
         payload: Value,
         stream: bool,
+        required_capability: Capability,
     },
     WorkerRegistered {
         worker_id: WId,
+        capabilities: BTreeSet<Capability>,
     },
     AssignmentCleared {
         client_stream_id: SId,
@@ -56,7 +66,7 @@ pub enum Event<WId, SId> {
 }
 
 use super::effects::{
-    close_stream::CloseStream, dispatch_job::DispatchJob, protocol_violation::ProtocolViolation,
+    dispatch_job::DispatchJob, protocol_violation::ProtocolViolation,
     send_client_done::SendClientDone, send_client_error::SendClientError,
 };
 
@@ -65,7 +75,6 @@ pub enum Effect<WId, SId> {
     DispatchJob(DispatchJob<WId, SId>),
     SendClientError(SendClientError<SId>),
     SendClientDone(SendClientDone<SId>),
-    CloseStream(CloseStream<SId>),
     ProtocolViolation(ProtocolViolation),
 }
 
@@ -87,6 +96,7 @@ where
             client_stream_id,
             stream,
             payload,
+            required_capability,
         } => {
             if !stream {
                 return Transition {
@@ -96,7 +106,7 @@ where
                             client_stream_id: client_stream_id.clone(),
                             message: String::from("stream=true is required in this phase"),
                         }),
-                        Effect::CloseStream(CloseStream { client_stream_id }),
+                        Effect::SendClientDone(SendClientDone { client_stream_id }),
                     ],
                 };
             }
@@ -109,12 +119,12 @@ where
                             client_stream_id: client_stream_id.clone(),
                             message: String::from("stream already has an active assignment"),
                         }),
-                        Effect::CloseStream(CloseStream { client_stream_id }),
+                        Effect::SendClientDone(SendClientDone { client_stream_id }),
                     ],
                 };
             }
 
-            let worker_id = first_available_worker_id(&state);
+            let worker_id = first_capable_worker_id(&state, &required_capability);
 
             if let Some(worker_id) = worker_id {
                 state.available.remove(&worker_id);
@@ -127,6 +137,7 @@ where
                     effects: vec![Effect::DispatchJob(DispatchJob {
                         worker_id,
                         client_stream_id,
+                        capability: required_capability,
                         payload,
                     })],
                 };
@@ -139,11 +150,14 @@ where
                         client_stream_id: client_stream_id.clone(),
                         message: String::from("no idle worker available"),
                     }),
-                    Effect::CloseStream(CloseStream { client_stream_id }),
+                    Effect::SendClientDone(SendClientDone { client_stream_id }),
                 ],
             }
         }
-        Event::WorkerRegistered { worker_id } => {
+        Event::WorkerRegistered {
+            worker_id,
+            capabilities,
+        } => {
             if state.available.contains_key(&worker_id) {
                 return Transition {
                     state,
@@ -154,7 +168,13 @@ where
                 };
             }
             let deadline = state.tick + state.worker_ttl;
-            state.available.insert(worker_id, deadline);
+            state.available.insert(
+                worker_id,
+                WorkerEntry {
+                    deadline,
+                    capabilities,
+                },
+            );
             Transition {
                 state,
                 effects: Vec::new(),
@@ -208,8 +228,8 @@ where
             }
         }
         Event::WorkerHeartbeat { worker_id } => {
-            if let Some(deadline) = state.available.get_mut(&worker_id) {
-                *deadline = state.tick + state.worker_ttl;
+            if let Some(entry) = state.available.get_mut(&worker_id) {
+                entry.deadline = state.tick + state.worker_ttl;
                 Transition {
                     state,
                     effects: Vec::new(),
@@ -246,7 +266,9 @@ where
             let mut effects = Vec::new();
 
             // Expire stale workers — no client effects needed
-            state.available.retain(|_, deadline| *deadline > state.tick);
+            state
+                .available
+                .retain(|_, entry| entry.deadline > state.tick);
 
             // Expire timed-out streams — emit terminal effects for each
             let expired_streams: Vec<SId> = state
@@ -275,11 +297,18 @@ where
     }
 }
 
-fn first_available_worker_id<WId, SId>(state: &GatewayState<WId, SId>) -> Option<WId>
+fn first_capable_worker_id<WId, SId>(
+    state: &GatewayState<WId, SId>,
+    required: &Capability,
+) -> Option<WId>
 where
     WId: Clone + Ord,
 {
-    state.available.keys().next().cloned()
+    state
+        .available
+        .iter()
+        .find(|(_, entry)| entry.capabilities.contains(required))
+        .map(|(wid, _)| wid.clone())
 }
 
 #[cfg(test)]
@@ -299,16 +328,37 @@ mod tests {
         String::from(value)
     }
 
+    fn chat_caps() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::Chat])
+    }
+
+    fn transcription_caps() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::Transcription])
+    }
+
+    fn both_caps() -> BTreeSet<Capability> {
+        BTreeSet::from([Capability::Chat, Capability::Transcription])
+    }
+
+    fn chat_entry(deadline: u64) -> WorkerEntry {
+        WorkerEntry {
+            deadline,
+            capabilities: chat_caps(),
+        }
+    }
+
     #[test]
-    fn stream_false_emits_error_and_close() {
+    fn stream_false_emits_error_and_done() {
         let state: GatewayState<WId, SId> = GatewayState::default();
         let client_stream_id = s("client-1");
         let transition = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: client_stream_id.clone(),
+
                 payload: json!({"model": "demo"}),
                 stream: false,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -319,7 +369,7 @@ mod tests {
                     client_stream_id: client_stream_id.clone(),
                     message: String::from("stream=true is required in this phase"),
                 }),
-                Effect::CloseStream(CloseStream { client_stream_id }),
+                Effect::SendClientDone(SendClientDone { client_stream_id }),
             ]
         );
     }
@@ -327,16 +377,18 @@ mod tests {
     #[test]
     fn stream_true_assigns_first_available_worker() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
-        state.available.insert(w("worker-b"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
+        state.available.insert(w("worker-b"), chat_entry(100));
         let client_stream_id = s("client-2");
         let payload = json!({"model": "demo"});
         let transition = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: client_stream_id.clone(),
+
                 payload: payload.clone(),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -356,15 +408,17 @@ mod tests {
     }
 
     #[test]
-    fn stream_true_without_available_worker_emits_error_and_close() {
+    fn stream_true_without_available_worker_emits_error_and_done() {
         let state: GatewayState<WId, SId> = GatewayState::default();
         let client_stream_id = s("client-3");
         let transition = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: client_stream_id.clone(),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -375,7 +429,7 @@ mod tests {
                     client_stream_id: client_stream_id.clone(),
                     message: String::from("no idle worker available"),
                 }),
-                Effect::CloseStream(CloseStream { client_stream_id }),
+                Effect::SendClientDone(SendClientDone { client_stream_id }),
             ]
         );
     }
@@ -383,14 +437,16 @@ mod tests {
     #[test]
     fn dispatched_worker_is_consumed_from_available() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let transition = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -402,14 +458,16 @@ mod tests {
     fn dispatch_sets_stream_deadline() {
         let mut state = GatewayState::new(60, 10);
         state.tick = 5;
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let transition = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -428,26 +486,33 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-a"),
+                capabilities: chat_caps(),
             },
         );
 
         assert_eq!(
-            transition.state.available.get(&w("worker-a")),
-            Some(&23) // tick 3 + worker_ttl 20
+            transition
+                .state
+                .available
+                .get(&w("worker-a"))
+                .map(|e| e.deadline),
+            Some(23) // tick 3 + worker_ttl 20
         );
     }
 
     #[test]
     fn second_request_rejected_when_no_workers_available() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let first = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
         assert!(matches!(first.effects.as_slice(), [Effect::DispatchJob(_)]));
@@ -456,8 +521,10 @@ mod tests {
             first.state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-2"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
         assert_eq!(
@@ -467,7 +534,7 @@ mod tests {
                     client_stream_id: s("client-2"),
                     message: String::from("no idle worker available"),
                 }),
-                Effect::CloseStream(CloseStream {
+                Effect::SendClientDone(SendClientDone {
                     client_stream_id: s("client-2"),
                 }),
             ]
@@ -477,14 +544,16 @@ mod tests {
     #[test]
     fn fresh_registration_after_assignment_cleared_allows_new_dispatch() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let dispatched = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -505,6 +574,7 @@ mod tests {
             cleared.state,
             Event::WorkerRegistered {
                 worker_id: w("worker-b"),
+                capabilities: chat_caps(),
             },
         );
 
@@ -512,8 +582,10 @@ mod tests {
             re_registered.state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-2"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
         assert_eq!(second.effects.len(), 1);
@@ -526,14 +598,16 @@ mod tests {
     #[test]
     fn assignment_cleared_emits_done() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let dispatched = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -573,12 +647,13 @@ mod tests {
     #[test]
     fn duplicate_worker_registered_emits_protocol_violation() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let transition = reduce(
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-a"),
+                capabilities: chat_caps(),
             },
         );
 
@@ -600,6 +675,7 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-a"),
+                capabilities: chat_caps(),
             },
         );
 
@@ -630,7 +706,7 @@ mod tests {
     fn worker_heartbeat_resets_deadline() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(5, 5);
         state.tick = 2;
-        state.available.insert(w("worker-a"), 5);
+        state.available.insert(w("worker-a"), chat_entry(5));
 
         let transition = reduce(
             state,
@@ -641,8 +717,12 @@ mod tests {
 
         assert!(transition.effects.is_empty());
         assert_eq!(
-            transition.state.available.get(&w("worker-a")),
-            Some(&7) // tick 2 + worker_ttl 5
+            transition
+                .state
+                .available
+                .get(&w("worker-a"))
+                .map(|e| e.deadline),
+            Some(7) // tick 2 + worker_ttl 5
         );
     }
 
@@ -703,7 +783,7 @@ mod tests {
     #[test]
     fn tick_does_not_expire_entries_before_deadline() {
         let mut state = GatewayState::new(5, 5);
-        state.available.insert(w("worker-a"), 5);
+        state.available.insert(w("worker-a"), chat_entry(5));
         state.active_streams.insert(s("client-1"), 5);
 
         // Tick 1 — deadline is 5, not reached yet
@@ -716,7 +796,7 @@ mod tests {
     #[test]
     fn worker_expires_after_ttl_ticks() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(3, 30);
-        state.available.insert(w("worker-a"), 3);
+        state.available.insert(w("worker-a"), chat_entry(3));
 
         // Ticks 1, 2: not expired
         let state = reduce(state, Event::Tick).state;
@@ -759,7 +839,7 @@ mod tests {
     #[test]
     fn heartbeat_prevents_expiration() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(2, 2);
-        state.available.insert(w("worker-a"), 2);
+        state.available.insert(w("worker-a"), chat_entry(2));
         state.active_streams.insert(s("client-1"), 2);
 
         // Tick 1
@@ -796,8 +876,8 @@ mod tests {
     #[test]
     fn multiple_expirations_in_single_tick() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(1, 1);
-        state.available.insert(w("worker-a"), 1);
-        state.available.insert(w("worker-b"), 1);
+        state.available.insert(w("worker-a"), chat_entry(1));
+        state.available.insert(w("worker-b"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 1);
         state.active_streams.insert(s("client-2"), 1);
 
@@ -822,14 +902,16 @@ mod tests {
     #[test]
     fn assignment_cleared_before_timeout_no_timeout_effects() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(60, 3);
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -879,14 +961,16 @@ mod tests {
     #[test]
     fn assignment_failed_emits_error_and_done() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -935,14 +1019,16 @@ mod tests {
     #[test]
     fn double_assignment_failed_second_emits_protocol_violation() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -975,14 +1061,16 @@ mod tests {
     #[test]
     fn assignment_failed_before_timeout_no_timeout_effects() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(60, 3);
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -1005,12 +1093,12 @@ mod tests {
         assert!(transition.state.active_streams.is_empty());
     }
 
-    // --- Missing unit tests ---
+    // --- State mutation boundary tests ---
 
     #[test]
     fn stream_false_does_not_mutate_state() {
         let mut state = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
         state.tick = 5;
         let state_before = state.clone();
 
@@ -1018,8 +1106,10 @@ mod tests {
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: false,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -1035,8 +1125,10 @@ mod tests {
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -1051,6 +1143,7 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-a"),
+                capabilities: chat_caps(),
             },
         )
         .state;
@@ -1058,6 +1151,7 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-b"),
+                capabilities: chat_caps(),
             },
         )
         .state;
@@ -1065,6 +1159,7 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-c"),
+                capabilities: chat_caps(),
             },
         )
         .state;
@@ -1078,14 +1173,16 @@ mod tests {
     #[test]
     fn double_assignment_cleared_second_emits_protocol_violation() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -1117,18 +1214,20 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_stream_id_rejected_with_error_and_close() {
+    fn duplicate_stream_id_rejected_with_error_and_done() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
-        state.available.insert(w("worker-b"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
+        state.available.insert(w("worker-b"), chat_entry(100));
 
         // First dispatch succeeds
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -1139,8 +1238,10 @@ mod tests {
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         );
 
@@ -1151,7 +1252,7 @@ mod tests {
                     client_stream_id: s("client-1"),
                     message: String::from("stream already has an active assignment"),
                 }),
-                Effect::CloseStream(CloseStream {
+                Effect::SendClientDone(SendClientDone {
                     client_stream_id: s("client-1"),
                 }),
             ]
@@ -1164,15 +1265,17 @@ mod tests {
     #[test]
     fn heartbeat_for_dispatched_worker_emits_protocol_violation() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         // Dispatch consumes the worker
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -1194,14 +1297,16 @@ mod tests {
     #[test]
     fn heartbeat_for_cleared_stream_emits_protocol_violation() {
         let mut state: GatewayState<WId, SId> = GatewayState::default();
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
             state,
             Event::HttpChatRequested {
                 client_stream_id: s("client-1"),
+
                 payload: json!({"model": "demo"}),
                 stream: true,
+                required_capability: Capability::Chat,
             },
         )
         .state;
@@ -1231,8 +1336,8 @@ mod tests {
     #[test]
     fn mixed_deadlines_only_expired_entries_removed() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(60, 60);
-        state.available.insert(w("worker-stale"), 2);
-        state.available.insert(w("worker-fresh"), 10);
+        state.available.insert(w("worker-stale"), chat_entry(2));
+        state.available.insert(w("worker-fresh"), chat_entry(10));
         state.active_streams.insert(s("stream-stale"), 2);
         state.active_streams.insert(s("stream-fresh"), 10);
 
@@ -1266,7 +1371,7 @@ mod tests {
     #[test]
     fn worker_expiration_does_not_affect_active_streams() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(1, 60);
-        state.available.insert(w("worker-a"), 1);
+        state.available.insert(w("worker-a"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 100);
 
         let transition = reduce(state, Event::Tick);
@@ -1278,7 +1383,7 @@ mod tests {
     #[test]
     fn stream_expiration_does_not_affect_available_workers() {
         let mut state: GatewayState<WId, SId> = GatewayState::new(60, 1);
-        state.available.insert(w("worker-a"), 100);
+        state.available.insert(w("worker-a"), chat_entry(100));
         state.active_streams.insert(s("client-1"), 1);
 
         let transition = reduce(state, Event::Tick);
@@ -1296,10 +1401,14 @@ mod tests {
             state,
             Event::WorkerRegistered {
                 worker_id: w("worker-a"),
+                capabilities: chat_caps(),
             },
         )
         .state;
-        assert_eq!(state.available.get(&w("worker-a")), Some(&0));
+        assert_eq!(
+            state.available.get(&w("worker-a")).map(|e| e.deadline),
+            Some(0)
+        );
 
         // Tick 1: deadline 0 <= tick 1, expired
         let transition = reduce(state, Event::Tick);
@@ -1314,6 +1423,242 @@ mod tests {
         assert_eq!(transition.state.stream_ttl, 17);
     }
 
+    // --- Capability routing tests ---
+
+    #[test]
+    fn chat_job_dispatches_to_chat_capable_worker() {
+        let mut state = GatewayState::default();
+        state.available.insert(w("worker-a"), chat_entry(100));
+
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({"model": "demo"}),
+                stream: true,
+                required_capability: Capability::Chat,
+            },
+        );
+
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::DispatchJob(e) if e.worker_id == w("worker-a")
+        ));
+    }
+
+    #[test]
+    fn chat_job_skips_transcription_only_worker() {
+        let mut state = GatewayState::default();
+        state.available.insert(
+            w("worker-a"),
+            WorkerEntry {
+                deadline: 100,
+                capabilities: transcription_caps(),
+            },
+        );
+
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({"model": "demo"}),
+                stream: true,
+                required_capability: Capability::Chat,
+            },
+        );
+
+        assert_eq!(
+            transition.effects,
+            vec![
+                Effect::SendClientError(SendClientError {
+                    client_stream_id: s("client-1"),
+                    message: String::from("no idle worker available"),
+                }),
+                Effect::SendClientDone(SendClientDone {
+                    client_stream_id: s("client-1"),
+                }),
+            ]
+        );
+        // Worker not consumed
+        assert!(transition.state.available.contains_key(&w("worker-a")));
+    }
+
+    #[test]
+    fn transcription_job_dispatches_to_transcription_capable_worker() {
+        let mut state = GatewayState::default();
+        state.available.insert(
+            w("worker-a"),
+            WorkerEntry {
+                deadline: 100,
+                capabilities: transcription_caps(),
+            },
+        );
+
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({}),
+                stream: true,
+                required_capability: Capability::Transcription,
+            },
+        );
+
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::DispatchJob(e) if e.worker_id == w("worker-a")
+        ));
+    }
+
+    #[test]
+    fn multi_capable_worker_serves_either_job_type() {
+        let mut state = GatewayState::default();
+        state.available.insert(
+            w("worker-a"),
+            WorkerEntry {
+                deadline: 100,
+                capabilities: both_caps(),
+            },
+        );
+
+        // Chat request dispatches
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({"model": "demo"}),
+                stream: true,
+                required_capability: Capability::Chat,
+            },
+        );
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::DispatchJob(e) if e.worker_id == w("worker-a")
+        ));
+
+        // Re-register and try transcription
+        let state = reduce(
+            transition.state,
+            Event::AssignmentCleared {
+                client_stream_id: s("client-1"),
+            },
+        )
+        .state;
+        let state = reduce(
+            state,
+            Event::WorkerRegistered {
+                worker_id: w("worker-b"),
+                capabilities: both_caps(),
+            },
+        )
+        .state;
+
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-2"),
+
+                payload: json!({}),
+                stream: true,
+                required_capability: Capability::Transcription,
+            },
+        );
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::DispatchJob(e) if e.worker_id == w("worker-b")
+        ));
+    }
+
+    #[test]
+    fn selects_capable_worker_when_mixed_pool() {
+        let mut state = GatewayState::default();
+        state.available.insert(w("worker-a"), chat_entry(100));
+        state.available.insert(
+            w("worker-b"),
+            WorkerEntry {
+                deadline: 100,
+                capabilities: transcription_caps(),
+            },
+        );
+
+        // Transcription request should skip worker-a (chat only) and pick worker-b
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({}),
+                stream: true,
+                required_capability: Capability::Transcription,
+            },
+        );
+
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::DispatchJob(e) if e.worker_id == w("worker-b")
+        ));
+        // worker-a untouched
+        assert!(transition.state.available.contains_key(&w("worker-a")));
+    }
+
+    #[test]
+    fn no_capable_worker_available_returns_error() {
+        let mut state = GatewayState::default();
+        state.available.insert(w("worker-a"), chat_entry(100));
+        state.available.insert(w("worker-b"), chat_entry(100));
+
+        let transition = reduce(
+            state,
+            Event::HttpChatRequested {
+                client_stream_id: s("client-1"),
+
+                payload: json!({}),
+                stream: true,
+                required_capability: Capability::Transcription,
+            },
+        );
+
+        assert_eq!(
+            transition.effects,
+            vec![
+                Effect::SendClientError(SendClientError {
+                    client_stream_id: s("client-1"),
+                    message: String::from("no idle worker available"),
+                }),
+                Effect::SendClientDone(SendClientDone {
+                    client_stream_id: s("client-1"),
+                }),
+            ]
+        );
+        // Neither worker consumed
+        assert_eq!(transition.state.available.len(), 2);
+    }
+
+    #[test]
+    fn registration_stores_capabilities() {
+        let state: GatewayState<WId, SId> = GatewayState::default();
+
+        let transition = reduce(
+            state,
+            Event::WorkerRegistered {
+                worker_id: w("worker-a"),
+                capabilities: both_caps(),
+            },
+        );
+
+        let entry = transition.state.available.get(&w("worker-a")).unwrap();
+        assert_eq!(entry.capabilities, both_caps());
+    }
+
     // --- Property tests ---
 
     mod proptests {
@@ -1324,19 +1669,38 @@ mod tests {
         const WORKER_IDS: &[&str] = &["w0", "w1", "w2"];
         const STREAM_IDS: &[&str] = &["s0", "s1", "s2"];
 
+        fn arb_capability() -> impl Strategy<Value = Capability> {
+            prop_oneof![Just(Capability::Chat), Just(Capability::Transcription),]
+        }
+
+        fn arb_capabilities() -> impl Strategy<Value = BTreeSet<Capability>> {
+            proptest::collection::btree_set(arb_capability(), 1..=2)
+        }
+
         fn arb_event() -> impl Strategy<Value = Event<WId, SId>> {
             prop_oneof![
-                // HttpChatRequested with stream=true (the interesting case)
-                (prop::sample::select(STREAM_IDS), any::<bool>(),).prop_map(|(sid, stream)| {
-                    Event::HttpChatRequested {
-                        client_stream_id: s(sid),
-                        payload: json!({"model": "demo"}),
-                        stream,
+                // HttpChatRequested with random capability
+                (
+                    prop::sample::select(STREAM_IDS),
+                    any::<bool>(),
+                    arb_capability(),
+                )
+                    .prop_map(|(sid, stream, cap)| {
+                        Event::HttpChatRequested {
+                            client_stream_id: s(sid),
+
+                            payload: json!({"model": "demo"}),
+                            stream,
+                            required_capability: cap,
+                        }
+                    }),
+                // WorkerRegistered with random capabilities
+                (prop::sample::select(WORKER_IDS), arb_capabilities()).prop_map(|(wid, caps)| {
+                    Event::WorkerRegistered {
+                        worker_id: w(wid),
+                        capabilities: caps,
                     }
                 }),
-                // WorkerRegistered
-                prop::sample::select(WORKER_IDS)
-                    .prop_map(|wid| Event::WorkerRegistered { worker_id: w(wid) }),
                 // AssignmentCleared
                 prop::sample::select(STREAM_IDS).prop_map(|sid| Event::AssignmentCleared {
                     client_stream_id: s(sid),
@@ -1380,6 +1744,9 @@ mod tests {
         // I5: Every stream that enters active_streams eventually gets terminal
         // effects (via AssignmentCleared or Tick expiration). We check this at
         // the end by running enough ticks to expire everything.
+        //
+        // I6: Every DispatchJob dispatches to a worker that had the required
+        // capability at dispatch time.
         proptest! {
             #[test]
             fn invariant_i2_stream_removal_produces_done(
@@ -1642,6 +2009,109 @@ mod tests {
                                 has_error && has_done,
                                 "stream {} expired by tick without error+done pair",
                                 sid
+                            );
+                        }
+                    }
+
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn invariant_i6_dispatch_respects_capability(
+                events in arb_event_sequence()
+            ) {
+                // I6: every DispatchJob dispatches to a worker that had the
+                // required capability at dispatch time.
+                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+
+                for event in events {
+                    // Snapshot worker capabilities before the transition
+                    let worker_caps_before: std::collections::BTreeMap<WId, BTreeSet<Capability>> =
+                        state
+                            .available
+                            .iter()
+                            .map(|(wid, entry)| (wid.clone(), entry.capabilities.clone()))
+                            .collect();
+
+                    // Extract required capability if this is a job request
+                    let required_cap = match &event {
+                        Event::HttpChatRequested {
+                            required_capability, ..
+                        } => Some(*required_capability),
+                        _ => None,
+                    };
+
+                    let transition = reduce(state, event);
+
+                    for effect in &transition.effects {
+                        if let Effect::DispatchJob(job) = effect
+                            && let Some(cap) = required_cap
+                        {
+                            let worker_had_cap = worker_caps_before
+                                .get(&job.worker_id)
+                                .map(|caps| caps.contains(&cap))
+                                .unwrap_or(false);
+                            prop_assert!(
+                                worker_had_cap,
+                                "DispatchJob sent to worker {} which lacked capability {:?}",
+                                job.worker_id,
+                                cap
+                            );
+                        }
+                    }
+
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn every_http_chat_requested_produces_terminal_effects(
+                events in arb_event_sequence()
+            ) {
+                // Every HttpChatRequested produces terminal effects in the
+                // same transition: either a DispatchJob (post-dispatch path,
+                // where I2/I5 cover eventual termination) or
+                // SendClientError + SendClientDone (pre-dispatch rejection).
+                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+
+                for event in events {
+                    let is_http_chat = matches!(event, Event::HttpChatRequested { .. });
+
+                    let streams_before: std::collections::BTreeSet<_> =
+                        state.active_streams.keys().cloned().collect();
+
+                    let transition = reduce(state, event);
+
+                    if is_http_chat {
+                        let streams_after: std::collections::BTreeSet<_> =
+                            transition.state.active_streams.keys().cloned().collect();
+
+                        let dispatched = streams_after
+                            .difference(&streams_before)
+                            .next()
+                            .is_some();
+
+                        if dispatched {
+                            // Post-dispatch: must have DispatchJob
+                            let has_dispatch = transition.effects.iter().any(|e|
+                                matches!(e, Effect::DispatchJob(_))
+                            );
+                            prop_assert!(
+                                has_dispatch,
+                                "HttpChatRequested dispatched but no DispatchJob effect"
+                            );
+                        } else {
+                            // Pre-dispatch rejection: must have SendClientError + SendClientDone
+                            let has_error = transition.effects.iter().any(|e|
+                                matches!(e, Effect::SendClientError(_))
+                            );
+                            let has_done = transition.effects.iter().any(|e|
+                                matches!(e, Effect::SendClientDone(_))
+                            );
+                            prop_assert!(
+                                has_error && has_done,
+                                "HttpChatRequested rejected without SendClientError + SendClientDone"
                             );
                         }
                     }

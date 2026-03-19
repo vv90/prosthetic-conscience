@@ -1,6 +1,6 @@
 # Entrypoint Behavior
 
-Snapshot date: 2026-03-16
+Snapshot date: 2026-03-18
 
 ## Binaries
 
@@ -12,11 +12,13 @@ Snapshot date: 2026-03-16
 - Exposes:
   - worker websocket endpoint: `/ws/worker`
   - chat completions endpoint: `POST /v1/chat/completions`
+  - audio transcriptions endpoint: `POST /v1/audio/transcriptions`
 
 ### Worker (`pc-worker`)
 
-- Connects outbound to gateway via WebSocket, receives jobs, proxies to inference server.
-- CLI args: `--gateway-url`, `--inference-url`, `--auth-token`.
+- Connects outbound to gateway via WebSocket, receives jobs, routes to appropriate backend based on the `capability` field (`Chat` → inference server, `Transcription` → whisper server).
+- CLI args: `--gateway-url`, `--inference-url` (optional), `--whisper-url` (optional), `--auth-token`. At least one of `--inference-url` or `--whisper-url` must be provided.
+- Derives capabilities from configured URLs: `--inference-url` → `Chat`, `--whisper-url` → `Transcription`. Declares capabilities via `?capabilities=` query parameter on the WebSocket upgrade URL.
 - Reconnects with exponential backoff (1s to 30s cap).
 
 ### Client (`pc-client`)

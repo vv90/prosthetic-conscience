@@ -34,13 +34,12 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 
 ### Effects (outputs)
 
-| Effect                                                 | Purpose                            |
-| ------------------------------------------------------ | ---------------------------------- |
-| `DispatchJob { worker_id, client_stream_id, payload }` | Dispatch job to a worker           |
-| `SendClientError { client_stream_id, message }`        | Send error to client stream        |
-| `SendClientDone { client_stream_id }`                  | Signal stream completion to client |
-| `CloseStream { client_stream_id }`                     | Close client connection            |
-| `ProtocolViolation { worker_description, message }`    | Log invalid behavior               |
+| Effect                                                             | Purpose                            |
+| ------------------------------------------------------------------ | ---------------------------------- |
+| `DispatchJob { worker_id, client_stream_id, capability, payload }` | Dispatch job to a worker           |
+| `SendClientError { client_stream_id, message }`                    | Send error to client stream        |
+| `SendClientDone { client_stream_id }`                              | Signal stream completion to client |
+| `ProtocolViolation { worker_description, message }`                | Log invalid behavior               |
 
 ### Worker assignment policy
 
@@ -64,12 +63,12 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 ### `HttpChatRequested`
 
-| Precondition                                                  | Effects                                                                     | State change                                                                    |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `stream=false`                                                | `[SendClientError("stream=true is required"), CloseStream]`                 | None                                                                            |
-| `stream=true`, `client_stream_id` already in `active_streams` | `[SendClientError("stream already has an active assignment"), CloseStream]` | None                                                                            |
-| `stream=true`, at least one available worker                  | `[DispatchJob { first_available, stream_id, payload }]`                     | Worker removed from `available`, stream added to `active_streams` with deadline |
-| `stream=true`, no available worker                            | `[SendClientError("no idle worker available"), CloseStream]`                | None                                                                            |
+| Precondition                                                  | Effects                                                                        | State change                                                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `stream=false`                                                | `[SendClientError("stream=true is required"), SendClientDone]`                 | None                                                                            |
+| `stream=true`, `client_stream_id` already in `active_streams` | `[SendClientError("stream already has an active assignment"), SendClientDone]` | None                                                                            |
+| `stream=true`, at least one available worker                  | `[DispatchJob { first_available, stream_id, payload }]`                        | Worker removed from `available`, stream added to `active_streams` with deadline |
+| `stream=true`, no available worker                            | `[SendClientError("no idle worker available"), SendClientDone]`                | None                                                                            |
 
 ### `WorkerRegistered`
 
@@ -120,16 +119,16 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 | Test                                                              | Covers                                                            |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `stream_false_emits_error_and_close`                              | `HttpChatRequested` stream=false                                  |
+| `stream_false_emits_error_and_done`                               | `HttpChatRequested` stream=false                                  |
 | `stream_false_does_not_mutate_state`                              | stream=false leaves state unchanged                               |
 | `stream_true_assigns_first_available_worker`                      | `HttpChatRequested` dispatch happy path                           |
-| `stream_true_without_available_worker_emits_error_and_close`      | `HttpChatRequested` no available worker                           |
+| `stream_true_without_available_worker_emits_error_and_done`       | `HttpChatRequested` no available worker                           |
 | `stream_true_no_workers_does_not_mutate_state`                    | No-worker rejection leaves state unchanged                        |
 | `dispatched_worker_is_consumed_from_available`                    | Worker removed from `available`, stream added to `active_streams` |
 | `dispatch_sets_stream_deadline`                                   | Stream deadline = tick + stream_ttl                               |
 | `registration_sets_worker_deadline`                               | Worker deadline = tick + worker_ttl                               |
 | `second_request_rejected_when_no_workers_available`               | `HttpChatRequested` rejection when sole worker consumed           |
-| `duplicate_stream_id_rejected_with_error_and_close`               | `HttpChatRequested` with already-active stream ID                 |
+| `duplicate_stream_id_rejected_with_error_and_done`                | `HttpChatRequested` with already-active stream ID                 |
 | `fresh_registration_after_assignment_cleared_allows_new_dispatch` | Full cycle: dispatch -> clear -> re-register -> dispatch          |
 | `assignment_cleared_emits_done`                                   | `AssignmentCleared` on active stream                              |
 | `assignment_cleared_for_unknown_stream_emits_protocol_violation`  | `AssignmentCleared` unknown stream                                |
@@ -162,18 +161,19 @@ Specific input-output contracts for each event. Each is a unit-test target.
 | `zero_ttl_expires_on_next_tick`                                   | TTL=0 entries expire on first tick                                |
 | `tick_preserves_ttl_config`                                       | Tick doesn't corrupt TTL configuration                            |
 
-### Property tests (6 tests)
+### Property tests (7 tests)
 
 All use `proptest` over arbitrary sequences of up to 100 events from a small ID pool (3 worker IDs, 3 stream IDs) to encourage collisions.
 
-| Test                                            | Invariant verified                                                                              |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `invariant_i2_stream_removal_produces_done`     | I2: every stream removed from `active_streams` has `SendClientDone` in effects                  |
-| `invariant_i3_dispatch_atomicity`               | I3: every `DispatchJob` removes worker from `available` and adds new stream to `active_streams` |
-| `invariant_i4_no_silent_state_changes`          | I4: stream additions/removals always have corresponding effects                                 |
-| `invariant_i5_all_streams_eventually_terminate` | I5: after draining with ticks, all streams that ever entered kernel got `SendClientDone`        |
-| `tick_counter_is_monotonic`                     | Tick counter never decreases                                                                    |
-| `stream_timeout_always_emits_error_and_done`    | Every tick-expired stream gets both `SendClientError` and `SendClientDone`                      |
+| Test                                                  | Invariant verified                                                                              |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `invariant_i2_stream_removal_produces_done`           | I2: every stream removed from `active_streams` has `SendClientDone` in effects                  |
+| `invariant_i3_dispatch_atomicity`                     | I3: every `DispatchJob` removes worker from `available` and adds new stream to `active_streams` |
+| `invariant_i4_no_silent_state_changes`                | I4: stream additions/removals always have corresponding effects                                 |
+| `invariant_i5_all_streams_eventually_terminate`       | I5: after draining with ticks, all streams that ever entered kernel got `SendClientDone`        |
+| `tick_counter_is_monotonic`                           | Tick counter never decreases                                                                    |
+| `stream_timeout_always_emits_error_and_done`          | Every tick-expired stream gets both `SendClientError` and `SendClientDone`                      |
+| `every_http_chat_requested_produces_terminal_effects` | Every request produces either `DispatchJob` or `SendClientError` + `SendClientDone`             |
 
 A proptest regression file at `proptest-regressions/gateway/kernel.txt` captures the minimal case that caught the duplicate stream ID bug (now fixed, replayed on each run).
 
@@ -199,7 +199,7 @@ None.
 
 - `src/gateway/kernel.rs`
 - `src/gateway/runtime.rs`
-- `src/gateway/effects/` (`dispatch_job.rs`, `send_client_error.rs`, `send_client_done.rs`, `close_stream.rs`, `protocol_violation.rs`)
+- `src/gateway/effects/` (`dispatch_job.rs`, `send_client_error.rs`, `send_client_done.rs`, `protocol_violation.rs`)
 
 ## TODO (near-term)
 

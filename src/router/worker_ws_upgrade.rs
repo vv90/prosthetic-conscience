@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, interval_at};
 use tracing::{info, warn};
@@ -8,19 +11,66 @@ use tracing::{info, warn};
 use crate::gateway::channel_registry::WorkerJob;
 use crate::gateway::relay::{RelayOutcome, relay_job};
 use crate::protocol::GatewayToWorker;
+use crate::protocol::parse_capabilities;
 use crate::router::state::AppState;
+
+/// Extract the `capabilities` query parameter value from a raw query string.
+/// Expects format like `capabilities=chat,transcription`.
+fn extract_capabilities_param(query: &str) -> Option<&str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == "capabilities" {
+            Some(value)
+        } else {
+            None
+        }
+    })
+}
 
 pub(crate) async fn worker_ws_upgrade(
     ws: WebSocketUpgrade,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| worker_ws_connection(socket, state))
+) -> Response {
+    let capabilities_str = raw_query.as_deref().and_then(extract_capabilities_param);
+
+    let capabilities = match capabilities_str {
+        Some(s) => match parse_capabilities(s) {
+            Ok(caps) => caps,
+            Err(err) => {
+                warn!(%err, "worker declared invalid capabilities");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid capabilities: {err}"),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing capabilities query parameter",
+            )
+                .into_response();
+        }
+    };
+
+    ws.on_upgrade(move |socket| worker_ws_connection(socket, state, capabilities))
+        .into_response()
 }
 
-async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
+async fn worker_ws_connection(
+    mut socket: WebSocket,
+    state: AppState,
+    capabilities: BTreeSet<crate::protocol::Capability>,
+) {
     let (job_tx, job_rx) = oneshot::channel::<WorkerJob>();
 
-    let mut worker_id = match state.runtime.register_worker(job_tx).await {
+    let mut worker_id = match state
+        .runtime
+        .register_worker(job_tx, capabilities.clone())
+        .await
+    {
         Ok(worker_id) => worker_id,
         Err(error) => {
             warn!(%error, "failed to register worker");
@@ -63,6 +113,7 @@ async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
         // Send job frame to worker
         let job_msg = GatewayToWorker::Job {
             client_stream_id: client_stream_id.to_string(),
+            capability: job.capability,
             payload: job.payload,
         };
         let job_frame = match serde_json::to_string(&job_msg) {
@@ -121,7 +172,11 @@ async fn worker_ws_connection(mut socket: WebSocket, state: AppState) {
 
         // Re-register with a fresh ID and oneshot for the next job
         let (next_tx, next_rx) = oneshot::channel::<WorkerJob>();
-        worker_id = match state.runtime.register_worker(next_tx).await {
+        worker_id = match state
+            .runtime
+            .register_worker(next_tx, capabilities.clone())
+            .await
+        {
             Ok(id) => id,
             Err(error) => {
                 warn!(%error, "failed to re-register worker");

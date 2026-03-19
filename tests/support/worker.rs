@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
@@ -5,6 +6,7 @@ use serde_json::Value;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use prosthetic_conscience::protocol::Capability;
 use prosthetic_conscience::protocol::{GatewayToWorker, WorkerMessage};
 
 type WsStream =
@@ -15,12 +17,26 @@ pub struct MockWorker {
 }
 
 impl MockWorker {
-    pub async fn connect(addr: SocketAddr) -> Self {
-        let url = format!("ws://{}/ws/worker", addr);
+    /// Connect a mock worker declaring the given capabilities.
+    pub async fn connect_with_capabilities(
+        addr: SocketAddr,
+        capabilities: BTreeSet<Capability>,
+    ) -> Self {
+        let caps_str: String = capabilities
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!("ws://{}/ws/worker?capabilities={}", addr, caps_str);
         let (ws, _response) = connect_async(url)
             .await
             .expect("failed to connect mock worker");
         Self { ws }
+    }
+
+    /// Connect a mock worker declaring only the `Chat` capability (default).
+    pub async fn connect(addr: SocketAddr) -> Self {
+        Self::connect_with_capabilities(addr, BTreeSet::from([Capability::Chat])).await
     }
 
     /// Read the next text message from the gateway and deserialize it as a

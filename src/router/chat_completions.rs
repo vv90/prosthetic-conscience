@@ -8,6 +8,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::gateway::relay::StreamFrame;
+use crate::protocol::Capability;
 use crate::protocol::ChatRequest;
 use crate::router::state::AppState;
 
@@ -39,7 +40,7 @@ pub(crate) async fn chat_completions(
 
     if state
         .runtime
-        .http_chat_requested(stream_id, request.payload, true)
+        .http_chat_requested(stream_id, request.payload, true, Capability::Chat)
         .await
         .is_err()
     {
