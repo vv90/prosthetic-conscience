@@ -1,6 +1,7 @@
 mod audio_transcriptions;
 mod auth;
 mod chat_completions;
+mod response;
 mod session_entries;
 pub mod state;
 mod ui;
@@ -9,7 +10,7 @@ mod worker_ws_upgrade;
 use axum::Json;
 use axum::Router;
 use axum::routing::{get, post};
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use self::audio_transcriptions::audio_transcriptions;
 use self::auth::require_auth;
@@ -20,18 +21,30 @@ use self::worker_ws_upgrade::worker_ws_upgrade;
 
 pub use state::AppState;
 
-async fn list_models() -> Json<Value> {
-    Json(json!({
-        "object": "list",
-        "data": [
-            {
-                "id": "mystery_model",
-                "object": "model",
-                "created": 0,
-                "owned_by": "prosthetic-conscience"
-            }
-        ]
-    }))
+#[derive(Serialize)]
+struct Model {
+    id: &'static str,
+    object: &'static str,
+    created: u64,
+    owned_by: &'static str,
+}
+
+#[derive(Serialize)]
+struct ModelList {
+    object: &'static str,
+    data: Vec<Model>,
+}
+
+async fn list_models() -> Json<ModelList> {
+    Json(ModelList {
+        object: "list",
+        data: vec![Model {
+            id: "mystery_model",
+            object: "model",
+            created: 0,
+            owned_by: "prosthetic-conscience",
+        }],
+    })
 }
 
 pub fn router(state: AppState) -> Router {

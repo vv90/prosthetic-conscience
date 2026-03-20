@@ -2,8 +2,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
-use serde_json::json;
 
+use crate::router::response::error_response;
 use crate::router::state::AppState;
 
 pub(crate) async fn require_auth(
@@ -25,10 +25,6 @@ pub(crate) async fn require_auth(
         Some(value) if value.strip_prefix("Bearer ").is_some_and(|t| t == expected) => {
             next.run(request).await.into_response()
         }
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({"error": {"message": "unauthorized"}})),
-        )
-            .into_response(),
+        _ => error_response(StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
     }
 }

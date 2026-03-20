@@ -1,10 +1,11 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::gateway::kernel::SessionId;
+use crate::router::response::error_response;
 use crate::router::state::AppState;
 
 #[derive(Deserialize)]
@@ -17,6 +18,12 @@ pub(crate) struct Params {
 
 fn default_limit() -> usize {
     100
+}
+
+#[derive(Serialize)]
+struct SessionEntriesResponse {
+    entries: Vec<Value>,
+    total: usize,
 }
 
 const MAX_LIMIT: usize = 1000;
@@ -34,20 +41,14 @@ pub(crate) async fn get_entries(
         .await;
 
     match result {
-        Ok(Some(query)) => axum::Json(json!({
-            "entries": query.entries,
-            "total": query.total,
-        }))
+        Ok(Some(query)) => axum::Json(SessionEntriesResponse {
+            entries: query.entries,
+            total: query.total,
+        })
         .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({"error": {"message": "session not found"}})),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": {"message": "gateway unavailable"}})),
-        )
-            .into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "session not found").into_response(),
+        Err(_) => {
+            error_response(StatusCode::SERVICE_UNAVAILABLE, "gateway unavailable").into_response()
+        }
     }
 }

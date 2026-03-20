@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::gateway::relay::StreamFrame;
 use crate::protocol::Capability;
+use crate::router::response::error_response;
 use crate::router::state::AppState;
 
 /// Maximum audio file size: 25 MB (matches OpenAI's limit).
@@ -41,20 +42,15 @@ pub(crate) async fn audio_transcriptions(
                 let bytes = match field.bytes().await {
                     Ok(b) => b,
                     Err(e) => {
-                        return (
+                        return error_response(
                             StatusCode::BAD_REQUEST,
-                            axum::Json(
-                                json!({"error": {"message": format!("failed to read file: {e}")}}),
-                            ),
+                            format!("failed to read file: {e}"),
                         )
-                            .into_response();
+                        .into_response();
                     }
                 };
                 if bytes.len() > MAX_FILE_SIZE {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({"error": {"message": "file exceeds 25 MB limit"}})),
-                    )
+                    return error_response(StatusCode::BAD_REQUEST, "file exceeds 25 MB limit")
                         .into_response();
                 }
                 file_bytes = Some((bytes.to_vec(), file_name));
@@ -91,10 +87,7 @@ pub(crate) async fn audio_transcriptions(
     let (bytes, file_name) = match file_bytes {
         Some(b) => b,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": {"message": "missing required field: file"}})),
-            )
+            return error_response(StatusCode::BAD_REQUEST, "missing required field: file")
                 .into_response();
         }
     };
@@ -102,10 +95,7 @@ pub(crate) async fn audio_transcriptions(
     let model = match model {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": {"message": "missing required field: model"}})),
-            )
+            return error_response(StatusCode::BAD_REQUEST, "missing required field: model")
                 .into_response();
         }
     };
@@ -136,10 +126,7 @@ pub(crate) async fn audio_transcriptions(
     let stream_id = match state.runtime.register_stream(tx).await {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(json!({"error": {"message": "gateway unavailable"}})),
-            )
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "gateway unavailable")
                 .into_response();
         }
     };
@@ -150,26 +137,19 @@ pub(crate) async fn audio_transcriptions(
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": {"message": "gateway unavailable"}})),
-        )
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "gateway unavailable")
             .into_response();
     }
 
     // Collect the worker response (expect a single Chunk + Done, or an Error).
     match tokio::time::timeout(RESPONSE_TIMEOUT, collect_response(&mut rx)).await {
         Ok(Ok(data)) => axum::Json(data).into_response(),
-        Ok(Err(message)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({"error": {"message": message}})),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(json!({"error": {"message": "transcription timed out"}})),
-        )
-            .into_response(),
+        Ok(Err(message)) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+        }
+        Err(_) => {
+            error_response(StatusCode::GATEWAY_TIMEOUT, "transcription timed out").into_response()
+        }
     }
 }
 

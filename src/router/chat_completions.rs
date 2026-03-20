@@ -2,7 +2,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
@@ -10,6 +9,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::gateway::relay::StreamFrame;
 use crate::protocol::Capability;
 use crate::protocol::ChatRequest;
+use crate::router::response::{ErrorResponse, error_response};
 use crate::router::state::AppState;
 
 pub(crate) async fn chat_completions(
@@ -18,11 +18,7 @@ pub(crate) async fn chat_completions(
 ) -> impl IntoResponse {
     let stream = request.stream.unwrap_or(false);
     if !stream {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "stream=true is required"}})),
-        )
-            .into_response();
+        return error_response(StatusCode::BAD_REQUEST, "stream=true is required").into_response();
     }
 
     let (tx, rx) = mpsc::channel::<StreamFrame>(32);
@@ -30,10 +26,7 @@ pub(crate) async fn chat_completions(
     let stream_id = match state.runtime.register_stream(tx).await {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(json!({"error": {"message": "gateway unavailable"}})),
-            )
+            return error_response(StatusCode::SERVICE_UNAVAILABLE, "gateway unavailable")
                 .into_response();
         }
     };
@@ -44,10 +37,7 @@ pub(crate) async fn chat_completions(
         .await
         .is_err()
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": {"message": "gateway unavailable"}})),
-        )
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "gateway unavailable")
             .into_response();
     }
 
@@ -56,7 +46,8 @@ pub(crate) async fn chat_completions(
             StreamFrame::Chunk { data } => Event::default().data(data.to_string()),
             StreamFrame::Done => Event::default().data("[DONE]"),
             StreamFrame::Error { message } => {
-                Event::default().data(json!({"error": {"message": message}}).to_string())
+                let body = serde_json::to_string(&ErrorResponse::new(message)).unwrap_or_default();
+                Event::default().data(body)
             }
         })
     });
