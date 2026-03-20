@@ -1,12 +1,12 @@
 # Gateway State Machine (Kernel)
 
-Snapshot date: 2026-03-19
+Snapshot date: 2026-03-20
 
 ## Behavior
 
 - A pure reducer `reduce(state, event) -> {state, effects}` is implemented under `src/gateway/kernel.rs`.
 - Generic over worker/stream ID types (`GatewayState<WId, SId>`, `Event<WId, SId>`, `Effect<WId, SId>`).
-- The `reduce` function requires `WId: Clone + Ord + Display` and `SId: Clone + Ord + Display`.
+- The `reduce` function requires `WId: Clone + Ord + Display` and `SId: Clone + Eq + Hash + Display`.
 
 ### Pure immutable design
 
@@ -17,22 +17,25 @@ This is a non-negotiable design constraint. All future kernel logic must follow 
 - No `&mut` on state or its fields.
 - No `.insert()`, `.remove()`, `.retain()`, or field assignment on state.
 - State transitions are expressed as pure constructions: `GatewayState { changed_field: new_value, ..state }`.
-- Use `OrdMap::update`, `OrdMap::without`, `OrdMap::extract` and functional pipelines (`into_iter().filter().collect()`) for collection updates.
+- Use `.update()`, `.without()`, `.extract()` and functional pipelines (`into_iter().filter().collect()`) for collection updates.
 
 ### Persistent collections
 
-State collections use `im::OrdMap` and `im::OrdSet` — persistent immutable data structures with O(log n) operations and O(1) clone via structural sharing. This enables the pure functional style without performance penalty.
+State collections use persistent immutable data structures from the `im` crate with O(1) clone via structural sharing. This enables the pure functional style without performance penalty.
 
-`BTreeSet<Capability>` is kept at the protocol/API boundary (`protocol.rs`, `RuntimeCommand`). Conversion to `OrdSet` happens at exactly one point: `handle_register_worker` in `runtime.rs`.
+- `im::OrdMap` — used only for `available` (worker pool) where deterministic iteration order is needed for capability-based selection.
+- `im::HashMap` / `im::HashSet` — used for `active_streams`, `sessions`, `capabilities`, and session `subscribers`. These do not require ordering and use hash-based collections for O(1) amortized operations.
+
+`BTreeSet<Capability>` is kept at the protocol/API boundary (`protocol.rs`, `RuntimeCommand`). Conversion to `im::HashSet` happens at exactly one point: `handle_register_worker` in `runtime.rs`.
 
 ### State
 
 - `tick: u64` -- monotonic tick counter, incremented on each `Tick` event.
 - `worker_ttl: u64` -- ticks until an idle worker expires.
 - `stream_ttl: u64` -- ticks until an active stream expires.
-- `available: OrdMap<WId, WorkerEntry>` -- workers waiting for jobs. `WorkerEntry` contains `deadline: u64` and `capabilities: OrdSet<Capability>`.
-- `active_streams: OrdMap<SId, u64>` -- client streams with jobs in flight, mapped to their deadline tick.
-- `sessions: OrdMap<SessionId, session::State<SId>>` -- active sessions (see `session-behavior.md`).
+- `available: OrdMap<WId, WorkerEntry>` -- workers waiting for jobs. `WorkerEntry` contains `deadline: u64` and `capabilities: HashSet<Capability>`.
+- `active_streams: HashMap<SId, u64>` -- client streams with jobs in flight, mapped to their deadline tick.
+- `sessions: HashMap<SessionId, session::State<SId>>` -- active sessions (see `session-behavior.md`).
 
 Workers are one-use: consumed on dispatch, gone from kernel state. After job completion, the worker handler re-registers with a fresh ID. From the kernel's perspective, it's a new worker.
 
@@ -49,6 +52,7 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 | `WorkerHeartbeat { worker_id }`                                                | Worker signals liveness                     | Resets worker deadline to `tick + worker_ttl`                                  |
 | `StreamHeartbeat { client_stream_id }`                                         | Stream signals activity                     | Resets stream deadline to `tick + stream_ttl`                                  |
 | `Tick`                                                                         | Timer driven by runtime                     | Increments tick, expires stale workers and timed-out streams                   |
+| `CreateSession { session_id }`                                                 | Explicit session creation                   | Adds to `sessions` with default state (rejects duplicates)                     |
 | `SessionEvent { session_id, event }`                                           | Session operation delegated to child kernel | Delegates to `session::kernel::reduce` (see `session-behavior.md`)             |
 
 ### Effects (outputs)
@@ -59,7 +63,7 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 | `SendClientError { client_stream_id, message }`                    | Send error to client stream        |
 | `SendClientDone { client_stream_id }`                              | Signal stream completion to client |
 | `SessionEffect(session::Effect<SId>)`                              | Wrapped session effect             |
-| `ProtocolViolation { worker_description, message }`                | Log invalid behavior               |
+| `ProtocolViolation { source: ViolationSource, message }`           | Log invalid behavior               |
 
 ### Worker assignment policy
 
@@ -134,6 +138,13 @@ Specific input-output contracts for each event. Each is a unit-test target.
 | Workers past deadline | None (stale worker, no client affected)                          | Expired workers removed from `available`      |
 | Streams past deadline | `[SendClientError("stream timed out"), SendClientDone]` for each | Expired streams removed from `active_streams` |
 
+### `CreateSession`
+
+| Precondition                       | Effects                                             | State change                                   |
+| ---------------------------------- | --------------------------------------------------- | ---------------------------------------------- |
+| `session_id` not in `sessions`     | None                                                | Session added to `sessions` with default state |
+| `session_id` already in `sessions` | `[ProtocolViolation("duplicate session creation")]` | No change                                      |
+
 ### `SessionEvent`
 
 | Precondition                   | Effects                                                | State change                            |
@@ -143,7 +154,17 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 ## Test Coverage
 
-### Unit tests (49 tests)
+### ProtocolViolation
+
+`ProtocolViolation` uses a `ViolationSource` enum to identify the origin of the violation:
+
+- `ViolationSource::Worker(String)` — violation from a worker
+- `ViolationSource::Stream(String)` — violation from a client stream
+- `ViolationSource::Session(String)` — violation from a session
+
+The source uses `String` (not generic ID types) to avoid type complexity at the runtime boundary where effects are resolved from kernel types to channel-handle types.
+
+### Unit tests (54 tests)
 
 | Test                                                              | Covers                                                            |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -195,6 +216,11 @@ Specific input-output contracts for each event. Each is a unit-test target.
 | `no_capable_worker_available_returns_error`                       | No capable worker returns error                                   |
 | `selects_capable_worker_when_mixed_pool`                          | Selects correct worker from mixed-capability pool                 |
 | `multi_capable_worker_serves_either_job_type`                     | Worker with both capabilities serves either job type              |
+| `create_session_adds_to_sessions`                                 | C1: session exists after creation                                 |
+| `create_session_starts_empty`                                     | C2: new session starts with default (empty) state                 |
+| `duplicate_create_session_emits_protocol_violation`               | C3: duplicate creation emits ProtocolViolation, state unchanged   |
+| `create_session_emits_no_effects`                                 | C4: no effects on successful creation                             |
+| `create_session_does_not_affect_other_state`                      | C5: available, active_streams, tick unchanged                     |
 
 ### Property tests (7 tests)
 
@@ -219,11 +245,13 @@ None.
 
 ## Status
 
-- Implemented as pure immutable reducer with persistent collections (`im::OrdMap`, `im::OrdSet`).
+- Implemented as pure immutable reducer with persistent collections (`im::OrdMap`, `im::HashMap`, `im::HashSet`).
 - Capability-based worker dispatch.
+- Explicit session creation (`CreateSession`) with duplicate detection.
 - Session delegation to independent child kernel.
 - One-use worker IDs, tick-counted deadlines, heartbeat events, timeout-driven expiration, duplicate stream ID rejection.
-- 49 kernel unit tests covering all transition rules including capability routing and expiration scenarios.
+- `ProtocolViolation` uses `ViolationSource` enum (Worker/Stream/Session) with string IDs.
+- 54 kernel unit tests covering all transition rules including capability routing, expiration, and session creation.
 - 7 property tests covering invariants I2-I6, tick monotonicity, stream timeout effect pairs, and request terminal effects.
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 

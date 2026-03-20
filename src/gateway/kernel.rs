@@ -74,6 +74,9 @@ pub enum Event<WId, SId> {
         client_stream_id: SId,
     },
     Tick,
+    CreateSession {
+        session_id: SessionId,
+    },
     SessionEvent {
         session_id: SessionId,
         event: session::Event<SId>,
@@ -336,6 +339,24 @@ where
                     ..state
                 },
                 effects,
+            }
+        }
+        Event::CreateSession { session_id } => {
+            if state.sessions.contains_key(&session_id) {
+                return Transition {
+                    state,
+                    effects: vec![Effect::ProtocolViolation(ProtocolViolation {
+                        source: ViolationSource::Session(session_id.to_string()),
+                        message: String::from("duplicate session creation"),
+                    })],
+                };
+            }
+            Transition {
+                state: GatewayState {
+                    sessions: state.sessions.update(session_id, session::State::default()),
+                    ..state
+                },
+                effects: Vec::new(),
             }
         }
         Event::SessionEvent {
@@ -1731,6 +1752,112 @@ mod tests {
         assert_eq!(entry.capabilities, both_caps());
     }
 
+    // --- CreateSession tests ---
+
+    #[test]
+    fn create_session_adds_to_sessions() {
+        // C1: After CreateSession, sessions.contains_key(&session_id) is true
+        let state: GatewayState<WId, SId> = GatewayState::default();
+        let session_id = SessionId(String::from("sess-1"));
+
+        let transition = reduce(
+            state,
+            Event::CreateSession {
+                session_id: session_id.clone(),
+            },
+        );
+
+        assert!(transition.state.sessions.contains_key(&session_id));
+    }
+
+    #[test]
+    fn create_session_starts_empty() {
+        // C2: New session starts with empty entries and empty subscribers
+        let state: GatewayState<WId, SId> = GatewayState::default();
+        let session_id = SessionId(String::from("sess-1"));
+
+        let transition = reduce(
+            state,
+            Event::CreateSession {
+                session_id: session_id.clone(),
+            },
+        );
+
+        let session_state = transition.state.sessions.get(&session_id).unwrap();
+        assert_eq!(*session_state, session::State::default());
+    }
+
+    #[test]
+    fn duplicate_create_session_emits_protocol_violation() {
+        // C3: Duplicate CreateSession emits ProtocolViolation, state unchanged
+        let state: GatewayState<WId, SId> = GatewayState::default();
+        let session_id = SessionId(String::from("sess-1"));
+
+        let first = reduce(
+            state,
+            Event::CreateSession {
+                session_id: session_id.clone(),
+            },
+        );
+        let state_after_first = first.state.clone();
+
+        let second = reduce(
+            first.state,
+            Event::CreateSession {
+                session_id: session_id.clone(),
+            },
+        );
+
+        assert_eq!(
+            second.effects,
+            vec![Effect::ProtocolViolation(ProtocolViolation {
+                source: ViolationSource::Session(String::from("sess-1")),
+                message: String::from("duplicate session creation"),
+            })]
+        );
+        assert_eq!(second.state, state_after_first);
+    }
+
+    #[test]
+    fn create_session_emits_no_effects() {
+        // C4: CreateSession emits no effects on success
+        let state: GatewayState<WId, SId> = GatewayState::default();
+
+        let transition = reduce(
+            state,
+            Event::CreateSession {
+                session_id: SessionId(String::from("sess-1")),
+            },
+        );
+
+        assert!(transition.effects.is_empty());
+    }
+
+    #[test]
+    fn create_session_does_not_affect_other_state() {
+        // C5: CreateSession does not modify available, active_streams, or tick
+        let state: GatewayState<WId, SId> = GatewayState {
+            tick: 42,
+            available: OrdMap::unit(w("worker-a"), chat_entry(100)),
+            active_streams: HashMap::unit(s("client-1"), 50),
+            ..GatewayState::default()
+        };
+        let available_before = state.available.clone();
+        let active_streams_before = state.active_streams.clone();
+        let tick_before = state.tick;
+
+        let transition = reduce(
+            state,
+            Event::CreateSession {
+                session_id: SessionId(String::from("sess-1")),
+            },
+        );
+
+        assert_eq!(transition.state.tick, tick_before);
+        assert_eq!(transition.state.available, available_before);
+        assert_eq!(transition.state.active_streams, active_streams_before);
+    }
+
     // --- Property tests ---
 
     mod proptests {
@@ -1793,6 +1920,10 @@ mod tests {
                 }),
                 // Tick
                 Just(Event::Tick),
+                // CreateSession
+                prop::sample::select(SESSION_IDS).prop_map(|sess| Event::CreateSession {
+                    session_id: SessionId(String::from(sess)),
+                }),
                 // SessionEvent
                 (
                     prop::sample::select(SESSION_IDS),
