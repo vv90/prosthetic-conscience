@@ -1,3 +1,3 @@
 pub mod kernel;
 
-pub use kernel::{Effect, Event, State, Transition, reduce};
+pub use kernel::{AppendLog, Effect, Event, State, Transition, reduce};

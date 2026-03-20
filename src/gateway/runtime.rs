@@ -11,7 +11,7 @@ use super::effects::dispatch_job::DispatchJob;
 use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
 use super::kernel::Capability;
-use super::kernel::{Effect, Event, GatewayState, Transition, reduce};
+use super::kernel::{Effect, Event, GatewayState, SessionId, Transition, reduce};
 use super::session;
 
 /// Configuration for the gateway runtime.
@@ -38,6 +38,12 @@ impl Default for GatewayConfig {
             worker_heartbeat_interval: Duration::from_secs(15),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionEntriesQuery {
+    pub entries: Vec<Value>,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +92,12 @@ pub enum RuntimeCommand {
     },
     QueryState {
         reply_tx: oneshot::Sender<StateSnapshot>,
+    },
+    QuerySessionEntries {
+        session_id: SessionId,
+        after: usize,
+        limit: usize,
+        reply_tx: oneshot::Sender<Option<SessionEntriesQuery>>,
     },
 }
 
@@ -191,6 +203,23 @@ impl RuntimeHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_command(RuntimeCommand::QueryState { reply_tx })
             .await?;
+        reply_rx.await.map_err(|_| RuntimeSendError)
+    }
+
+    pub async fn query_session_entries(
+        &self,
+        session_id: SessionId,
+        after: usize,
+        limit: usize,
+    ) -> Result<Option<SessionEntriesQuery>, RuntimeSendError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.submit_command(RuntimeCommand::QuerySessionEntries {
+            session_id,
+            after,
+            limit,
+            reply_tx,
+        })
+        .await?;
         reply_rx.await.map_err(|_| RuntimeSendError)
     }
 }
@@ -393,54 +422,70 @@ impl GatewayRuntime {
         message: RuntimeMessage,
         msg_tx: &mpsc::Sender<RuntimeMessage>,
     ) -> (Self, Vec<ResolvedEffect>) {
-        let (mut updated_runtime, effects) = match message {
-            RuntimeMessage::Command(command) => match command {
-                RuntimeCommand::RegisterWorker {
-                    handle,
-                    capabilities,
-                    reply_tx,
-                } => self.handle_register_worker(handle, capabilities, reply_tx),
-                RuntimeCommand::WorkerHeartbeat { worker_id } => {
-                    self.handle_worker_heartbeat(worker_id)
-                }
-                RuntimeCommand::AssignmentCleared { client_stream_id } => {
-                    self.handle_assignment_cleared(client_stream_id)
-                }
-                RuntimeCommand::AssignmentFailed {
-                    client_stream_id,
-                    message,
-                } => self.handle_assignment_failed(client_stream_id, message),
-                RuntimeCommand::StreamHeartbeat { client_stream_id } => {
-                    self.handle_stream_heartbeat(client_stream_id)
-                }
-                RuntimeCommand::RegisterStream { handle, reply_tx } => {
-                    self.handle_register_stream(handle, reply_tx)
-                }
-                RuntimeCommand::HttpChatRequested {
-                    client_stream_id,
-                    payload,
-                    stream,
-                    required_capability,
-                } => self.handle_http_chat_requested(
-                    client_stream_id,
-                    payload,
-                    stream,
-                    required_capability,
-                ),
-                RuntimeCommand::QueryState { reply_tx } => {
-                    let snapshot = StateSnapshot {
-                        tick: self.state.tick,
-                        available_workers: self.state.available.len(),
-                        active_streams: self.state.active_streams.len(),
-                        worker_registry_count: self.registry.worker_count(),
-                        stream_registry_count: self.registry.stream_count(),
-                    };
-                    let _ = reply_tx.send(snapshot);
-                    (self, Vec::new())
-                }
-            },
-            RuntimeMessage::Event(event) => self.apply_event(event),
-        };
+        let (mut updated_runtime, effects) =
+            match message {
+                RuntimeMessage::Command(command) => match command {
+                    RuntimeCommand::RegisterWorker {
+                        handle,
+                        capabilities,
+                        reply_tx,
+                    } => self.handle_register_worker(handle, capabilities, reply_tx),
+                    RuntimeCommand::WorkerHeartbeat { worker_id } => {
+                        self.handle_worker_heartbeat(worker_id)
+                    }
+                    RuntimeCommand::AssignmentCleared { client_stream_id } => {
+                        self.handle_assignment_cleared(client_stream_id)
+                    }
+                    RuntimeCommand::AssignmentFailed {
+                        client_stream_id,
+                        message,
+                    } => self.handle_assignment_failed(client_stream_id, message),
+                    RuntimeCommand::StreamHeartbeat { client_stream_id } => {
+                        self.handle_stream_heartbeat(client_stream_id)
+                    }
+                    RuntimeCommand::RegisterStream { handle, reply_tx } => {
+                        self.handle_register_stream(handle, reply_tx)
+                    }
+                    RuntimeCommand::HttpChatRequested {
+                        client_stream_id,
+                        payload,
+                        stream,
+                        required_capability,
+                    } => self.handle_http_chat_requested(
+                        client_stream_id,
+                        payload,
+                        stream,
+                        required_capability,
+                    ),
+                    RuntimeCommand::QueryState { reply_tx } => {
+                        let snapshot = StateSnapshot {
+                            tick: self.state.tick,
+                            available_workers: self.state.available.len(),
+                            active_streams: self.state.active_streams.len(),
+                            worker_registry_count: self.registry.worker_count(),
+                            stream_registry_count: self.registry.stream_count(),
+                        };
+                        let _ = reply_tx.send(snapshot);
+                        (self, Vec::new())
+                    }
+                    RuntimeCommand::QuerySessionEntries {
+                        session_id,
+                        after,
+                        limit,
+                        reply_tx,
+                    } => {
+                        let result = self.state.sessions.get(&session_id).map(|session| {
+                            SessionEntriesQuery {
+                                entries: session.entries.slice(after, limit).to_vec(),
+                                total: session.entries.len(),
+                            }
+                        });
+                        let _ = reply_tx.send(result);
+                        (self, Vec::new())
+                    }
+                },
+                RuntimeMessage::Event(event) => self.apply_event(event),
+            };
 
         let (resolved_effects, fallback_events) = updated_runtime.resolve_effects(effects);
 
