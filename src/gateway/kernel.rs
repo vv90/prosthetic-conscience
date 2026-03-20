@@ -1,4 +1,4 @@
-use im::{OrdMap, OrdSet};
+use im::{HashMap, HashSet, OrdMap};
 
 use crate::gateway::session;
 pub use crate::protocol::Capability;
@@ -16,33 +16,33 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerEntry {
     pub deadline: u64,
-    pub capabilities: OrdSet<Capability>,
+    pub capabilities: HashSet<Capability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GatewayState<WId: Clone + Ord, SId: Clone + Ord> {
+pub struct GatewayState<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> {
     pub tick: u64,
     pub worker_ttl: u64,
     pub stream_ttl: u64,
     pub available: OrdMap<WId, WorkerEntry>,
-    pub active_streams: OrdMap<SId, u64>,
-    pub sessions: OrdMap<SessionId, session::State<SId>>,
+    pub active_streams: HashMap<SId, u64>,
+    pub sessions: HashMap<SessionId, session::State<SId>>,
 }
 
-impl<WId: Clone + Ord, SId: Clone + Ord> GatewayState<WId, SId> {
+impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> GatewayState<WId, SId> {
     pub fn new(worker_ttl: u64, stream_ttl: u64) -> Self {
         Self {
             tick: 0,
             worker_ttl,
             stream_ttl,
             available: OrdMap::new(),
-            active_streams: OrdMap::new(),
-            sessions: OrdMap::new(),
+            active_streams: HashMap::new(),
+            sessions: HashMap::new(),
         }
     }
 }
 
-impl<WId: Clone + Ord, SId: Clone + Ord> Default for GatewayState<WId, SId> {
+impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> Default for GatewayState<WId, SId> {
     fn default() -> Self {
         Self::new(60, 30)
     }
@@ -58,7 +58,7 @@ pub enum Event<WId, SId> {
     },
     WorkerRegistered {
         worker_id: WId,
-        capabilities: OrdSet<Capability>,
+        capabilities: HashSet<Capability>,
     },
     AssignmentCleared {
         client_stream_id: SId,
@@ -94,7 +94,7 @@ pub enum Effect<WId, SId> {
     ProtocolViolation(ProtocolViolation),
 }
 
-pub struct Transition<WId: Clone + Ord, SId: Clone + Ord> {
+pub struct Transition<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> {
     pub state: GatewayState<WId, SId>,
     pub effects: Vec<Effect<WId, SId>>,
 }
@@ -109,7 +109,7 @@ pub fn reduce<WId, SId>(
 ) -> Transition<WId, SId>
 where
     WId: Clone + Ord + std::fmt::Display,
-    SId: Clone + Ord + std::fmt::Display,
+    SId: Clone + Eq + std::hash::Hash + std::fmt::Display,
 {
     match event {
         Event::HttpChatRequested {
@@ -307,7 +307,7 @@ where
                 .filter(|(_, entry)| entry.deadline > tick)
                 .collect();
 
-            let mut kept: OrdMap<SId, u64> = OrdMap::new();
+            let mut kept: HashMap<SId, u64> = HashMap::new();
             let mut expired: Vec<SId> = Vec::new();
             for (sid, deadline) in state.active_streams {
                 if deadline > tick {
@@ -374,7 +374,7 @@ where
     }
 }
 
-fn first_capable_worker_id<WId: Clone + Ord, SId: Clone + Ord>(
+fn first_capable_worker_id<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash>(
     state: &GatewayState<WId, SId>,
     required: &Capability,
 ) -> Option<WId> {
@@ -402,15 +402,15 @@ mod tests {
         String::from(value)
     }
 
-    fn chat_caps() -> OrdSet<Capability> {
-        OrdSet::unit(Capability::Chat)
+    fn chat_caps() -> HashSet<Capability> {
+        HashSet::unit(Capability::Chat)
     }
 
-    fn transcription_caps() -> OrdSet<Capability> {
-        OrdSet::unit(Capability::Transcription)
+    fn transcription_caps() -> HashSet<Capability> {
+        HashSet::unit(Capability::Transcription)
     }
 
-    fn both_caps() -> OrdSet<Capability> {
+    fn both_caps() -> HashSet<Capability> {
         vec![Capability::Chat, Capability::Transcription]
             .into_iter()
             .collect()
@@ -1750,7 +1750,7 @@ mod tests {
             prop_oneof![Just(Capability::Chat), Just(Capability::Transcription),]
         }
 
-        fn arb_capabilities() -> impl Strategy<Value = OrdSet<Capability>> {
+        fn arb_capabilities() -> impl Strategy<Value = HashSet<Capability>> {
             proptest::collection::btree_set(arb_capability(), 1..=2)
                 .prop_map(|s| s.into_iter().collect())
         }
@@ -2128,7 +2128,7 @@ mod tests {
 
                 for event in events {
                     // Snapshot worker capabilities before the transition
-                    let worker_caps_before: std::collections::BTreeMap<WId, OrdSet<Capability>> =
+                    let worker_caps_before: std::collections::BTreeMap<WId, HashSet<Capability>> =
                         state
                             .available
                             .iter()

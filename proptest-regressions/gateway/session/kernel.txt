@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d5a3e3c803438b59489bdc5e13206626a7fb14aa5665a563044f32d5a301fcbf # shrinks to state = State { entries: AppendLog { entries: [] }, subscribers: {"sub0"} }, payload = Object {"msg": String("hello")}
+cc dc17bc5e40bb062e2394a1e839163befd70afee5c4a63352e9a9bdf29159e402 # shrinks to state = State { entries: AppendLog { entries: [] }, subscribers: {} }, sub_id = "sub0"
