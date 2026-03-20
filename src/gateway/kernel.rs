@@ -81,8 +81,10 @@ pub enum Event<WId, SId> {
 }
 
 use super::effects::{
-    dispatch_job::DispatchJob, protocol_violation::ProtocolViolation,
-    send_client_done::SendClientDone, send_client_error::SendClientError,
+    dispatch_job::DispatchJob,
+    protocol_violation::{ProtocolViolation, ViolationSource},
+    send_client_done::SendClientDone,
+    send_client_error::SendClientError,
 };
 
 #[derive(Debug, PartialEq)]
@@ -183,7 +185,7 @@ where
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        worker_description: worker_id.to_string(),
+                        source: ViolationSource::Worker(worker_id.to_string()),
                         message: String::from("duplicate worker registration"),
                     })],
                 };
@@ -208,11 +210,8 @@ where
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        worker_description: String::from("unknown"),
-                        message: format!(
-                            "assignment cleared for unknown stream {}",
-                            client_stream_id
-                        ),
+                        source: ViolationSource::Stream(client_stream_id.to_string()),
+                        message: String::from("assignment cleared for unknown stream"),
                     })],
                 };
             }
@@ -233,11 +232,8 @@ where
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        worker_description: String::from("unknown"),
-                        message: format!(
-                            "assignment failed for unknown stream {}",
-                            client_stream_id
-                        ),
+                        source: ViolationSource::Stream(client_stream_id.to_string()),
+                        message: String::from("assignment failed for unknown stream"),
                     })],
                 };
             }
@@ -273,7 +269,7 @@ where
             None => Transition {
                 state,
                 effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                    worker_description: worker_id.to_string(),
+                    source: ViolationSource::Worker(worker_id.to_string()),
                     message: String::from("heartbeat from unknown worker"),
                 })],
             },
@@ -283,8 +279,8 @@ where
                 return Transition {
                     state,
                     effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        worker_description: String::from("unknown"),
-                        message: format!("heartbeat for unknown stream {}", client_stream_id),
+                        source: ViolationSource::Stream(client_stream_id.to_string()),
+                        message: String::from("heartbeat for unknown stream"),
                     })],
                 };
             }
@@ -366,8 +362,8 @@ where
             None => Transition {
                 state,
                 effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                    worker_description: String::from("unknown"),
-                    message: format!("event for unknown session {}", session_id),
+                    source: ViolationSource::Session(session_id.to_string()),
+                    message: String::from("event for unknown session"),
                 })],
             },
         },
@@ -736,7 +732,7 @@ mod tests {
         assert_eq!(
             transition.effects,
             vec![Effect::ProtocolViolation(ProtocolViolation {
-                worker_description: w("worker-a"),
+                source: ViolationSource::Worker(w("worker-a")),
                 message: String::from("duplicate worker registration"),
             })]
         );
