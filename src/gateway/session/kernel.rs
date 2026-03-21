@@ -1,4 +1,4 @@
-use im::HashSet;
+use im::HashMap;
 
 use serde_json::Value;
 
@@ -55,14 +55,16 @@ impl AppendLog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State<SubId: Clone + Eq + std::hash::Hash> {
     pub entries: AppendLog,
-    pub subscribers: HashSet<SubId>,
+    pub subscribers: HashMap<SubId, u64>,
+    pub subscriber_ttl: u64,
 }
 
 impl<SubId: Clone + Eq + std::hash::Hash> Default for State<SubId> {
     fn default() -> Self {
         Self {
             entries: AppendLog::new(),
-            subscribers: HashSet::new(),
+            subscribers: HashMap::new(),
+            subscriber_ttl: 0,
         }
     }
 }
@@ -70,8 +72,10 @@ impl<SubId: Clone + Eq + std::hash::Hash> Default for State<SubId> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event<SubId> {
     EntryAppended { payload: Value },
-    Subscribed { subscriber_id: SubId },
+    Subscribed { subscriber_id: SubId, tick: u64 },
     Unsubscribed { subscriber_id: SubId },
+    Tick { tick: u64 },
+    SubscriberHeartbeat { subscriber_id: SubId, tick: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +84,9 @@ pub enum Effect<SubId> {
         entry_index: usize,
         payload: Value,
         subscribers: Vec<SubId>,
+    },
+    SubscriberRemoved {
+        subscriber_id: SubId,
     },
 }
 
@@ -102,7 +109,7 @@ pub fn reduce<SubId: Clone + Eq + std::hash::Hash>(
                 vec![Effect::NotifySubscribers {
                     entry_index,
                     payload,
-                    subscribers: state.subscribers.iter().cloned().collect(),
+                    subscribers: state.subscribers.keys().cloned().collect(),
                 }]
             };
             Transition {
@@ -110,20 +117,76 @@ pub fn reduce<SubId: Clone + Eq + std::hash::Hash>(
                 effects,
             }
         }
-        Event::Subscribed { subscriber_id } => Transition {
-            state: State {
-                subscribers: state.subscribers.update(subscriber_id),
-                ..state
-            },
-            effects: Vec::new(),
-        },
-        Event::Unsubscribed { subscriber_id } => Transition {
-            state: State {
-                subscribers: state.subscribers.without(&subscriber_id),
-                ..state
-            },
-            effects: Vec::new(),
-        },
+        Event::Subscribed {
+            subscriber_id,
+            tick,
+        } => {
+            let deadline = tick + state.subscriber_ttl;
+            Transition {
+                state: State {
+                    subscribers: state.subscribers.update(subscriber_id, deadline),
+                    ..state
+                },
+                effects: Vec::new(),
+            }
+        }
+        Event::Unsubscribed { subscriber_id } => {
+            if state.subscribers.contains_key(&subscriber_id) {
+                Transition {
+                    state: State {
+                        subscribers: state.subscribers.without(&subscriber_id),
+                        ..state
+                    },
+                    effects: vec![Effect::SubscriberRemoved { subscriber_id }],
+                }
+            } else {
+                Transition {
+                    state,
+                    effects: Vec::new(),
+                }
+            }
+        }
+        Event::Tick { tick } => {
+            let mut expired = Vec::new();
+            let mut surviving = state.subscribers.clone();
+            for (sub_id, deadline) in state.subscribers.iter() {
+                if *deadline <= tick {
+                    expired.push(sub_id.clone());
+                    surviving = surviving.without(sub_id);
+                }
+            }
+            let effects = expired
+                .into_iter()
+                .map(|subscriber_id| Effect::SubscriberRemoved { subscriber_id })
+                .collect();
+            Transition {
+                state: State {
+                    subscribers: surviving,
+                    ..state
+                },
+                effects,
+            }
+        }
+        Event::SubscriberHeartbeat {
+            subscriber_id,
+            tick,
+        } => {
+            if state.subscribers.contains_key(&subscriber_id) {
+                let deadline = tick + state.subscriber_ttl;
+                Transition {
+                    state: State {
+                        subscribers: state.subscribers.update(subscriber_id, deadline),
+                        ..state
+                    },
+                    effects: Vec::new(),
+                }
+            } else {
+                Transition {
+                    state,
+                    effects: Vec::new(),
+                }
+            }
+        }
     }
 }
 
@@ -213,6 +276,233 @@ mod tests {
         assert_eq!(result, &[json!(0), json!(1), json!(2)]);
     }
 
+    // T1: Tick removes subscriber at deadline (deadline <= tick)
+    #[test]
+    fn t1_tick_removes_subscriber_at_deadline() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 10),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(state, Event::Tick { tick: 10 });
+        assert!(transition.state.subscribers.is_empty());
+    }
+
+    // T2: Tick keeps subscriber before deadline (deadline > tick)
+    #[test]
+    fn t2_tick_keeps_subscriber_before_deadline() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 10),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(state, Event::Tick { tick: 9 });
+        assert!(
+            transition
+                .state
+                .subscribers
+                .contains_key(&"sub1".to_string())
+        );
+    }
+
+    // T3: Tick with no subscribers produces no effects
+    #[test]
+    fn t3_tick_no_subscribers_no_effects() {
+        let state: State<String> = State::default();
+        let transition = reduce(state, Event::Tick { tick: 10 });
+        assert!(transition.effects.is_empty());
+    }
+
+    // T4: Tick emits SubscriberRemoved for each expired subscriber
+    #[test]
+    fn t4_tick_emits_subscriber_removed_for_expired() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 5).update("sub2".to_string(), 5),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(state, Event::Tick { tick: 5 });
+        let mut removed: Vec<String> = transition
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SubscriberRemoved { subscriber_id } => Some(subscriber_id.clone()),
+                _ => None,
+            })
+            .collect();
+        removed.sort();
+        assert_eq!(removed, vec!["sub1".to_string(), "sub2".to_string()]);
+    }
+
+    // T5: SubscriberHeartbeat resets deadline for known subscriber
+    #[test]
+    fn t5_heartbeat_resets_deadline() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 10),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::SubscriberHeartbeat {
+                subscriber_id: "sub1".to_string(),
+                tick: 20,
+            },
+        );
+        assert_eq!(
+            transition.state.subscribers.get(&"sub1".to_string()),
+            Some(&25) // tick 20 + ttl 5
+        );
+    }
+
+    // T6: SubscriberHeartbeat for unknown subscriber leaves state unchanged
+    #[test]
+    fn t6_heartbeat_unknown_subscriber_no_change() {
+        let state: State<String> = State {
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(
+            state.clone(),
+            Event::SubscriberHeartbeat {
+                subscriber_id: "unknown".to_string(),
+                tick: 10,
+            },
+        );
+        assert_eq!(transition.state.subscribers, state.subscribers);
+        assert!(transition.effects.is_empty());
+    }
+
+    // T7: Subscribed sets deadline to tick + subscriber_ttl
+    #[test]
+    fn t7_subscribed_sets_deadline() {
+        let state: State<String> = State {
+            subscriber_ttl: 7,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::Subscribed {
+                subscriber_id: "sub1".to_string(),
+                tick: 3,
+            },
+        );
+        assert_eq!(
+            transition.state.subscribers.get(&"sub1".to_string()),
+            Some(&10) // tick 3 + ttl 7
+        );
+    }
+
+    // T8: SubscriberHeartbeat for known subscriber sets deadline to tick + subscriber_ttl
+    #[test]
+    fn t8_heartbeat_sets_correct_deadline() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 5),
+            subscriber_ttl: 10,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::SubscriberHeartbeat {
+                subscriber_id: "sub1".to_string(),
+                tick: 15,
+            },
+        );
+        assert_eq!(
+            transition.state.subscribers.get(&"sub1".to_string()),
+            Some(&25) // tick 15 + ttl 10
+        );
+    }
+
+    // T9: Heartbeat prevents expiry (heartbeat then tick past original deadline)
+    #[test]
+    fn t9_heartbeat_prevents_expiry() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 10),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        // Heartbeat at tick 12 resets deadline to 17
+        let transition = reduce(
+            state,
+            Event::SubscriberHeartbeat {
+                subscriber_id: "sub1".to_string(),
+                tick: 12,
+            },
+        );
+        // Tick at 15 (past original deadline 10 but before new deadline 17)
+        let transition = reduce(transition.state, Event::Tick { tick: 15 });
+        assert!(
+            transition
+                .state
+                .subscribers
+                .contains_key(&"sub1".to_string())
+        );
+        assert!(transition.effects.is_empty());
+    }
+
+    // T10: subscriber_ttl = 0 expires subscriber on next tick
+    #[test]
+    fn t10_zero_ttl_expires_on_next_tick() {
+        let state: State<String> = State {
+            subscriber_ttl: 0,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::Subscribed {
+                subscriber_id: "sub1".to_string(),
+                tick: 5,
+            },
+        );
+        // deadline = tick + ttl = 5 + 0 = 5, so tick 5 should expire it
+        let transition = reduce(transition.state, Event::Tick { tick: 5 });
+        assert!(transition.state.subscribers.is_empty());
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::SubscriberRemoved { subscriber_id } if subscriber_id == "sub1"
+        ));
+    }
+
+    // T11: Unsubscribed emits SubscriberRemoved for known subscriber
+    #[test]
+    fn t11_unsubscribe_emits_subscriber_removed() {
+        let state = State {
+            subscribers: HashMap::unit("sub1".to_string(), 10),
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::Unsubscribed {
+                subscriber_id: "sub1".to_string(),
+            },
+        );
+        assert!(transition.state.subscribers.is_empty());
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            Effect::SubscriberRemoved { subscriber_id } if subscriber_id == "sub1"
+        ));
+    }
+
+    // T12: Unsubscribed for unknown subscriber produces no effects
+    #[test]
+    fn t12_unsubscribe_unknown_no_effects() {
+        let state: State<String> = State {
+            subscriber_ttl: 5,
+            ..State::default()
+        };
+        let transition = reduce(
+            state,
+            Event::Unsubscribed {
+                subscriber_id: "unknown".to_string(),
+            },
+        );
+        assert!(transition.effects.is_empty());
+    }
+
     mod proptests {
         use super::*;
         use proptest::prelude::*;
@@ -233,17 +523,28 @@ mod tests {
             prop_oneof![
                 arb_payload().prop_map(|payload| Event::EntryAppended { payload }),
                 prop::sample::select(SUB_IDS).prop_map(|id| Event::Subscribed {
-                    subscriber_id: String::from(id)
+                    subscriber_id: String::from(id),
+                    tick: 0,
                 }),
                 prop::sample::select(SUB_IDS).prop_map(|id| Event::Unsubscribed {
                     subscriber_id: String::from(id)
                 }),
+                (0..100u64).prop_map(|tick| Event::Tick { tick }),
+                (
+                    prop::sample::select(SUB_IDS).prop_map(String::from),
+                    0..100u64,
+                )
+                    .prop_map(|(id, tick)| Event::SubscriberHeartbeat {
+                        subscriber_id: id,
+                        tick,
+                    }),
             ]
         }
 
-        fn arb_subscribers() -> impl Strategy<Value = HashSet<String>> {
-            proptest::collection::btree_set(
+        fn arb_subscribers() -> impl Strategy<Value = HashMap<String, u64>> {
+            proptest::collection::btree_map(
                 prop::sample::select(SUB_IDS).prop_map(String::from),
+                0..100u64,
                 0..=3,
             )
             .prop_map(|s| s.into_iter().collect())
@@ -258,10 +559,13 @@ mod tests {
         }
 
         fn arb_state() -> impl Strategy<Value = State<String>> {
-            (arb_entries(), arb_subscribers()).prop_map(|(entries, subscribers)| State {
-                entries,
-                subscribers,
-            })
+            (arb_entries(), arb_subscribers(), 0..100u64).prop_map(
+                |(entries, subscribers, subscriber_ttl)| State {
+                    entries,
+                    subscribers,
+                    subscriber_ttl,
+                },
+            )
         }
 
         proptest! {
@@ -302,15 +606,16 @@ mod tests {
                 let transition = reduce(state, event);
 
                 for effect in &transition.effects {
-                    let Effect::NotifySubscribers { entry_index, payload: notified_payload, .. } = effect;
-                    prop_assert_eq!(
-                        *entry_index, expected_index,
-                        "entry_index should equal pre-append log length"
-                    );
-                    prop_assert_eq!(
-                        notified_payload, &payload,
-                        "notification payload should match appended entry"
-                    );
+                    if let Effect::NotifySubscribers { entry_index, payload: notified_payload, .. } = effect {
+                        prop_assert_eq!(
+                            *entry_index, expected_index,
+                            "entry_index should equal pre-append log length"
+                        );
+                        prop_assert_eq!(
+                            notified_payload, &payload,
+                            "notification payload should match appended entry"
+                        );
+                    }
                 }
             }
 
@@ -320,19 +625,20 @@ mod tests {
                 state in arb_state(),
                 payload in arb_payload(),
             ) {
-                let mut expected_subs: Vec<String> = state.subscribers.iter().cloned().collect();
+                let mut expected_subs: Vec<String> = state.subscribers.keys().cloned().collect();
                 expected_subs.sort();
                 let event = Event::EntryAppended { payload };
                 let transition = reduce(state, event);
 
                 for effect in &transition.effects {
-                    let Effect::NotifySubscribers { subscribers, .. } = effect;
-                    let mut sorted_subs = subscribers.clone();
-                    sorted_subs.sort();
-                    prop_assert_eq!(
-                        sorted_subs, expected_subs.clone(),
-                        "notification subscribers should match subscriber set"
-                    );
+                    if let Effect::NotifySubscribers { subscribers, .. } = effect {
+                        let mut sorted_subs = subscribers.clone();
+                        sorted_subs.sort();
+                        prop_assert_eq!(
+                            sorted_subs, expected_subs.clone(),
+                            "notification subscribers should match subscriber set"
+                        );
+                    }
                 }
             }
 
@@ -357,25 +663,26 @@ mod tests {
                             "append must not modify subscribers"
                         );
                     }
+                    Event::Tick { .. } | Event::SubscriberHeartbeat { .. } => {
+                        prop_assert_eq!(
+                            &transition.state.entries, &state.entries,
+                            "tick/heartbeat must not modify entries"
+                        );
+                    }
                 }
             }
 
-            // S10: Subscribe/unsubscribe produce no effects
+            // S10: Subscribe produces no effects
             #[test]
-            fn s10_subscribe_unsubscribe_no_effects(
+            fn s10_subscribe_no_effects(
                 state in arb_state(),
                 sub_id in prop::sample::select(SUB_IDS).prop_map(String::from),
-                subscribe in any::<bool>(),
             ) {
-                let event = if subscribe {
-                    Event::Subscribed { subscriber_id: sub_id }
-                } else {
-                    Event::Unsubscribed { subscriber_id: sub_id }
-                };
+                let event = Event::Subscribed { subscriber_id: sub_id, tick: 0 };
                 let transition = reduce(state, event);
                 prop_assert!(
                     transition.effects.is_empty(),
-                    "subscribe/unsubscribe must produce no effects, got {:?}",
+                    "subscribe must produce no effects, got {:?}",
                     transition.effects
                 );
             }
@@ -421,10 +728,10 @@ mod tests {
                 state in arb_state(),
                 sub_id in prop::sample::select(SUB_IDS).prop_map(String::from),
             ) {
-                let event = Event::Subscribed { subscriber_id: sub_id.clone() };
+                let event = Event::Subscribed { subscriber_id: sub_id.clone(), tick: 0 };
                 let transition = reduce(state, event);
                 prop_assert!(
-                    transition.state.subscribers.contains(&sub_id),
+                    transition.state.subscribers.contains_key(&sub_id),
                     "subscriber must be present after subscribe"
                 );
             }
@@ -438,8 +745,180 @@ mod tests {
                 let event = Event::Unsubscribed { subscriber_id: sub_id.clone() };
                 let transition = reduce(state, event);
                 prop_assert!(
-                    !transition.state.subscribers.contains(&sub_id),
+                    !transition.state.subscribers.contains_key(&sub_id),
                     "subscriber must not be present after unsubscribe"
+                );
+            }
+
+            // P1: Tick never adds subscribers (count can only decrease or stay same)
+            #[test]
+            fn p1_tick_never_adds_subscribers(
+                state in arb_state(),
+                tick in 0..200u64,
+            ) {
+                let before = state.subscribers.len();
+                let transition = reduce(state, Event::Tick { tick });
+                prop_assert!(
+                    transition.state.subscribers.len() <= before,
+                    "Tick increased subscriber count from {} to {}",
+                    before, transition.state.subscribers.len()
+                );
+            }
+
+            // P2: Tick never modifies entries or subscriber_ttl
+            #[test]
+            fn p2_tick_preserves_entries_and_ttl(
+                state in arb_state(),
+                tick in 0..200u64,
+            ) {
+                let transition = reduce(state.clone(), Event::Tick { tick });
+                prop_assert_eq!(
+                    &transition.state.entries, &state.entries,
+                    "Tick must not modify entries"
+                );
+                prop_assert_eq!(
+                    transition.state.subscriber_ttl, state.subscriber_ttl,
+                    "Tick must not modify subscriber_ttl"
+                );
+            }
+
+            // P3: SubscriberHeartbeat produces no effects
+            #[test]
+            fn p3_heartbeat_no_effects(
+                state in arb_state(),
+                sub_id in prop::sample::select(SUB_IDS).prop_map(String::from),
+                tick in 0..200u64,
+            ) {
+                let transition = reduce(state, Event::SubscriberHeartbeat {
+                    subscriber_id: sub_id,
+                    tick,
+                });
+                prop_assert!(
+                    transition.effects.is_empty(),
+                    "SubscriberHeartbeat must produce no effects, got {:?}",
+                    transition.effects
+                );
+            }
+
+            // P4: SubscriberHeartbeat for unknown subscriber is a no-op (state unchanged)
+            #[test]
+            fn p4_heartbeat_unknown_is_noop(
+                state in arb_state(),
+                tick in 0..200u64,
+            ) {
+                // Use a subscriber ID that's never in arb_state
+                let transition = reduce(state.clone(), Event::SubscriberHeartbeat {
+                    subscriber_id: "never_exists".to_string(),
+                    tick,
+                });
+                prop_assert!(
+                    transition.state.subscribers == state.subscribers,
+                    "SubscriberHeartbeat for unknown subscriber must not change state"
+                );
+                prop_assert!(
+                    transition.state.entries == state.entries,
+                    "SubscriberHeartbeat for unknown subscriber must not change entries"
+                );
+                prop_assert!(
+                    transition.state.subscriber_ttl == state.subscriber_ttl,
+                    "SubscriberHeartbeat for unknown subscriber must not change ttl"
+                );
+            }
+
+            // P5: All surviving subscribers after Tick have deadline > tick
+            #[test]
+            fn p5_surviving_subscribers_have_valid_deadlines(
+                state in arb_state(),
+                tick in 0..200u64,
+            ) {
+                let transition = reduce(state, Event::Tick { tick });
+                for (sub_id, deadline) in transition.state.subscribers.iter() {
+                    prop_assert!(
+                        *deadline > tick,
+                        "Subscriber {} has deadline {} <= tick {}",
+                        sub_id, deadline, tick
+                    );
+                }
+            }
+
+            // P6: EntryAppended does not modify subscribers (extended for HashMap)
+            #[test]
+            fn p6_append_preserves_subscribers(
+                state in arb_state(),
+                payload in arb_payload(),
+            ) {
+                let transition = reduce(state.clone(), Event::EntryAppended { payload });
+                prop_assert!(
+                    transition.state.subscribers == state.subscribers,
+                    "EntryAppended must not modify subscribers"
+                );
+            }
+
+            // P7: Every subscriber that enters a session eventually receives a SubscriberRemoved
+            // effect (drain with ticks)
+            #[test]
+            fn p7_every_subscriber_eventually_removed(
+                sub_ids in proptest::collection::vec(
+                    prop::sample::select(SUB_IDS).prop_map(String::from),
+                    1..=3,
+                ),
+                subscriber_ttl in 1..50u64,
+            ) {
+                let mut state: State<String> = State {
+                    subscriber_ttl,
+                    ..State::default()
+                };
+
+                // Subscribe all subscribers at tick 0
+                for sub_id in &sub_ids {
+                    let transition = reduce(state, Event::Subscribed {
+                        subscriber_id: sub_id.clone(),
+                        tick: 0,
+                    });
+                    state = transition.state;
+                }
+
+                let subscribed: Vec<String> = state.subscribers.keys().cloned().collect();
+
+                // Drain with a single large tick
+                let transition = reduce(state, Event::Tick { tick: subscriber_ttl + 1 });
+                let mut removed: Vec<String> = transition
+                    .effects
+                    .iter()
+                    .filter_map(|e| match e {
+                        Effect::SubscriberRemoved { subscriber_id } => Some(subscriber_id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                removed.sort();
+                let mut expected = subscribed;
+                expected.sort();
+                prop_assert_eq!(
+                    removed, expected,
+                    "Every subscribed subscriber must receive SubscriberRemoved"
+                );
+            }
+
+            // P8: All subscribers are eventually removed from the session (given enough ticks
+            // without heartbeats)
+            #[test]
+            fn p8_all_subscribers_eventually_removed(
+                state in arb_state(),
+            ) {
+                // Find the max deadline across all subscribers
+                let max_deadline = state
+                    .subscribers
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+
+                // A tick past all deadlines should remove everyone
+                let transition = reduce(state, Event::Tick { tick: max_deadline });
+                prop_assert!(
+                    transition.state.subscribers.is_empty(),
+                    "All subscribers should be removed after tick past max deadline, but {} remain",
+                    transition.state.subscribers.len()
                 );
             }
         }

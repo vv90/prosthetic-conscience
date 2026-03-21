@@ -33,6 +33,7 @@ State collections use persistent immutable data structures from the `im` crate w
 - `tick: u64` -- monotonic tick counter, incremented on each `Tick` event.
 - `worker_ttl: u64` -- ticks until an idle worker expires.
 - `stream_ttl: u64` -- ticks until an active stream expires.
+- `subscriber_ttl: u64` -- ticks until an idle session subscriber expires. Propagated to session state on creation.
 - `runtime_id: u128` -- UUID bits, set at runtime startup via `uuid::Uuid::new_v4().as_u128()`. Used for deterministic session ID generation.
 - `session_counter: u64` -- monotonic counter for session ID generation. Incremented on each `SessionRequested`.
 - `available: OrdMap<WId, WorkerEntry>` -- workers waiting for jobs. `WorkerEntry` contains `deadline: u64` and `capabilities: HashSet<Capability>`.
@@ -140,11 +141,12 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 ### `Tick`
 
-| Precondition          | Effects                                                          | State change                                  |
-| --------------------- | ---------------------------------------------------------------- | --------------------------------------------- |
-| No expired entries    | None                                                             | `tick` incremented                            |
-| Workers past deadline | None (stale worker, no client affected)                          | Expired workers removed from `available`      |
-| Streams past deadline | `[SendClientError("stream timed out"), SendClientDone]` for each | Expired streams removed from `active_streams` |
+| Precondition              | Effects                                                          | State change                                               |
+| ------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
+| No expired entries        | None                                                             | `tick` incremented                                         |
+| Workers past deadline     | None (stale worker, no client affected)                          | Expired workers removed from `available`                   |
+| Streams past deadline     | `[SendClientError("stream timed out"), SendClientDone]` for each | Expired streams removed from `active_streams`              |
+| Sessions with subscribers | `SessionEffect(SubscriberRemoved)` for each expired subscriber   | Tick propagated to all sessions, stale subscribers removed |
 
 ### `SessionRequested`
 
@@ -171,7 +173,7 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 The source uses `String` (not generic ID types) to avoid type complexity at the runtime boundary where effects are resolved from kernel types to channel-handle types.
 
-### Unit tests (54 tests)
+### Unit tests (57 tests)
 
 | Test                                                              | Covers                                                                        |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -228,8 +230,11 @@ The source uses `String` (not generic ID types) to avoid type complexity at the 
 | `session_requested_deterministic_id`                              | T3: Generated session ID is deterministic given runtime_id + counter          |
 | `session_requested_increments_counter`                            | T4: session_counter increments by 1                                           |
 | `session_requested_emits_session_created`                         | T5: Emits exactly one SessionCreated effect with session_id and subscriber_id |
+| `t13_tick_propagates_removes_stale_subscriber`                    | T13: Tick propagates to sessions — stale subscriber removed after deadline    |
+| `t14_tick_propagates_keeps_fresh_subscriber`                      | T14: Tick propagates to sessions — fresh subscriber kept before deadline      |
+| `t15_session_requested_sets_subscriber_ttl_and_deadline`          | T15: SessionRequested sets subscriber_ttl and initial deadline on creator     |
 
-### Property tests (13 tests)
+### Property tests (14 tests)
 
 All use `proptest` over arbitrary sequences of up to 100 events from a small ID pool (3 worker IDs, 3 stream IDs, 2 session IDs) to encourage collisions.
 
@@ -248,6 +253,7 @@ All use `proptest` over arbitrary sequences of up to 100 events from a small ID 
 | `session_requested_only_modifies_sessions_and_counter` | I9: `SessionRequested` only modifies `sessions` and `session_counter`                           |
 | `all_session_ids_are_unique`                           | I10: all session IDs across any event sequence are unique                                       |
 | `different_runtime_ids_produce_disjoint_session_ids`   | I11: different `runtime_id` values produce disjoint session ID sets                             |
+| `p9_tick_never_increases_total_subscribers`            | P9: subscriber count across all sessions never increases from `Tick`                            |
 
 A proptest regression file at `proptest-regressions/gateway/kernel.txt` captures the minimal case that caught the duplicate stream ID bug (now fixed, replayed on each run).
 
@@ -264,8 +270,10 @@ None.
 - Session delegation to independent child kernel.
 - One-use worker IDs, tick-counted deadlines, heartbeat events, timeout-driven expiration, duplicate stream ID rejection.
 - `ProtocolViolation` uses `ViolationSource` enum (Worker/Stream/Session) with string IDs.
-- 54 kernel unit tests covering all transition rules including capability routing, expiration, and session creation.
-- 13 property tests covering invariants I2-I11, tick monotonicity, stream timeout effect pairs, request terminal effects, and session ID uniqueness/isolation.
+- `subscriber_ttl` on state, propagated to sessions on creation.
+- `Tick` propagates to all sessions, expiring stale subscribers.
+- 57 kernel unit tests covering all transition rules including capability routing, expiration, session creation, and tick propagation to sessions.
+- 14 property tests covering invariants I2-I11, P9, tick monotonicity, stream timeout effect pairs, request terminal effects, and session ID uniqueness/isolation.
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 
 ## Load into context when

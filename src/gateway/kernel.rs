@@ -24,6 +24,7 @@ pub struct GatewayState<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> {
     pub tick: u64,
     pub worker_ttl: u64,
     pub stream_ttl: u64,
+    pub subscriber_ttl: u64,
     pub runtime_id: u128,
     pub session_counter: u64,
     pub available: OrdMap<WId, WorkerEntry>,
@@ -32,11 +33,12 @@ pub struct GatewayState<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> {
 }
 
 impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> GatewayState<WId, SId> {
-    pub fn new(runtime_id: u128, worker_ttl: u64, stream_ttl: u64) -> Self {
+    pub fn new(runtime_id: u128, worker_ttl: u64, stream_ttl: u64, subscriber_ttl: u64) -> Self {
         Self {
             tick: 0,
             worker_ttl,
             stream_ttl,
+            subscriber_ttl,
             runtime_id,
             session_counter: 0,
             available: OrdMap::new(),
@@ -48,7 +50,7 @@ impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> GatewayState<WId, SId>
 
 impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> Default for GatewayState<WId, SId> {
     fn default() -> Self {
-        Self::new(0, 60, 30)
+        Self::new(0, 60, 30, 30)
     }
 }
 
@@ -347,14 +349,30 @@ where
                 })
                 .collect();
 
+            // Propagate tick to all sessions
+            let mut sessions = state.sessions;
+            let mut session_effects: Vec<Effect<WId, SId>> = Vec::new();
+            for (session_id, session_state) in sessions.clone() {
+                let session::Transition {
+                    state: updated,
+                    effects: sess_effects,
+                } = session::reduce(session_state, session::Event::Tick { tick });
+                sessions = sessions.update(session_id.clone(), updated);
+                session_effects.extend(sess_effects.into_iter().map(|e| Effect::SessionEffect(e)));
+            }
+
+            let mut all_effects = effects;
+            all_effects.extend(session_effects);
+
             Transition {
                 state: GatewayState {
                     tick,
                     available,
                     active_streams: kept,
+                    sessions,
                     ..state
                 },
-                effects,
+                effects: all_effects,
             }
         }
         Event::SessionRequested { subscriber_id } => {
@@ -362,9 +380,19 @@ where
             let session_counter = state.session_counter + 1;
 
             let initial_session = session::State {
-                subscribers: HashSet::unit(subscriber_id.clone()),
+                subscriber_ttl: state.subscriber_ttl,
                 ..session::State::default()
             };
+            let session::Transition {
+                state: initial_session,
+                ..
+            } = session::reduce(
+                initial_session,
+                session::Event::Subscribed {
+                    subscriber_id: subscriber_id.clone(),
+                    tick: state.tick,
+                },
+            );
 
             Transition {
                 state: GatewayState {
@@ -568,7 +596,7 @@ mod tests {
 
     #[test]
     fn dispatch_sets_stream_deadline() {
-        let mut state = GatewayState::new(0, 60, 10);
+        let mut state = GatewayState::new(0, 60, 10, 30);
         state.tick = 5;
         state.available.insert(w("worker-a"), chat_entry(100));
 
@@ -591,7 +619,7 @@ mod tests {
 
     #[test]
     fn registration_sets_worker_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 20, 30);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 20, 30, 30);
         state.tick = 3;
 
         let transition = reduce(
@@ -816,7 +844,7 @@ mod tests {
 
     #[test]
     fn worker_heartbeat_resets_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 5);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 5, 30);
         state.tick = 2;
         state.available.insert(w("worker-a"), chat_entry(5));
 
@@ -857,7 +885,7 @@ mod tests {
 
     #[test]
     fn stream_heartbeat_resets_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 10);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 10, 30);
         state.tick = 3;
         state.active_streams.insert(s("client-1"), 8);
 
@@ -894,7 +922,7 @@ mod tests {
 
     #[test]
     fn tick_does_not_expire_entries_before_deadline() {
-        let mut state = GatewayState::new(0, 5, 5);
+        let mut state = GatewayState::new(0, 5, 5, 30);
         state.available.insert(w("worker-a"), chat_entry(5));
         state.active_streams.insert(s("client-1"), 5);
 
@@ -907,7 +935,7 @@ mod tests {
 
     #[test]
     fn worker_expires_after_ttl_ticks() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 30);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 30, 30);
         state.available.insert(w("worker-a"), chat_entry(3));
 
         // Ticks 1, 2: not expired
@@ -924,7 +952,7 @@ mod tests {
 
     #[test]
     fn stream_expires_after_ttl_ticks() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 2);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 2, 30);
         state.active_streams.insert(s("client-1"), 2);
 
         // Tick 1: not expired
@@ -950,7 +978,7 @@ mod tests {
 
     #[test]
     fn heartbeat_prevents_expiration() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 2, 2);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 2, 2, 30);
         state.available.insert(w("worker-a"), chat_entry(2));
         state.active_streams.insert(s("client-1"), 2);
 
@@ -987,7 +1015,7 @@ mod tests {
 
     #[test]
     fn multiple_expirations_in_single_tick() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 1, 30);
         state.available.insert(w("worker-a"), chat_entry(1));
         state.available.insert(w("worker-b"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 1);
@@ -1013,7 +1041,7 @@ mod tests {
 
     #[test]
     fn assignment_cleared_before_timeout_no_timeout_effects() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3, 30);
         state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
@@ -1047,7 +1075,7 @@ mod tests {
 
     #[test]
     fn assignment_cleared_after_timeout_emits_protocol_violation() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1, 30);
         state.active_streams.insert(s("client-1"), 1);
 
         // Tick 1: stream expires
@@ -1172,7 +1200,7 @@ mod tests {
 
     #[test]
     fn assignment_failed_before_timeout_no_timeout_effects() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3, 30);
         state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
@@ -1447,7 +1475,7 @@ mod tests {
 
     #[test]
     fn mixed_deadlines_only_expired_entries_removed() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 60);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 60, 30);
         state.available.insert(w("worker-stale"), chat_entry(2));
         state.available.insert(w("worker-fresh"), chat_entry(10));
         state.active_streams.insert(s("stream-stale"), 2);
@@ -1482,7 +1510,7 @@ mod tests {
 
     #[test]
     fn worker_expiration_does_not_affect_active_streams() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 60);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 60, 30);
         state.available.insert(w("worker-a"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 100);
 
@@ -1494,7 +1522,7 @@ mod tests {
 
     #[test]
     fn stream_expiration_does_not_affect_available_workers() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1, 30);
         state.available.insert(w("worker-a"), chat_entry(100));
         state.active_streams.insert(s("client-1"), 1);
 
@@ -1506,7 +1534,7 @@ mod tests {
 
     #[test]
     fn zero_ttl_expires_on_next_tick() {
-        let state: GatewayState<WId, SId> = GatewayState::new(0, 0, 0);
+        let state: GatewayState<WId, SId> = GatewayState::new(0, 0, 0, 30);
 
         // Register at tick 0 -> deadline = 0 + 0 = 0
         let state = reduce(
@@ -1529,7 +1557,7 @@ mod tests {
 
     #[test]
     fn tick_preserves_ttl_config() {
-        let state: GatewayState<WId, SId> = GatewayState::new(0, 42, 17);
+        let state: GatewayState<WId, SId> = GatewayState::new(0, 42, 17, 30);
         let transition = reduce(state, Event::Tick);
         assert_eq!(transition.state.worker_ttl, 42);
         assert_eq!(transition.state.stream_ttl, 17);
@@ -1801,7 +1829,7 @@ mod tests {
         );
 
         let (_, session_state) = transition.state.sessions.iter().next().unwrap();
-        assert!(session_state.subscribers.contains(&s("sub-1")));
+        assert!(session_state.subscribers.contains_key(&s("sub-1")));
         assert_eq!(session_state.subscribers.len(), 1);
         assert!(session_state.entries.is_empty());
     }
@@ -1867,6 +1895,87 @@ mod tests {
                 session_id,
                 subscriber_id: s("sub-1"),
             }
+        );
+    }
+
+    // T13: Tick propagates to sessions — stale subscriber removed
+    #[test]
+    fn t13_tick_propagates_removes_stale_subscriber() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 5);
+
+        // Create a session (subscriber gets deadline = tick 0 + ttl 5 = 5)
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+
+        // Tick past deadline
+        for _ in 0..6 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        // Subscriber should have been removed by tick propagation
+        let (_, session_state) = state.sessions.iter().next().unwrap();
+        assert!(
+            session_state.subscribers.is_empty(),
+            "stale subscriber should be removed after tick past deadline"
+        );
+    }
+
+    // T14: Tick propagates to sessions — fresh subscriber kept
+    #[test]
+    fn t14_tick_propagates_keeps_fresh_subscriber() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 10);
+
+        // Create a session (subscriber gets deadline = tick 0 + ttl 10 = 10)
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+
+        // Tick but not past deadline
+        for _ in 0..5 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        let (_, session_state) = state.sessions.iter().next().unwrap();
+        assert!(
+            session_state.subscribers.contains_key(&s("sub-1")),
+            "fresh subscriber should still be present before deadline"
+        );
+    }
+
+    // T15: SessionRequested sets subscriber_ttl and initial deadline on the creator
+    #[test]
+    fn t15_session_requested_sets_subscriber_ttl_and_deadline() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 7);
+
+        // Advance tick to 3
+        for _ in 0..3 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+
+        let (_, session_state) = transition.state.sessions.iter().next().unwrap();
+        assert_eq!(session_state.subscriber_ttl, 7);
+        assert_eq!(
+            session_state.subscribers.get(&s("sub-1")),
+            Some(&10) // tick 3 + ttl 7
         );
     }
 
@@ -1946,6 +2055,7 @@ mod tests {
                         prop::sample::select(STREAM_IDS).prop_map(|sub| {
                             crate::gateway::session::Event::Subscribed {
                                 subscriber_id: s(sub),
+                                tick: 0,
                             }
                         }),
                         prop::sample::select(STREAM_IDS).prop_map(|sub| {
@@ -1953,6 +2063,15 @@ mod tests {
                                 subscriber_id: s(sub),
                             }
                         }),
+                        (prop::sample::select(STREAM_IDS).prop_map(s), 0..100u64,).prop_map(
+                            |(sub, tick)| {
+                                crate::gateway::session::Event::SubscriberHeartbeat {
+                                    subscriber_id: sub,
+                                    tick,
+                                }
+                            }
+                        ),
+                        (0..100u64).prop_map(|tick| crate::gateway::session::Event::Tick { tick }),
                     ],
                 )
                     .prop_map(|(sess, event)| Event::SessionEvent {
@@ -1994,7 +2113,7 @@ mod tests {
             ) {
                 // I2: every stream removed from active_streams in a transition
                 // must have a SendClientDone in the effects.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2032,7 +2151,7 @@ mod tests {
             ) {
                 // I3: every DispatchJob effect is emitted in a transition that
                 // removes a worker from available AND adds a stream to active_streams.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let workers_before: std::collections::BTreeSet<_> =
@@ -2085,7 +2204,7 @@ mod tests {
                 // I4: if state changed in a way that affects clients, effects
                 // were emitted. Allowed silent changes: worker added to available,
                 // tick counter incremented, stale worker expired.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2136,7 +2255,7 @@ mod tests {
                 // I5: every stream that enters the kernel eventually gets terminal
                 // effects. We apply the event sequence, then pump enough ticks to
                 // expire everything, and verify active_streams is empty.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 // Track all streams that ever entered active_streams
                 let mut all_streams_seen: std::collections::BTreeSet<SId> =
@@ -2196,7 +2315,7 @@ mod tests {
             fn tick_counter_is_monotonic(
                 events in arb_event_sequence()
             ) {
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
                 let mut prev_tick = state.tick;
 
                 for event in events {
@@ -2218,7 +2337,7 @@ mod tests {
             ) {
                 // When a stream is expired by Tick, it must emit both
                 // SendClientError and SendClientDone for that stream.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2263,7 +2382,7 @@ mod tests {
             ) {
                 // I6: every DispatchJob dispatches to a worker that had the
                 // required capability at dispatch time.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     // Snapshot worker capabilities before the transition
@@ -2312,7 +2431,7 @@ mod tests {
                 events in arb_event_sequence()
             ) {
                 // I1: session_counter never decreases across any transition
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
                 let mut prev_counter = state.session_counter;
 
                 for event in events {
@@ -2333,7 +2452,7 @@ mod tests {
                 events in arb_event_sequence()
             ) {
                 // I2: sessions.keys() only grows across transitions (no session removed)
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let keys_before: std::collections::BTreeSet<_> =
@@ -2359,7 +2478,7 @@ mod tests {
                 events in arb_event_sequence()
             ) {
                 // I3: SessionRequested only modifies sessions and session_counter
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let is_session_requested = matches!(event, Event::SessionRequested { .. });
@@ -2409,7 +2528,7 @@ mod tests {
                 events in arb_event_sequence()
             ) {
                 // I4: All session IDs produced across any event sequence are unique
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
                 let mut seen_ids: std::collections::BTreeSet<SessionId> =
                     std::collections::BTreeSet::new();
 
@@ -2441,8 +2560,8 @@ mod tests {
             ) {
                 // I5: Two gateway states with different runtime_ids produce
                 // strictly disjoint sets of session IDs for the same event sequence
-                let mut state_a: GatewayState<WId, SId> = GatewayState::new(1, 3, 3);
-                let mut state_b: GatewayState<WId, SId> = GatewayState::new(2, 3, 3);
+                let mut state_a: GatewayState<WId, SId> = GatewayState::new(1, 3, 3, 30);
+                let mut state_b: GatewayState<WId, SId> = GatewayState::new(2, 3, 3, 30);
 
                 for event in events {
                     let transition_a = reduce(state_a, event.clone());
@@ -2465,6 +2584,39 @@ mod tests {
                 );
             }
 
+            // P9: Subscriber count across all sessions never increases from Tick
+            #[test]
+            fn p9_tick_never_increases_total_subscribers(
+                events in arb_event_sequence()
+            ) {
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
+
+                for event in events {
+                    let subs_before: usize = state
+                        .sessions
+                        .values()
+                        .map(|s| s.subscribers.len())
+                        .sum();
+                    let transition = reduce(state, event.clone());
+
+                    if matches!(event, Event::Tick) {
+                        let subs_after: usize = transition
+                            .state
+                            .sessions
+                            .values()
+                            .map(|s| s.subscribers.len())
+                            .sum();
+                        prop_assert!(
+                            subs_after <= subs_before,
+                            "Tick increased total subscriber count from {} to {}",
+                            subs_before, subs_after
+                        );
+                    }
+
+                    state = transition.state;
+                }
+            }
+
             #[test]
             fn every_http_chat_requested_produces_terminal_effects(
                 events in arb_event_sequence()
@@ -2473,7 +2625,7 @@ mod tests {
                 // same transition: either a DispatchJob (post-dispatch path,
                 // where I2/I5 cover eventual termination) or
                 // SendClientError + SendClientDone (pre-dispatch rejection).
-                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
                     let is_http_chat = matches!(event, Event::HttpChatRequested { .. });

@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-16
+Snapshot date: 2026-03-21
 
 ## Real-world deployment test (next)
 
@@ -172,11 +172,18 @@ All session mutations go through WS connections, not HTTP. HTTP is read-only. Th
 - No error path — unique IDs guaranteed.
 - 5 unit tests (T1-T5) + 5 property tests (I1-I5) covering transition rules and invariants.
 
-**Chunk B: Subscriber deadlines and heartbeats**
+**~~Chunk B: Subscriber deadlines and heartbeats~~** (done)
 
-- Session kernel `subscribers` changes from `HashSet<SubId>` to `HashMap<SubId, u64>` (subscriber → deadline).
-- Session kernel gets `subscriber_ttl`, new events: `Tick`, `SubscriberHeartbeat { subscriber_id }`.
-- `Tick` expires stale subscribers. Parent kernel propagates `Tick` to all sessions.
+- Session kernel `subscribers` changed from `HashSet<SubId>` to `HashMap<SubId, u64>` (subscriber → deadline tick).
+- Session kernel has `subscriber_ttl: u64`, new events: `Tick { tick }`, `SubscriberHeartbeat { subscriber_id, tick }`.
+- New effect: `SubscriberRemoved { subscriber_id }` — emitted on tick expiry or explicit unsubscribe.
+- `Tick` expires stale subscribers (`deadline <= tick`). Parent kernel propagates `Tick` to all sessions.
+- `SubscriberHeartbeat` resets deadline to `tick + subscriber_ttl` for known subscribers.
+- `SessionRequested` sets `subscriber_ttl` on initial session and computes initial deadline via session reducer.
+- `subscriber_ttl: u64` on `GatewayConfig` and `GatewayState`.
+- Runtime handles `SubscriberRemoved` in `resolve_effects` (resolve done) and `spawn_effects` (no-op stub).
+- 12 session kernel unit tests (T1-T12) + 8 session property tests (P1-P8).
+- 3 parent kernel unit tests (T13-T15) + 1 parent property test (P9).
 
 **Chunk C: Session expiry**
 
@@ -201,11 +208,21 @@ Implemented:
 - Session ID uniqueness: all session IDs across any event sequence are unique.
 - Runtime ID disjointness: different `runtime_id` values produce disjoint session ID sets.
 
-Planned:
+Implemented (Chunk B):
 
-- Subscriber expiry: stale subscribers are removed after their deadline passes.
+- Subscriber expiry: stale subscribers are removed after their deadline passes (`deadline <= tick`).
+- Tick never adds subscribers (subscriber count can only decrease or stay same).
+- Surviving subscribers after Tick have valid deadlines (`deadline > tick`).
+- Every subscriber eventually receives `SubscriberRemoved` (given enough ticks without heartbeats).
+- All subscribers are eventually removed from the session (given enough ticks without heartbeats).
+- Subscriber count across all sessions never increases from Tick (parent kernel P9).
+
+Planned (Chunk C):
+
 - Session expiry: sessions with no subscribers are removed and emit `SessionExpired`.
 - Session expiry log preservation: `SessionExpired` effect carries the full entry log.
+- Every session eventually produces `SessionExpired` with full log (given enough ticks without subscriber heartbeats).
+- All sessions are eventually removed (given enough ticks without subscriber heartbeats).
 
 ## Other tasks
 

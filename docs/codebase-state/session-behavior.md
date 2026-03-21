@@ -28,20 +28,23 @@ All session mutations (create, append, subscribe, unsubscribe) go through WS con
 ## Types
 
 - `SessionId(String)` — concrete newtype in parent `kernel.rs`. The parent's map key.
-- `State<SubId: Clone + Eq + Hash>` — `{ entries: AppendLog, subscribers: HashSet<SubId> }`. Defined in `session::kernel`. Generic over subscriber identity type. Uses `im::HashSet` for immutable subscriber management.
+- `State<SubId: Clone + Eq + Hash>` — `{ entries: AppendLog, subscribers: HashMap<SubId, u64>, subscriber_ttl: u64 }`. Defined in `session::kernel`. Generic over subscriber identity type. Uses `im::HashMap` for immutable subscriber-to-deadline mapping.
 - Entry index in the vec is the sequence number. No explicit `seq` field.
 
 ## Session kernel events
 
 - `EntryAppended { payload }` — an entry was appended.
-- `Subscribed { subscriber_id }` — a client subscribed for push notifications.
-- `Unsubscribed { subscriber_id }` — a client unsubscribed.
+- `Subscribed { subscriber_id, tick }` — a client subscribed for push notifications. Sets deadline to `tick + subscriber_ttl`.
+- `Unsubscribed { subscriber_id }` — a client unsubscribed. Emits `SubscriberRemoved` if subscriber existed.
+- `Tick { tick }` — expires subscribers with `deadline <= tick`. Emits `SubscriberRemoved` for each expired subscriber.
+- `SubscriberHeartbeat { subscriber_id, tick }` — resets subscriber deadline to `tick + subscriber_ttl`. No-op if subscriber unknown.
 
-Session creation is the parent kernel's responsibility. No `session_id` on session events — the parent selects which session to delegate to.
+Session creation is the parent kernel's responsibility. No `session_id` on session events — the parent selects which session to delegate to. The session kernel has no access to the parent's tick — it must be passed in explicitly via event payloads.
 
 ## Session kernel effects
 
 - `NotifySubscribers { entry_index, payload, subscribers }` — fan out a new entry to all current subscribers. Best-effort push; the kernel does not retry or track delivery.
+- `SubscriberRemoved { subscriber_id }` — a subscriber was removed (by tick expiry or explicit unsubscribe). Emitted so the runtime can notify the subscriber's channel.
 
 Errors (e.g. subscriber not in set on unsubscribe) are handled structurally by the session kernel. The parent kernel handles missing sessions before delegation, using its own `ProtocolViolation`.
 
@@ -65,9 +68,29 @@ These are properties that hold for all reachable states and all valid event sequ
 - **Notification payload correctness**: when emitted, `entry_index` equals the index of the newly appended entry (`entries.len() - 1` after append), and `payload` equals the appended value.
 - **Notification subscriber correctness**: the effect's `subscribers` list contains exactly the session's subscriber set at the time of append.
 
+### Subscriber deadline invariants
+
+- **Tick never adds subscribers**: subscriber count can only decrease or stay the same after `Tick`.
+- **Tick preserves entries and TTL**: `Tick` never modifies `entries` or `subscriber_ttl`.
+- **Heartbeat produces no effects**: `SubscriberHeartbeat` never emits any effects.
+- **Heartbeat for unknown subscriber is a no-op**: state unchanged if subscriber not in set.
+- **Surviving subscribers have valid deadlines**: all subscribers remaining after `Tick { tick }` have `deadline > tick`.
+- **Append preserves subscribers**: `EntryAppended` does not modify the subscriber map.
+- **Subscriber termination liveness**: every subscriber that enters a session eventually receives a `SubscriberRemoved` effect (given enough ticks without heartbeats).
+- **Subscriber drain liveness**: all subscribers are eventually removed from the session (given enough ticks without heartbeats).
+
 ## Implemented
 
-- Session kernel `reduce()` with three arms: `EntryAppended`, `Subscribed`, `Unsubscribed`
+- Session kernel `reduce()` with five arms: `EntryAppended`, `Subscribed`, `Unsubscribed`, `Tick`, `SubscriberHeartbeat`
+- `subscribers: HashMap<SubId, u64>` mapping subscriber to deadline tick
+- `subscriber_ttl: u64` on session state, set from parent `GatewayState::subscriber_ttl`
+- `Tick` expires stale subscribers (`deadline <= tick`), emits `SubscriberRemoved` for each
+- `SubscriberHeartbeat` resets deadline to `tick + subscriber_ttl` for known subscribers, no-op for unknown
+- `Subscribed` sets initial deadline to `tick + subscriber_ttl`
+- `Unsubscribed` emits `SubscriberRemoved` if subscriber existed, no-op if not
+- `SubscriberRemoved` effect for subscriber removal (tick expiry or explicit unsubscribe)
+- Parent kernel `Tick` propagates to all sessions
+- Parent kernel `SessionRequested` sets `subscriber_ttl` on initial session and computes initial deadline via session reducer
 - Parent kernel `SessionRequested` event with deterministic ID generation via `hash(runtime_id, session_counter)`
 - `runtime_id: u128` stored in `GatewayState`, set from `uuid::Uuid::new_v4().as_u128()` at runtime startup
 - `session_counter: u64` monotonically incrementing in state
@@ -75,30 +98,25 @@ These are properties that hold for all reachable states and all valid event sequ
 - No error path — unique IDs guaranteed
 - Parent kernel `SessionEvent` delegation to child reducer
 - `GET /v1/sessions/:id/entries` — read-only HTTP endpoint with cursor-based pagination
-- 9 session property tests (S6-S11 + 3 foundational) using `arb_state()` generator
-- 5 SessionRequested unit tests (T1-T5) in parent kernel
-- 5 SessionRequested property tests (I1-I5) in parent kernel: counter monotonicity, sessions only grow, isolation, ID uniqueness, disjoint IDs across runtime_ids
-
-## Planned changes (two remaining chunks)
-
-**Chunk B: Subscriber deadlines and heartbeats in session kernel**
-
-- Session kernel `State` changes: `subscribers: HashMap<SubId, u64>` (subscriber → deadline) instead of `HashSet<SubId>`.
-- Session kernel gets `subscriber_ttl` in state, new events: `Tick`, `SubscriberHeartbeat { subscriber_id }`.
-- Session kernel `Tick` expires stale subscribers (same pattern as parent kernel expires stale streams).
-- Parent kernel propagates `Tick` to all sessions.
+- Runtime handles `SubscriberRemoved` in `resolve_effects` (resolves subscriber_id to stream handle) and `spawn_effects` (no-op stub — WS adapters not yet wired)
+- `subscriber_ttl: u64` on `GatewayConfig`, passed to `GatewayState::new()`
+- 17 session kernel property tests (S6-S11 + 3 foundational + P1-P8) using `arb_state()` generator
+- 12 session kernel unit tests (T1-T12) covering tick expiry, heartbeat, subscribe/unsubscribe
+- 5 SessionRequested unit tests + 3 Chunk B unit tests (T13-T15) in parent kernel
+- 6 SessionRequested/session property tests (I1-I5 + P9) in parent kernel
 
 **Chunk C: Session expiry in parent kernel**
 
 - After tick propagation, parent kernel checks each session for empty subscriber sets.
 - Sessions with no subscribers are removed from state.
 - Emits `Effect::SessionExpired { session_id, entries }` to guarantee the log can be persisted/forwarded before it's lost from memory.
+- Analogous parent-level liveness invariants: every session eventually produces `SessionExpired` with full log, all sessions eventually removed.
 
 ## Not yet implemented
 
 - WS adapters for session mutations (create, append, subscribe, unsubscribe)
 - Runtime commands for session events (except `QuerySessionEntries` which is done)
 - `SessionCreated` effect executor (resolve and spawn are stubbed)
-- Subscriber deadlines and heartbeats in session kernel (Chunk B)
+- `SubscriberRemoved` effect executor (resolve done, spawn is no-op stub)
 - Session expiry and `SessionExpired` effect (Chunk C)
 - Cursor-based read improvements (adapter concern)

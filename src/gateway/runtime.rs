@@ -26,6 +26,8 @@ pub struct GatewayConfig {
     pub stream_heartbeat_interval: Duration,
     /// How often the worker WS handler sends `WorkerHeartbeat` commands while idle.
     pub worker_heartbeat_interval: Duration,
+    /// Ticks until an idle session subscriber expires.
+    pub subscriber_ttl: u64,
 }
 
 impl Default for GatewayConfig {
@@ -36,6 +38,7 @@ impl Default for GatewayConfig {
             stream_ttl: 30,
             stream_heartbeat_interval: Duration::from_secs(10),
             worker_heartbeat_interval: Duration::from_secs(15),
+            subscriber_ttl: 30,
         }
     }
 }
@@ -421,6 +424,15 @@ impl GatewayRuntime {
                             ));
                         }
                     }
+                    session::Effect::SubscriberRemoved { subscriber_id } => {
+                        if let Some(handle) = self.registry.clone_stream(&subscriber_id) {
+                            resolved.push(Effect::SessionEffect(
+                                session::Effect::SubscriberRemoved {
+                                    subscriber_id: (subscriber_id, handle),
+                                },
+                            ));
+                        }
+                    }
                 },
             }
         }
@@ -518,6 +530,7 @@ impl GatewayRuntime {
                 uuid::Uuid::new_v4().as_u128(),
                 config.worker_ttl,
                 config.stream_ttl,
+                config.subscriber_ttl,
             ),
             registry: ChannelRegistry::new(),
         };
