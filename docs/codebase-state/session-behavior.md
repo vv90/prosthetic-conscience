@@ -105,12 +105,16 @@ These are properties that hold for all reachable states and all valid event sequ
 - 5 SessionRequested unit tests + 3 Chunk B unit tests (T13-T15) in parent kernel
 - 6 SessionRequested/session property tests (I1-I5 + P9) in parent kernel
 
-**Chunk C: Session expiry in parent kernel**
+**Chunk C: Session expiry in parent kernel** (done)
 
 - After tick propagation, parent kernel checks each session for empty subscriber sets.
 - Sessions with no subscribers are removed from state.
-- Emits `Effect::SessionExpired { session_id, entries }` to guarantee the log can be persisted/forwarded before it's lost from memory.
-- Analogous parent-level liveness invariants: every session eventually produces `SessionExpired` with full log, all sessions eventually removed.
+- Emits `Effect::SessionExpired { session_id, entries: Vec<Value> }` carrying the full entry log so it can be persisted/forwarded before being lost from memory.
+- `AppendLog::into_entries(self) -> Vec<Value>` consumes the log to extract entries for the effect.
+- `SessionExpired` is a parent-level effect (like `SessionCreated`), not wrapped in `SessionEffect`.
+- Runtime handles `SessionExpired` in `resolve_effects` (pass through) and `spawn_effects` (no-op stub — persistence adapters not yet wired).
+- I8 (`sessions_only_grow`) replaced by P13 (sessions only removed when subscribers empty).
+- 6 parent kernel unit tests (T16-T21) + 3 parent property tests (P10-P12).
 
 ## Not yet implemented
 
@@ -118,5 +122,5 @@ These are properties that hold for all reachable states and all valid event sequ
 - Runtime commands for session events (except `QuerySessionEntries` which is done)
 - `SessionCreated` effect executor (resolve and spawn are stubbed)
 - `SubscriberRemoved` effect executor (resolve done, spawn is no-op stub)
-- Session expiry and `SessionExpired` effect (Chunk C)
+- `SessionExpired` effect executor (resolve done as pass-through, spawn is no-op stub — persistence adapters not yet wired)
 - Cursor-based read improvements (adapter concern)

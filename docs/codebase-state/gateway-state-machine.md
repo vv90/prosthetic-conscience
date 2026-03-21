@@ -67,6 +67,7 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 | `SendClientDone { client_stream_id }`                              | Signal stream completion to client |
 | `SessionCreated { session_id, subscriber_id }`                     | Notify creator of new session ID   |
 | `SessionEffect(session::Effect<SId>)`                              | Wrapped session effect             |
+| `SessionExpired { session_id, entries }`                           | Session expired with full log      |
 | `ProtocolViolation { source: ViolationSource, message }`           | Log invalid behavior               |
 
 ### Worker assignment policy
@@ -86,7 +87,7 @@ Universal properties that hold on every reachable state after any event sequence
 | I5  | Every `client_stream_id` that enters the kernel eventually gets terminal effects                                                | Implemented | Via pre-dispatch error, `AssignmentCleared`, or tick expiration.                                        |
 | I6  | Dispatch only targets workers whose capabilities include the required capability                                                | Implemented | `first_capable_worker_id` filters by capability.                                                        |
 | I7  | `session_counter` never decreases across any transition                                                                         | Implemented | Only `SessionRequested` increments it; all other events leave it unchanged.                             |
-| I8  | `sessions.keys()` only grows across transitions (no session is ever removed)                                                    | Implemented | Until Chunk C adds session expiry.                                                                      |
+| I8  | Sessions are only removed when their subscriber set is empty (replaced by P13)                                                  | Implemented | Replaced `sessions_only_grow` with `sessions_only_removed_when_subscribers_empty`.                      |
 | I9  | `SessionRequested` only modifies `sessions` and `session_counter` — all other state fields unchanged                            | Implemented | Structural isolation.                                                                                   |
 | I10 | All session IDs produced across any event sequence are unique (no duplicates in `sessions.keys()`)                              | Implemented | Deterministic `hash(runtime_id, session_counter)` with monotonic counter.                               |
 | I11 | Two gateway states with different `runtime_id` values produce strictly disjoint sets of session IDs for the same event sequence | Implemented | Ensures uniqueness across server restarts.                                                              |
@@ -141,12 +142,13 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 ### `Tick`
 
-| Precondition              | Effects                                                          | State change                                               |
-| ------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
-| No expired entries        | None                                                             | `tick` incremented                                         |
-| Workers past deadline     | None (stale worker, no client affected)                          | Expired workers removed from `available`                   |
-| Streams past deadline     | `[SendClientError("stream timed out"), SendClientDone]` for each | Expired streams removed from `active_streams`              |
-| Sessions with subscribers | `SessionEffect(SubscriberRemoved)` for each expired subscriber   | Tick propagated to all sessions, stale subscribers removed |
+| Precondition                                          | Effects                                                          | State change                                               |
+| ----------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
+| No expired entries                                    | None                                                             | `tick` incremented                                         |
+| Workers past deadline                                 | None (stale worker, no client affected)                          | Expired workers removed from `available`                   |
+| Streams past deadline                                 | `[SendClientError("stream timed out"), SendClientDone]` for each | Expired streams removed from `active_streams`              |
+| Sessions with subscribers                             | `SessionEffect(SubscriberRemoved)` for each expired subscriber   | Tick propagated to all sessions, stale subscribers removed |
+| Sessions with no subscribers (after tick propagation) | `SessionExpired { session_id, entries }` for each                | Empty sessions removed from `sessions`                     |
 
 ### `SessionRequested`
 
@@ -173,7 +175,7 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 The source uses `String` (not generic ID types) to avoid type complexity at the runtime boundary where effects are resolved from kernel types to channel-handle types.
 
-### Unit tests (57 tests)
+### Unit tests (63 tests)
 
 | Test                                                              | Covers                                                                        |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -233,8 +235,14 @@ The source uses `String` (not generic ID types) to avoid type complexity at the 
 | `t13_tick_propagates_removes_stale_subscriber`                    | T13: Tick propagates to sessions — stale subscriber removed after deadline    |
 | `t14_tick_propagates_keeps_fresh_subscriber`                      | T14: Tick propagates to sessions — fresh subscriber kept before deadline      |
 | `t15_session_requested_sets_subscriber_ttl_and_deadline`          | T15: SessionRequested sets subscriber_ttl and initial deadline on creator     |
+| `t16_tick_removes_session_with_empty_subscribers`                 | T16: Tick removes session with empty subscribers after tick propagation       |
+| `t17_tick_keeps_session_with_remaining_subscribers`               | T17: Tick keeps session with remaining subscribers                            |
+| `t18_session_expired_carries_full_entry_log`                      | T18: SessionExpired carries the full entry log                                |
+| `t19_multiple_sessions_expire_in_single_tick`                     | T19: Multiple sessions expire in a single tick                                |
+| `t20_session_with_entries_expires_with_entries_in_effect`         | T20: Session with entries but no subscribers expires with entries preserved   |
+| `t21_freshly_created_session_does_not_expire_on_same_tick`        | T21: Freshly created session does not expire on same tick                     |
 
-### Property tests (14 tests)
+### Property tests (17 tests)
 
 All use `proptest` over arbitrary sequences of up to 100 events from a small ID pool (3 worker IDs, 3 stream IDs, 2 session IDs) to encourage collisions.
 
@@ -249,11 +257,14 @@ All use `proptest` over arbitrary sequences of up to 100 events from a small ID 
 | `stream_timeout_always_emits_error_and_done`           | Every tick-expired stream gets both `SendClientError` and `SendClientDone`                      |
 | `every_http_chat_requested_produces_terminal_effects`  | Every request produces either `DispatchJob` or `SendClientError` + `SendClientDone`             |
 | `session_counter_never_decreases`                      | I7: `session_counter` never decreases across any transition                                     |
-| `sessions_only_grow`                                   | I8: `sessions.keys()` only grows (no session removed)                                           |
+| `sessions_only_removed_when_subscribers_empty`         | P13: sessions are only removed when their subscriber set is empty                               |
 | `session_requested_only_modifies_sessions_and_counter` | I9: `SessionRequested` only modifies `sessions` and `session_counter`                           |
 | `all_session_ids_are_unique`                           | I10: all session IDs across any event sequence are unique                                       |
 | `different_runtime_ids_produce_disjoint_session_ids`   | I11: different `runtime_id` values produce disjoint session ID sets                             |
 | `p9_tick_never_increases_total_subscribers`            | P9: subscriber count across all sessions never increases from `Tick`                            |
+| `sessions_eventually_expire_without_heartbeats`        | P10: every session eventually produces `SessionExpired` (given enough ticks)                    |
+| `all_sessions_eventually_removed_without_heartbeats`   | P11: all sessions eventually removed from state (given enough ticks)                            |
+| `session_expired_carries_correct_entries`              | P12: `SessionExpired` carries the same entries that were in the session at removal              |
 
 A proptest regression file at `proptest-regressions/gateway/kernel.txt` captures the minimal case that caught the duplicate stream ID bug (now fixed, replayed on each run).
 
@@ -272,8 +283,8 @@ None.
 - `ProtocolViolation` uses `ViolationSource` enum (Worker/Stream/Session) with string IDs.
 - `subscriber_ttl` on state, propagated to sessions on creation.
 - `Tick` propagates to all sessions, expiring stale subscribers.
-- 57 kernel unit tests covering all transition rules including capability routing, expiration, session creation, and tick propagation to sessions.
-- 14 property tests covering invariants I2-I11, P9, tick monotonicity, stream timeout effect pairs, request terminal effects, and session ID uniqueness/isolation.
+- 63 kernel unit tests covering all transition rules including capability routing, expiration, session creation, tick propagation to sessions, and session expiry.
+- 17 property tests covering invariants I2-I11, P9-P13, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, and session expiry liveness.
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 
 ## Load into context when

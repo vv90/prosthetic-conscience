@@ -402,6 +402,15 @@ impl GatewayRuntime {
                         });
                     }
                 }
+                Effect::SessionExpired {
+                    session_id,
+                    entries,
+                } => {
+                    resolved.push(Effect::SessionExpired {
+                        session_id,
+                        entries,
+                    });
+                }
                 Effect::SessionEffect(e) => match e {
                     session::Effect::NotifySubscribers {
                         entry_index,
@@ -589,6 +598,9 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                 }
                 Effect::SessionEffect(_) => {
                     // No-op until session adapters are wired
+                }
+                Effect::SessionExpired { .. } => {
+                    // No-op until persistence adapters are wired
                 }
             }
         }

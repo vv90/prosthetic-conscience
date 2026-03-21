@@ -45,6 +45,10 @@ impl AppendLog {
         self.entries.is_empty()
     }
 
+    pub fn into_entries(self) -> Vec<Value> {
+        self.entries
+    }
+
     pub fn slice(&self, after: usize, limit: usize) -> &[Value] {
         let start = after.min(self.entries.len());
         let end = (start + limit).min(self.entries.len());

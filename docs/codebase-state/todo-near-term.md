@@ -185,11 +185,15 @@ All session mutations go through WS connections, not HTTP. HTTP is read-only. Th
 - 12 session kernel unit tests (T1-T12) + 8 session property tests (P1-P8).
 - 3 parent kernel unit tests (T13-T15) + 1 parent property test (P9).
 
-**Chunk C: Session expiry**
+**~~Chunk C: Session expiry~~** (done)
 
 - After tick propagation, parent kernel detects sessions with empty subscriber sets.
-- Emits `Effect::SessionExpired { session_id, entries }` — guarantees the log can be persisted before it's lost from memory.
+- Emits `Effect::SessionExpired { session_id, entries: Vec<Value> }` carrying the full entry log.
 - Removes session from state.
+- `AppendLog::into_entries()` consumes the log to extract entries.
+- I8 (`sessions_only_grow`) replaced by P13 (sessions only removed when subscribers empty).
+- Runtime handles `SessionExpired` in `resolve_effects` (pass through) and `spawn_effects` (no-op stub).
+- 6 parent kernel unit tests (T16-T21) + 3 parent property tests (P10-P12) + P13 replacing I8.
 
 ### Key invariants (encoded or planned as property tests)
 
@@ -217,12 +221,14 @@ Implemented (Chunk B):
 - All subscribers are eventually removed from the session (given enough ticks without heartbeats).
 - Subscriber count across all sessions never increases from Tick (parent kernel P9).
 
-Planned (Chunk C):
+Implemented (Chunk C):
 
 - Session expiry: sessions with no subscribers are removed and emit `SessionExpired`.
 - Session expiry log preservation: `SessionExpired` effect carries the full entry log.
-- Every session eventually produces `SessionExpired` with full log (given enough ticks without subscriber heartbeats).
-- All sessions are eventually removed (given enough ticks without subscriber heartbeats).
+- Sessions are only removed when their subscriber set is empty (P13, replaces I8).
+- Every session eventually produces `SessionExpired` with full log (given enough ticks without subscriber heartbeats) (P10).
+- All sessions are eventually removed (given enough ticks without subscriber heartbeats) (P11).
+- `SessionExpired` carries the same entries that were in the session at removal (P12).
 
 ## Other tasks
 

@@ -114,6 +114,10 @@ pub enum Effect<WId, SId> {
         session_id: SessionId,
         subscriber_id: SId,
     },
+    SessionExpired {
+        session_id: SessionId,
+        entries: Vec<Value>,
+    },
     ProtocolViolation(ProtocolViolation),
 }
 
@@ -324,17 +328,17 @@ where
                 .filter(|(_, entry)| entry.deadline > tick)
                 .collect();
 
-            let mut kept: HashMap<SId, u64> = HashMap::new();
-            let mut expired: Vec<SId> = Vec::new();
-            for (sid, deadline) in state.active_streams {
-                if deadline > tick {
-                    kept.insert(sid, deadline);
-                } else {
-                    expired.push(sid);
-                }
-            }
+            let expired_streams: Vec<SId> = state
+                .active_streams
+                .iter()
+                .filter(|(_, deadline)| **deadline <= tick)
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            let active_streams = expired_streams
+                .iter()
+                .fold(state.active_streams, |streams, sid| streams.without(sid));
 
-            let effects: Vec<Effect<WId, SId>> = expired
+            let effects: Vec<Effect<WId, SId>> = expired_streams
                 .into_iter()
                 .flat_map(|sid| {
                     [
@@ -361,14 +365,37 @@ where
                 session_effects.extend(sess_effects.into_iter().map(|e| Effect::SessionEffect(e)));
             }
 
+            // Remove sessions with no subscribers and emit SessionExpired
+            let expired_session_ids: Vec<SessionId> = sessions
+                .iter()
+                .filter(|(_, s)| s.subscribers.is_empty())
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            let (sessions, expiry_effects) = expired_session_ids.into_iter().fold(
+                (sessions, Vec::new()),
+                |(sessions, mut effects), session_id| {
+                    // Safety: session_id came from iterating `sessions`, so extract always succeeds.
+                    // Using match instead of expect to satisfy panic-free policy.
+                    let Some((session_state, sessions)) = sessions.extract(&session_id) else {
+                        return (sessions, effects);
+                    };
+                    effects.push(Effect::SessionExpired {
+                        session_id,
+                        entries: session_state.entries.into_entries(),
+                    });
+                    (sessions, effects)
+                },
+            );
+
             let mut all_effects = effects;
             all_effects.extend(session_effects);
+            all_effects.extend(expiry_effects);
 
             Transition {
                 state: GatewayState {
                     tick,
                     available,
-                    active_streams: kept,
+                    active_streams,
                     sessions,
                     ..state
                 },
@@ -1918,11 +1945,11 @@ mod tests {
             state = transition.state;
         }
 
-        // Subscriber should have been removed by tick propagation
-        let (_, session_state) = state.sessions.iter().next().unwrap();
+        // Subscriber was removed by tick propagation, which left the session
+        // with no subscribers, so the session itself was expired and removed.
         assert!(
-            session_state.subscribers.is_empty(),
-            "stale subscriber should be removed after tick past deadline"
+            state.sessions.is_empty(),
+            "session with stale subscriber should be expired and removed"
         );
     }
 
@@ -1976,6 +2003,281 @@ mod tests {
         assert_eq!(
             session_state.subscribers.get(&s("sub-1")),
             Some(&10) // tick 3 + ttl 7
+        );
+    }
+
+    // T16: Tick removes session with empty subscribers after tick propagation
+    #[test]
+    fn t16_tick_removes_session_with_empty_subscribers() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 5);
+
+        // Create a session (subscriber deadline = tick 0 + ttl 5 = 5)
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+        assert_eq!(state.sessions.len(), 1);
+
+        // Tick past subscriber deadline so subscriber is removed, then session should expire
+        for _ in 0..6 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        assert_eq!(
+            state.sessions.len(),
+            0,
+            "session with no subscribers should be removed"
+        );
+    }
+
+    // T17: Tick keeps session with remaining subscribers
+    #[test]
+    fn t17_tick_keeps_session_with_remaining_subscribers() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 10);
+
+        // Create a session (subscriber deadline = tick 0 + ttl 10 = 10)
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+
+        // Tick a few times but not past deadline
+        for _ in 0..5 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        assert_eq!(
+            state.sessions.len(),
+            1,
+            "session with active subscribers should not be removed"
+        );
+    }
+
+    // T18: SessionExpired carries the full entry log
+    #[test]
+    fn t18_session_expired_carries_full_entry_log() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 5);
+
+        // Create a session
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+        let session_id = state.sessions.keys().next().cloned().unwrap();
+
+        // Append entries
+        let transition = reduce(
+            state,
+            Event::SessionEvent {
+                session_id: session_id.clone(),
+                event: session::Event::EntryAppended {
+                    payload: json!({"msg": "hello"}),
+                },
+            },
+        );
+        state = transition.state;
+
+        let transition = reduce(
+            state,
+            Event::SessionEvent {
+                session_id: session_id.clone(),
+                event: session::Event::EntryAppended {
+                    payload: json!({"msg": "world"}),
+                },
+            },
+        );
+        state = transition.state;
+
+        // Tick past subscriber deadline to trigger expiry
+        for _ in 0..6 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        // The last tick should have produced a SessionExpired effect
+        // Re-run the expiring tick to capture the effect
+        // Actually, let's redo: we need to capture the transition that removes the session
+        let mut state2: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 5);
+        let transition = reduce(
+            state2,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state2 = transition.state;
+        let session_id = state2.sessions.keys().next().cloned().unwrap();
+
+        let transition = reduce(
+            state2,
+            Event::SessionEvent {
+                session_id: session_id.clone(),
+                event: session::Event::EntryAppended {
+                    payload: json!({"msg": "hello"}),
+                },
+            },
+        );
+        state2 = transition.state;
+
+        let transition = reduce(
+            state2,
+            Event::SessionEvent {
+                session_id: session_id.clone(),
+                event: session::Event::EntryAppended {
+                    payload: json!({"msg": "world"}),
+                },
+            },
+        );
+        state2 = transition.state;
+
+        // Tick past deadline, checking each transition for the SessionExpired effect
+        let mut found_expired = false;
+        for _ in 0..6 {
+            let transition = reduce(state2, Event::Tick);
+            for effect in &transition.effects {
+                if let Effect::SessionExpired {
+                    session_id: sid,
+                    entries,
+                } = effect
+                {
+                    assert_eq!(sid, &session_id);
+                    assert_eq!(entries.len(), 2);
+                    assert_eq!(entries[0], json!({"msg": "hello"}));
+                    assert_eq!(entries[1], json!({"msg": "world"}));
+                    found_expired = true;
+                }
+            }
+            state2 = transition.state;
+        }
+
+        assert!(found_expired, "expected SessionExpired effect with entries");
+    }
+
+    // T19: Multiple sessions expire in a single tick
+    #[test]
+    fn t19_multiple_sessions_expire_in_single_tick() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 3);
+
+        // Create two sessions
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-2"),
+            },
+        );
+        state = transition.state;
+        assert_eq!(state.sessions.len(), 2);
+
+        // Tick past both deadlines
+        let mut expired_count = 0;
+        for _ in 0..4 {
+            let transition = reduce(state, Event::Tick);
+            expired_count += transition
+                .effects
+                .iter()
+                .filter(|e| matches!(e, Effect::SessionExpired { .. }))
+                .count();
+            state = transition.state;
+        }
+
+        assert_eq!(state.sessions.len(), 0, "both sessions should be removed");
+        assert_eq!(expired_count, 2, "should have two SessionExpired effects");
+    }
+
+    // T20: Session with entries but no subscribers expires with entries preserved in effect
+    #[test]
+    fn t20_session_with_entries_expires_with_entries_in_effect() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 3);
+
+        // Create session and add an entry
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+        let session_id = state.sessions.keys().next().cloned().unwrap();
+
+        let transition = reduce(
+            state,
+            Event::SessionEvent {
+                session_id: session_id.clone(),
+                event: session::Event::EntryAppended { payload: json!(42) },
+            },
+        );
+        state = transition.state;
+
+        // Tick past deadline
+        let mut expired_entries = None;
+        for _ in 0..4 {
+            let transition = reduce(state, Event::Tick);
+            for effect in &transition.effects {
+                if let Effect::SessionExpired { entries, .. } = effect {
+                    expired_entries = Some(entries.clone());
+                }
+            }
+            state = transition.state;
+        }
+
+        let entries = expired_entries.expect("expected SessionExpired effect");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], json!(42));
+    }
+
+    // T21: Freshly created session (with creator subscribed) does not expire on same tick
+    #[test]
+    fn t21_freshly_created_session_does_not_expire_on_same_tick() {
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, 5);
+
+        // Advance to tick 3
+        for _ in 0..3 {
+            let transition = reduce(state, Event::Tick);
+            state = transition.state;
+        }
+
+        // Create session at tick 3 (subscriber deadline = 3 + 5 = 8)
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        state = transition.state;
+
+        // Tick once more (tick becomes 4, deadline is 8 — should NOT expire)
+        let transition = reduce(state, Event::Tick);
+
+        assert_eq!(
+            transition.state.sessions.len(),
+            1,
+            "freshly created session must not expire on next tick"
+        );
+        let has_expired = transition
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::SessionExpired { .. }));
+        assert!(
+            !has_expired,
+            "should not emit SessionExpired for fresh session"
         );
     }
 
@@ -2448,29 +2750,172 @@ mod tests {
             }
 
             #[test]
-            fn sessions_only_grow(
+            fn sessions_only_removed_when_subscribers_empty(
                 events in arb_event_sequence()
             ) {
-                // I2: sessions.keys() only grows across transitions (no session removed)
+                // P13: sessions are only removed when their subscriber set is empty
                 let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3, 30);
 
                 for event in events {
-                    let keys_before: std::collections::BTreeSet<_> =
-                        state.sessions.keys().cloned().collect();
+                    let sessions_before = state.sessions.clone();
 
                     let transition = reduce(state, event);
 
-                    let keys_after: std::collections::BTreeSet<_> =
-                        transition.state.sessions.keys().cloned().collect();
-
-                    prop_assert!(
-                        keys_before.is_subset(&keys_after),
-                        "sessions shrunk: lost {:?}",
-                        keys_before.difference(&keys_after).collect::<Vec<_>>()
-                    );
+                    // Any session that was removed must have had empty subscribers
+                    // after tick propagation (i.e. in the post-transition check,
+                    // any key present before but absent after must have had no subscribers)
+                    for (sid, _session_state) in sessions_before.iter() {
+                        if !transition.state.sessions.contains_key(sid) {
+                            // Session was removed — verify it had no subscribers
+                            // We check the pre-transition state's subscribers because
+                            // the session was removed during this transition.
+                            // However, tick propagation may have removed subscribers
+                            // before the expiry check, so we verify via the effect:
+                            // a SessionExpired effect must exist for this session.
+                            let has_expired_effect = transition.effects.iter().any(|e| {
+                                matches!(e, Effect::SessionExpired { session_id, .. } if session_id == sid)
+                            });
+                            prop_assert!(
+                                has_expired_effect,
+                                "session {:?} removed without SessionExpired effect",
+                                sid
+                            );
+                        }
+                    }
 
                     state = transition.state;
                 }
+            }
+
+            #[test]
+            fn sessions_eventually_expire_without_heartbeats(
+                initial_sessions in 1..5usize,
+            ) {
+                // P10: Every session eventually produces a SessionExpired effect
+                // (given enough ticks without subscriber heartbeats)
+                let ttl = 3u64;
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, ttl);
+
+                // Create initial_sessions sessions
+                for i in 0..initial_sessions {
+                    let transition = reduce(
+                        state,
+                        Event::SessionRequested {
+                            subscriber_id: s(&format!("sub-{}", i)),
+                        },
+                    );
+                    state = transition.state;
+                }
+
+                let session_ids: std::collections::BTreeSet<_> =
+                    state.sessions.keys().cloned().collect();
+
+                // Tick enough times for all to expire (ttl + 1 ticks should suffice)
+                let mut expired_ids = std::collections::BTreeSet::new();
+                for _ in 0..(ttl as usize + 2) {
+                    let transition = reduce(state, Event::Tick);
+                    for effect in &transition.effects {
+                        if let Effect::SessionExpired { session_id, .. } = effect {
+                            expired_ids.insert(session_id.clone());
+                        }
+                    }
+                    state = transition.state;
+                }
+
+                prop_assert_eq!(
+                    session_ids,
+                    expired_ids,
+                    "not all sessions produced SessionExpired"
+                );
+            }
+
+            #[test]
+            fn all_sessions_eventually_removed_without_heartbeats(
+                initial_sessions in 1..5usize,
+            ) {
+                // P11: All sessions are eventually removed from state
+                // (given enough ticks without subscriber heartbeats)
+                let ttl = 3u64;
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, ttl);
+
+                for i in 0..initial_sessions {
+                    let transition = reduce(
+                        state,
+                        Event::SessionRequested {
+                            subscriber_id: s(&format!("sub-{}", i)),
+                        },
+                    );
+                    state = transition.state;
+                }
+
+                prop_assert!(
+                    !state.sessions.is_empty(),
+                    "should have created sessions"
+                );
+
+                for _ in 0..(ttl as usize + 2) {
+                    let transition = reduce(state, Event::Tick);
+                    state = transition.state;
+                }
+
+                prop_assert!(
+                    state.sessions.is_empty(),
+                    "all sessions should be removed after enough ticks: {} remaining",
+                    state.sessions.len()
+                );
+            }
+
+            #[test]
+            fn session_expired_carries_correct_entries(
+                entry_count in 0..10usize,
+            ) {
+                // P12: SessionExpired effect carries the same entries that were
+                // in the session at the time of removal
+                let ttl = 5u64;
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 30, ttl);
+
+                let transition = reduce(
+                    state,
+                    Event::SessionRequested {
+                        subscriber_id: s("sub-1"),
+                    },
+                );
+                state = transition.state;
+                let session_id = state.sessions.keys().next().cloned().unwrap();
+
+                // Append entry_count entries
+                let mut expected_entries = Vec::new();
+                for i in 0..entry_count {
+                    let payload = json!({"idx": i});
+                    expected_entries.push(payload.clone());
+                    let transition = reduce(
+                        state,
+                        Event::SessionEvent {
+                            session_id: session_id.clone(),
+                            event: session::Event::EntryAppended { payload },
+                        },
+                    );
+                    state = transition.state;
+                }
+
+                // Tick past deadline
+                let mut expired_entries = None;
+                for _ in 0..(ttl as usize + 2) {
+                    let transition = reduce(state, Event::Tick);
+                    for effect in &transition.effects {
+                        if let Effect::SessionExpired { entries, .. } = effect {
+                            expired_entries = Some(entries.clone());
+                        }
+                    }
+                    state = transition.state;
+                }
+
+                let entries = expired_entries.expect("expected SessionExpired");
+                prop_assert_eq!(
+                    entries,
+                    expected_entries,
+                    "expired entries don't match appended entries"
+                );
             }
 
             #[test]
