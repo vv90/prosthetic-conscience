@@ -24,17 +24,21 @@ pub struct GatewayState<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> {
     pub tick: u64,
     pub worker_ttl: u64,
     pub stream_ttl: u64,
+    pub runtime_id: u128,
+    pub session_counter: u64,
     pub available: OrdMap<WId, WorkerEntry>,
     pub active_streams: HashMap<SId, u64>,
     pub sessions: HashMap<SessionId, session::State<SId>>,
 }
 
 impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> GatewayState<WId, SId> {
-    pub fn new(worker_ttl: u64, stream_ttl: u64) -> Self {
+    pub fn new(runtime_id: u128, worker_ttl: u64, stream_ttl: u64) -> Self {
         Self {
             tick: 0,
             worker_ttl,
             stream_ttl,
+            runtime_id,
+            session_counter: 0,
             available: OrdMap::new(),
             active_streams: HashMap::new(),
             sessions: HashMap::new(),
@@ -44,8 +48,16 @@ impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> GatewayState<WId, SId>
 
 impl<WId: Clone + Ord, SId: Clone + Eq + std::hash::Hash> Default for GatewayState<WId, SId> {
     fn default() -> Self {
-        Self::new(60, 30)
+        Self::new(0, 60, 30)
     }
+}
+
+fn generate_session_id(runtime_id: u128, counter: u64) -> SessionId {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    runtime_id.hash(&mut hasher);
+    counter.hash(&mut hasher);
+    SessionId(format!("{:016x}", hasher.finish()))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,8 +86,8 @@ pub enum Event<WId, SId> {
         client_stream_id: SId,
     },
     Tick,
-    CreateSession {
-        session_id: SessionId,
+    SessionRequested {
+        subscriber_id: SId,
     },
     SessionEvent {
         session_id: SessionId,
@@ -96,6 +108,10 @@ pub enum Effect<WId, SId> {
     SendClientError(SendClientError<SId>),
     SendClientDone(SendClientDone<SId>),
     SessionEffect(session::Effect<SId>),
+    SessionCreated {
+        session_id: SessionId,
+        subscriber_id: SId,
+    },
     ProtocolViolation(ProtocolViolation),
 }
 
@@ -341,22 +357,25 @@ where
                 effects,
             }
         }
-        Event::CreateSession { session_id } => {
-            if state.sessions.contains_key(&session_id) {
-                return Transition {
-                    state,
-                    effects: vec![Effect::ProtocolViolation(ProtocolViolation {
-                        source: ViolationSource::Session(session_id.to_string()),
-                        message: String::from("duplicate session creation"),
-                    })],
-                };
-            }
+        Event::SessionRequested { subscriber_id } => {
+            let session_id = generate_session_id(state.runtime_id, state.session_counter);
+            let session_counter = state.session_counter + 1;
+
+            let initial_session = session::State {
+                subscribers: HashSet::unit(subscriber_id.clone()),
+                ..session::State::default()
+            };
+
             Transition {
                 state: GatewayState {
-                    sessions: state.sessions.update(session_id, session::State::default()),
+                    session_counter,
+                    sessions: state.sessions.update(session_id.clone(), initial_session),
                     ..state
                 },
-                effects: Vec::new(),
+                effects: vec![Effect::SessionCreated {
+                    session_id,
+                    subscriber_id,
+                }],
             }
         }
         Event::SessionEvent {
@@ -549,7 +568,7 @@ mod tests {
 
     #[test]
     fn dispatch_sets_stream_deadline() {
-        let mut state = GatewayState::new(60, 10);
+        let mut state = GatewayState::new(0, 60, 10);
         state.tick = 5;
         state.available.insert(w("worker-a"), chat_entry(100));
 
@@ -572,7 +591,7 @@ mod tests {
 
     #[test]
     fn registration_sets_worker_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(20, 30);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 20, 30);
         state.tick = 3;
 
         let transition = reduce(
@@ -797,7 +816,7 @@ mod tests {
 
     #[test]
     fn worker_heartbeat_resets_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(5, 5);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 5);
         state.tick = 2;
         state.available.insert(w("worker-a"), chat_entry(5));
 
@@ -838,7 +857,7 @@ mod tests {
 
     #[test]
     fn stream_heartbeat_resets_deadline() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(5, 10);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 5, 10);
         state.tick = 3;
         state.active_streams.insert(s("client-1"), 8);
 
@@ -875,7 +894,7 @@ mod tests {
 
     #[test]
     fn tick_does_not_expire_entries_before_deadline() {
-        let mut state = GatewayState::new(5, 5);
+        let mut state = GatewayState::new(0, 5, 5);
         state.available.insert(w("worker-a"), chat_entry(5));
         state.active_streams.insert(s("client-1"), 5);
 
@@ -888,7 +907,7 @@ mod tests {
 
     #[test]
     fn worker_expires_after_ttl_ticks() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(3, 30);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 30);
         state.available.insert(w("worker-a"), chat_entry(3));
 
         // Ticks 1, 2: not expired
@@ -905,7 +924,7 @@ mod tests {
 
     #[test]
     fn stream_expires_after_ttl_ticks() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 2);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 2);
         state.active_streams.insert(s("client-1"), 2);
 
         // Tick 1: not expired
@@ -931,7 +950,7 @@ mod tests {
 
     #[test]
     fn heartbeat_prevents_expiration() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(2, 2);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 2, 2);
         state.available.insert(w("worker-a"), chat_entry(2));
         state.active_streams.insert(s("client-1"), 2);
 
@@ -968,7 +987,7 @@ mod tests {
 
     #[test]
     fn multiple_expirations_in_single_tick() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(1, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 1);
         state.available.insert(w("worker-a"), chat_entry(1));
         state.available.insert(w("worker-b"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 1);
@@ -994,7 +1013,7 @@ mod tests {
 
     #[test]
     fn assignment_cleared_before_timeout_no_timeout_effects() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 3);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3);
         state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
@@ -1028,7 +1047,7 @@ mod tests {
 
     #[test]
     fn assignment_cleared_after_timeout_emits_protocol_violation() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1);
         state.active_streams.insert(s("client-1"), 1);
 
         // Tick 1: stream expires
@@ -1153,7 +1172,7 @@ mod tests {
 
     #[test]
     fn assignment_failed_before_timeout_no_timeout_effects() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 3);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 3);
         state.available.insert(w("worker-a"), chat_entry(100));
 
         let state = reduce(
@@ -1428,7 +1447,7 @@ mod tests {
 
     #[test]
     fn mixed_deadlines_only_expired_entries_removed() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 60);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 60);
         state.available.insert(w("worker-stale"), chat_entry(2));
         state.available.insert(w("worker-fresh"), chat_entry(10));
         state.active_streams.insert(s("stream-stale"), 2);
@@ -1463,7 +1482,7 @@ mod tests {
 
     #[test]
     fn worker_expiration_does_not_affect_active_streams() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(1, 60);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 1, 60);
         state.available.insert(w("worker-a"), chat_entry(1));
         state.active_streams.insert(s("client-1"), 100);
 
@@ -1475,7 +1494,7 @@ mod tests {
 
     #[test]
     fn stream_expiration_does_not_affect_available_workers() {
-        let mut state: GatewayState<WId, SId> = GatewayState::new(60, 1);
+        let mut state: GatewayState<WId, SId> = GatewayState::new(0, 60, 1);
         state.available.insert(w("worker-a"), chat_entry(100));
         state.active_streams.insert(s("client-1"), 1);
 
@@ -1487,7 +1506,7 @@ mod tests {
 
     #[test]
     fn zero_ttl_expires_on_next_tick() {
-        let state: GatewayState<WId, SId> = GatewayState::new(0, 0);
+        let state: GatewayState<WId, SId> = GatewayState::new(0, 0, 0);
 
         // Register at tick 0 -> deadline = 0 + 0 = 0
         let state = reduce(
@@ -1510,7 +1529,7 @@ mod tests {
 
     #[test]
     fn tick_preserves_ttl_config() {
-        let state: GatewayState<WId, SId> = GatewayState::new(42, 17);
+        let state: GatewayState<WId, SId> = GatewayState::new(0, 42, 17);
         let transition = reduce(state, Event::Tick);
         assert_eq!(transition.state.worker_ttl, 42);
         assert_eq!(transition.state.stream_ttl, 17);
@@ -1752,110 +1771,103 @@ mod tests {
         assert_eq!(entry.capabilities, both_caps());
     }
 
-    // --- CreateSession tests ---
+    // --- SessionRequested tests ---
 
     #[test]
-    fn create_session_adds_to_sessions() {
-        // C1: After CreateSession, sessions.contains_key(&session_id) is true
+    fn session_requested_adds_session() {
+        // T1: SessionRequested adds a new session to sessions
         let state: GatewayState<WId, SId> = GatewayState::default();
-        let session_id = SessionId(String::from("sess-1"));
 
         let transition = reduce(
             state,
-            Event::CreateSession {
-                session_id: session_id.clone(),
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
             },
         );
 
-        assert!(transition.state.sessions.contains_key(&session_id));
+        assert_eq!(transition.state.sessions.len(), 1);
     }
 
     #[test]
-    fn create_session_starts_empty() {
-        // C2: New session starts with empty entries and empty subscribers
+    fn session_requested_starts_with_creator_subscribed() {
+        // T2: New session starts with the creator in subscribers and empty entries
         let state: GatewayState<WId, SId> = GatewayState::default();
-        let session_id = SessionId(String::from("sess-1"));
 
         let transition = reduce(
             state,
-            Event::CreateSession {
-                session_id: session_id.clone(),
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
             },
         );
 
-        let session_state = transition.state.sessions.get(&session_id).unwrap();
-        assert_eq!(*session_state, session::State::default());
+        let (_, session_state) = transition.state.sessions.iter().next().unwrap();
+        assert!(session_state.subscribers.contains(&s("sub-1")));
+        assert_eq!(session_state.subscribers.len(), 1);
+        assert!(session_state.entries.is_empty());
     }
 
     #[test]
-    fn duplicate_create_session_emits_protocol_violation() {
-        // C3: Duplicate CreateSession emits ProtocolViolation, state unchanged
+    fn session_requested_deterministic_id() {
+        // T3: Generated session ID is deterministic given runtime_id and session_counter
+        let state_a: GatewayState<WId, SId> = GatewayState::default();
+        let state_b: GatewayState<WId, SId> = GatewayState::default();
+
+        let transition_a = reduce(
+            state_a,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+        let transition_b = reduce(
+            state_b,
+            Event::SessionRequested {
+                subscriber_id: s("sub-2"),
+            },
+        );
+
+        // Same runtime_id (0) and session_counter (0) => same session ID
+        let id_a: Vec<_> = transition_a.state.sessions.keys().collect();
+        let id_b: Vec<_> = transition_b.state.sessions.keys().collect();
+        assert_eq!(id_a, id_b);
+    }
+
+    #[test]
+    fn session_requested_increments_counter() {
+        // T4: session_counter increments by 1
         let state: GatewayState<WId, SId> = GatewayState::default();
-        let session_id = SessionId(String::from("sess-1"));
+        assert_eq!(state.session_counter, 0);
 
-        let first = reduce(
+        let transition = reduce(
             state,
-            Event::CreateSession {
-                session_id: session_id.clone(),
-            },
-        );
-        let state_after_first = first.state.clone();
-
-        let second = reduce(
-            first.state,
-            Event::CreateSession {
-                session_id: session_id.clone(),
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
             },
         );
 
+        assert_eq!(transition.state.session_counter, 1);
+    }
+
+    #[test]
+    fn session_requested_emits_session_created() {
+        // T5: Emits exactly one SessionCreated effect with generated session_id and subscriber_id
+        let state: GatewayState<WId, SId> = GatewayState::default();
+
+        let transition = reduce(
+            state,
+            Event::SessionRequested {
+                subscriber_id: s("sub-1"),
+            },
+        );
+
+        assert_eq!(transition.effects.len(), 1);
+        let session_id = transition.state.sessions.keys().next().unwrap().clone();
         assert_eq!(
-            second.effects,
-            vec![Effect::ProtocolViolation(ProtocolViolation {
-                source: ViolationSource::Session(String::from("sess-1")),
-                message: String::from("duplicate session creation"),
-            })]
+            transition.effects[0],
+            Effect::SessionCreated {
+                session_id,
+                subscriber_id: s("sub-1"),
+            }
         );
-        assert_eq!(second.state, state_after_first);
-    }
-
-    #[test]
-    fn create_session_emits_no_effects() {
-        // C4: CreateSession emits no effects on success
-        let state: GatewayState<WId, SId> = GatewayState::default();
-
-        let transition = reduce(
-            state,
-            Event::CreateSession {
-                session_id: SessionId(String::from("sess-1")),
-            },
-        );
-
-        assert!(transition.effects.is_empty());
-    }
-
-    #[test]
-    fn create_session_does_not_affect_other_state() {
-        // C5: CreateSession does not modify available, active_streams, or tick
-        let state: GatewayState<WId, SId> = GatewayState {
-            tick: 42,
-            available: OrdMap::unit(w("worker-a"), chat_entry(100)),
-            active_streams: HashMap::unit(s("client-1"), 50),
-            ..GatewayState::default()
-        };
-        let available_before = state.available.clone();
-        let active_streams_before = state.active_streams.clone();
-        let tick_before = state.tick;
-
-        let transition = reduce(
-            state,
-            Event::CreateSession {
-                session_id: SessionId(String::from("sess-1")),
-            },
-        );
-
-        assert_eq!(transition.state.tick, tick_before);
-        assert_eq!(transition.state.available, available_before);
-        assert_eq!(transition.state.active_streams, active_streams_before);
     }
 
     // --- Property tests ---
@@ -1920,9 +1932,9 @@ mod tests {
                 }),
                 // Tick
                 Just(Event::Tick),
-                // CreateSession
-                prop::sample::select(SESSION_IDS).prop_map(|sess| Event::CreateSession {
-                    session_id: SessionId(String::from(sess)),
+                // SessionRequested
+                prop::sample::select(STREAM_IDS).prop_map(|sid| Event::SessionRequested {
+                    subscriber_id: s(sid),
                 }),
                 // SessionEvent
                 (
@@ -1982,7 +1994,7 @@ mod tests {
             ) {
                 // I2: every stream removed from active_streams in a transition
                 // must have a SendClientDone in the effects.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2020,7 +2032,7 @@ mod tests {
             ) {
                 // I3: every DispatchJob effect is emitted in a transition that
                 // removes a worker from available AND adds a stream to active_streams.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     let workers_before: std::collections::BTreeSet<_> =
@@ -2073,7 +2085,7 @@ mod tests {
                 // I4: if state changed in a way that affects clients, effects
                 // were emitted. Allowed silent changes: worker added to available,
                 // tick counter incremented, stale worker expired.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2124,7 +2136,7 @@ mod tests {
                 // I5: every stream that enters the kernel eventually gets terminal
                 // effects. We apply the event sequence, then pump enough ticks to
                 // expire everything, and verify active_streams is empty.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 // Track all streams that ever entered active_streams
                 let mut all_streams_seen: std::collections::BTreeSet<SId> =
@@ -2184,7 +2196,7 @@ mod tests {
             fn tick_counter_is_monotonic(
                 events in arb_event_sequence()
             ) {
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
                 let mut prev_tick = state.tick;
 
                 for event in events {
@@ -2206,7 +2218,7 @@ mod tests {
             ) {
                 // When a stream is expired by Tick, it must emit both
                 // SendClientError and SendClientDone for that stream.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     let streams_before: std::collections::BTreeSet<_> =
@@ -2251,7 +2263,7 @@ mod tests {
             ) {
                 // I6: every DispatchJob dispatches to a worker that had the
                 // required capability at dispatch time.
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     // Snapshot worker capabilities before the transition
@@ -2293,6 +2305,166 @@ mod tests {
                 }
             }
 
+            // --- Session invariants ---
+
+            #[test]
+            fn session_counter_never_decreases(
+                events in arb_event_sequence()
+            ) {
+                // I1: session_counter never decreases across any transition
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut prev_counter = state.session_counter;
+
+                for event in events {
+                    let transition = reduce(state, event);
+                    prop_assert!(
+                        transition.state.session_counter >= prev_counter,
+                        "session_counter went backwards: {} -> {}",
+                        prev_counter,
+                        transition.state.session_counter
+                    );
+                    prev_counter = transition.state.session_counter;
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn sessions_only_grow(
+                events in arb_event_sequence()
+            ) {
+                // I2: sessions.keys() only grows across transitions (no session removed)
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+
+                for event in events {
+                    let keys_before: std::collections::BTreeSet<_> =
+                        state.sessions.keys().cloned().collect();
+
+                    let transition = reduce(state, event);
+
+                    let keys_after: std::collections::BTreeSet<_> =
+                        transition.state.sessions.keys().cloned().collect();
+
+                    prop_assert!(
+                        keys_before.is_subset(&keys_after),
+                        "sessions shrunk: lost {:?}",
+                        keys_before.difference(&keys_after).collect::<Vec<_>>()
+                    );
+
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn session_requested_only_modifies_sessions_and_counter(
+                events in arb_event_sequence()
+            ) {
+                // I3: SessionRequested only modifies sessions and session_counter
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+
+                for event in events {
+                    let is_session_requested = matches!(event, Event::SessionRequested { .. });
+
+                    let tick_before = state.tick;
+                    let available_before = state.available.clone();
+                    let active_streams_before = state.active_streams.clone();
+                    let worker_ttl_before = state.worker_ttl;
+                    let stream_ttl_before = state.stream_ttl;
+                    let runtime_id_before = state.runtime_id;
+
+                    let transition = reduce(state, event);
+
+                    if is_session_requested {
+                        prop_assert!(
+                            transition.state.tick == tick_before,
+                            "SessionRequested modified tick"
+                        );
+                        prop_assert!(
+                            transition.state.available == available_before,
+                            "SessionRequested modified available"
+                        );
+                        prop_assert!(
+                            transition.state.active_streams == active_streams_before,
+                            "SessionRequested modified active_streams"
+                        );
+                        prop_assert!(
+                            transition.state.worker_ttl == worker_ttl_before,
+                            "SessionRequested modified worker_ttl"
+                        );
+                        prop_assert!(
+                            transition.state.stream_ttl == stream_ttl_before,
+                            "SessionRequested modified stream_ttl"
+                        );
+                        prop_assert!(
+                            transition.state.runtime_id == runtime_id_before,
+                            "SessionRequested modified runtime_id"
+                        );
+                    }
+
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn all_session_ids_are_unique(
+                events in arb_event_sequence()
+            ) {
+                // I4: All session IDs produced across any event sequence are unique
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
+                let mut seen_ids: std::collections::BTreeSet<SessionId> =
+                    std::collections::BTreeSet::new();
+
+                for event in events {
+                    let keys_before: std::collections::BTreeSet<_> =
+                        state.sessions.keys().cloned().collect();
+
+                    let transition = reduce(state, event);
+
+                    let keys_after: std::collections::BTreeSet<_> =
+                        transition.state.sessions.keys().cloned().collect();
+
+                    let new_ids: Vec<_> = keys_after.difference(&keys_before).collect();
+                    for id in new_ids {
+                        prop_assert!(
+                            seen_ids.insert(id.clone()),
+                            "duplicate session ID: {}",
+                            id
+                        );
+                    }
+
+                    state = transition.state;
+                }
+            }
+
+            #[test]
+            fn different_runtime_ids_produce_disjoint_session_ids(
+                events in arb_event_sequence()
+            ) {
+                // I5: Two gateway states with different runtime_ids produce
+                // strictly disjoint sets of session IDs for the same event sequence
+                let mut state_a: GatewayState<WId, SId> = GatewayState::new(1, 3, 3);
+                let mut state_b: GatewayState<WId, SId> = GatewayState::new(2, 3, 3);
+
+                for event in events {
+                    let transition_a = reduce(state_a, event.clone());
+                    let transition_b = reduce(state_b, event);
+
+                    state_a = transition_a.state;
+                    state_b = transition_b.state;
+                }
+
+                let ids_a: std::collections::BTreeSet<_> =
+                    state_a.sessions.keys().cloned().collect();
+                let ids_b: std::collections::BTreeSet<_> =
+                    state_b.sessions.keys().cloned().collect();
+
+                let intersection: Vec<_> = ids_a.intersection(&ids_b).collect();
+                prop_assert!(
+                    intersection.is_empty(),
+                    "runtime_id 1 and 2 produced overlapping session IDs: {:?}",
+                    intersection
+                );
+            }
+
             #[test]
             fn every_http_chat_requested_produces_terminal_effects(
                 events in arb_event_sequence()
@@ -2301,7 +2473,7 @@ mod tests {
                 // same transition: either a DispatchJob (post-dispatch path,
                 // where I2/I5 cover eventual termination) or
                 // SendClientError + SendClientDone (pre-dispatch rejection).
-                let mut state: GatewayState<WId, SId> = GatewayState::new(3, 3);
+                let mut state: GatewayState<WId, SId> = GatewayState::new(0, 3, 3);
 
                 for event in events {
                     let is_http_chat = matches!(event, Event::HttpChatRequested { .. });

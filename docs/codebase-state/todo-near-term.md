@@ -129,45 +129,83 @@ Completed. `src/protocol.rs` defines `WorkerMessage`, `GatewayToWorker`, and `Ch
 - **Effect system** — gateway-internal.
 - **Timeout/heartbeat mechanism** — gateway-internal.
 
-## Sessions: append-only shared log (next feature)
+## Sessions: append-only shared log (in progress)
 
 Goal: introduce a "session" primitive — an ordered, append-only log that multiple clients can connect to, append entries, and receive real-time updates. This is the minimal coordination substrate needed for multi-source workflows (e.g., summary engines, collaborative annotation) without requiring a separate orchestrator binary.
 
+See `session-behavior.md` for full architecture, invariants, and current implementation status.
+
 ### Design
 
-- A **session** is an ordered sequence of entries: `(seq: u64, client_id, payload: Value)`.
-- `seq` is assigned by the gateway on append (monotonically increasing per session).
-- Clients connect to a session and can:
-  - **Append** an entry → returns the assigned `seq`.
-  - **Read** entries with cursor: `?after=seq` returns only entries with `seq > after`.
-  - **Subscribe** for real-time push of new entries as they are appended.
+- A **session** is an ordered sequence of JSON entries with an append-only log (`AppendLog`).
+- Entry index in the log is the sequence number. No explicit `seq` field.
+- Clients connect to a session via WS and can:
+  - **Create** a session → gateway generates a deterministic session ID and subscribes the creator.
+  - **Append** an entry (any subscriber can append).
+  - **Subscribe** to an existing session for real-time push of new entries.
+  - **Read** entries with cursor: `GET /v1/sessions/:id/entries?after=N` (HTTP, read-only).
 - The gateway never truncates, compacts, or interprets entry payloads.
-- Sessions are created on demand and are in-memory (lost on gateway restart, consistent with existing job semantics).
+- Sessions are in-memory (lost on gateway restart, consistent with existing job semantics).
 
-### Kernel integration
+### Mutation model
 
-The session logic will live in the kernel as pure state transitions, following the existing `reduce(state, event) -> (state, effects)` pattern:
+All session mutations go through WS connections, not HTTP. HTTP is read-only. This avoids the kernel reply problem — the kernel returns `Transition { state, effects }` which maps naturally to push-based WS effects but not to synchronous HTTP request-response.
 
-- **New events**: `SessionCreated`, `SessionEntryAppended`, `SessionSubscribed`, `SessionUnsubscribed`.
-- **New effects**: `NotifySessionSubscribers` (push new entry to connected clients).
-- **New state**: session registry mapping `SessionId -> Vec<(seq, client_id, payload)>` + subscriber set.
+### What's done
 
-### Implementation process
+1. ~~Session kernel types and interface~~ (done): `State<SubId>`, `Event<SubId>`, `Effect<SubId>`, `AppendLog` in `src/gateway/session/kernel.rs`.
+2. ~~Session kernel reduce logic~~ (done): `EntryAppended`, `Subscribed`, `Unsubscribed` arms with 9 property tests.
+3. ~~Parent kernel session delegation~~ (done): `Event::SessionEvent` delegates to child reducer. `ProtocolViolation` for unknown sessions.
+4. ~~Parent kernel `SessionRequested`~~ (done): redesigned from `CreateSession`. Kernel generates deterministic session ID via `hash(runtime_id, session_counter)`, subscribes the creator, emits `SessionCreated` effect. No error path.
+5. ~~Read endpoint~~ (done): `GET /v1/sessions/:id/entries` with cursor-based pagination. `QuerySessionEntries` runtime command.
+6. ~~`ViolationSource::Session`~~ (done): `ProtocolViolation` supports session context.
 
-1. Define types and kernel interface (event/effect variants) — no logic yet.
-2. Verify all existing tests still pass with the new types added.
-3. Write tests for session invariants (should fail since logic is not implemented).
-4. Implement session logic in kernel `reduce()`.
-5. Wire up HTTP/WS adapters for session operations.
+### What's next (two remaining chunks)
 
-### Key invariants (to be encoded as property tests)
+**~~Chunk A: Redesign `CreateSession` → `SessionRequested`~~** (done)
 
-- `seq` values within a session are strictly monotonically increasing with no gaps.
-- Appending to a session always succeeds if the session exists.
-- `?after=seq` returns exactly the entries with `seq > after`, in order.
-- Subscribers receive exactly the entries appended after their subscription, in order.
-- Creating an already-existing session is idempotent (or returns the existing one).
-- Session state is independent — operations on one session never affect another.
+- `Event::SessionRequested { subscriber_id }` replaces `Event::CreateSession { session_id }`.
+- Kernel generates session ID deterministically via `hash(runtime_id, session_counter)`.
+- `runtime_id: u128` set from `uuid::Uuid::new_v4().as_u128()` at runtime startup.
+- `session_counter: u64` monotonically incrementing in state.
+- Kernel creates session, subscribes the creator, emits `Effect::SessionCreated { session_id, subscriber_id }`.
+- No error path — unique IDs guaranteed.
+- 5 unit tests (T1-T5) + 5 property tests (I1-I5) covering transition rules and invariants.
+
+**Chunk B: Subscriber deadlines and heartbeats**
+
+- Session kernel `subscribers` changes from `HashSet<SubId>` to `HashMap<SubId, u64>` (subscriber → deadline).
+- Session kernel gets `subscriber_ttl`, new events: `Tick`, `SubscriberHeartbeat { subscriber_id }`.
+- `Tick` expires stale subscribers. Parent kernel propagates `Tick` to all sessions.
+
+**Chunk C: Session expiry**
+
+- After tick propagation, parent kernel detects sessions with empty subscriber sets.
+- Emits `Effect::SessionExpired { session_id, entries }` — guarantees the log can be persisted before it's lost from memory.
+- Removes session from state.
+
+### Key invariants (encoded or planned as property tests)
+
+Implemented:
+
+- Entry permanence: entries are never removed, reordered, or mutated.
+- Append-only growth: `entries.len()` never decreases, increases by at most 1.
+- Cross-session isolation: operations on one session never affect another (structural).
+- Domain isolation: session events never mutate `available`, `active_streams`, or `tick` (structural).
+- Notification iff subscribers: `NotifySubscribers` emitted iff non-empty subscriber set at append time.
+- Notification correctness: `entry_index`, `payload`, and `subscribers` match the append operation.
+
+- Session counter monotonicity: `session_counter` never decreases across any transition.
+- Sessions only grow: `sessions.keys()` only grows (no session removed — until Chunk C).
+- SessionRequested isolation: `SessionRequested` only modifies `sessions` and `session_counter`.
+- Session ID uniqueness: all session IDs across any event sequence are unique.
+- Runtime ID disjointness: different `runtime_id` values produce disjoint session ID sets.
+
+Planned:
+
+- Subscriber expiry: stale subscribers are removed after their deadline passes.
+- Session expiry: sessions with no subscribers are removed and emit `SessionExpired`.
+- Session expiry log preservation: `SessionExpired` effect carries the full entry log.
 
 ## Other tasks
 

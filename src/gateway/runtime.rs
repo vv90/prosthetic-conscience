@@ -388,6 +388,17 @@ impl GatewayRuntime {
                     }
                 }
                 Effect::ProtocolViolation(e) => resolved.push(Effect::ProtocolViolation(e)),
+                Effect::SessionCreated {
+                    session_id,
+                    subscriber_id,
+                } => {
+                    if let Some(stream_handle) = self.registry.clone_stream(&subscriber_id) {
+                        resolved.push(Effect::SessionCreated {
+                            session_id,
+                            subscriber_id: (subscriber_id, stream_handle),
+                        });
+                    }
+                }
                 Effect::SessionEffect(e) => match e {
                     session::Effect::NotifySubscribers {
                         entry_index,
@@ -503,7 +514,11 @@ impl GatewayRuntime {
 
     pub fn spawn(config: GatewayConfig) -> RuntimeHandle {
         let mut runtime = GatewayRuntime {
-            state: GatewayState::new(config.worker_ttl, config.stream_ttl),
+            state: GatewayState::new(
+                uuid::Uuid::new_v4().as_u128(),
+                config.worker_ttl,
+                config.stream_ttl,
+            ),
             registry: ChannelRegistry::new(),
         };
 
@@ -556,6 +571,9 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                 Effect::SendClientError(e) => e.execute().await,
                 Effect::SendClientDone(e) => e.execute().await,
                 Effect::ProtocolViolation(e) => e.execute().await,
+                Effect::SessionCreated { .. } => {
+                    // No-op until session WS adapters are wired
+                }
                 Effect::SessionEffect(_) => {
                     // No-op until session adapters are wired
                 }
