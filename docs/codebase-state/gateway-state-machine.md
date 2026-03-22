@@ -294,6 +294,8 @@ None.
 - `Tick` propagates to all sessions, expiring stale subscribers.
 - 63 kernel unit tests + 5 registry unit tests covering all transition rules including capability routing, expiration, session creation, tick propagation to sessions, session expiry, and subscriber registry operations.
 - 18 property tests covering invariants I2-I11, P9-P14, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, session expiry liveness, and universal subscriber cleanup. Session subscriber IDs drawn from a separate pool (`SUB_IDS`) distinct from stream IDs (`STREAM_IDS`).
+- Session effect executors implemented: `SessionCreated` sends `Subscribed` via subscriber handle, `NotifySubscribers` fans out `Entry`, `SubscriberRemoved` sends removal and drops handle. `SessionExpired` remains a no-op stub (persistence not yet wired).
+- 7 session integration tests covering create+append, subscribe notifications, nonexistent session (P14 over the wire), subscriber timeout, multiple subscribers, disconnect cleanup, handshake timeout.
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 
 ## Load into context when

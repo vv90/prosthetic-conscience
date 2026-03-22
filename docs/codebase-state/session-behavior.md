@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-03-22
 
-Status: **partial** — session kernel reduce logic implemented, session creation redesigned (`SessionRequested`). HTTP/WS adapters and runtime commands not yet wired.
+Status: **partial** — session kernel, transport layer (WS handler, runtime commands, effect executors), and integration tests implemented. Persistence (`SessionExpired` executor) not yet wired.
 
 Load into session context when working on: session kernel logic, session HTTP/WS adapters, session-related tests, session lifecycle.
 
@@ -11,6 +11,9 @@ Load into session context when working on: session kernel logic, session HTTP/WS
 - `src/gateway/session/kernel.rs` — `State<SubId>`, `Event<SubId>`, `Effect<SubId>`, `reduce()`
 - `src/gateway/session/mod.rs` — module declaration
 - `src/gateway/kernel.rs` — `SessionId`, `sessions: HashMap<SessionId, session::State<SubId>>` on `GatewayState`, `Event::SessionRequested { subscriber_id: SubId }`, `Effect::SessionCreated`, `Event::SessionEvent`, `generate_session_id()`
+- `src/router/session_ws.rs` — WS upgrade handler and connection handler for `/v1/sessions`
+- `src/protocol.rs` — `SessionClientMessage`, `SessionGatewayMessage` wire types
+- `src/gateway/channel_registry.rs` — `SubscriberHandle` type alias
 - `docs/codebase-state/todo-near-term.md` — session feature intent and implementation process
 
 ## Architecture
@@ -135,6 +138,17 @@ Both the parent kernel's unknown-session cleanup and the P14 test use explicit m
 - `StateSnapshot` includes `subscriber_registry_count`.
 - 5 subscriber registry unit tests (register unique IDs, clone without removing, clone unknown, take removes, take unknown).
 
+**Transport layer** (done)
+
+- Wire protocol types: `SessionClientMessage` (Create, Subscribe, Append, Heartbeat) and `SessionGatewayMessage` (Subscribed, Entry, SubscriberRemoved, Error) in `protocol.rs`. 20 serde round-trip tests.
+- `SubscriberHandle = mpsc::Sender<SessionGatewayMessage>` type alias in `channel_registry.rs`.
+- 5 `RuntimeCommand` variants: `SessionCreate`, `SessionSubscribe`, `SessionAppendEntry`, `SessionSubscriberHeartbeat`, `SessionUnsubscribe`. Each has a handler method on `GatewayRuntime` and a convenience method on `RuntimeHandle`.
+- Effect executors in `spawn_effects`: `SessionCreated` sends `Subscribed` via handle, `NotifySubscribers` fans out `Entry` to all handles, `SubscriberRemoved` sends removal notice and drops handle.
+- WS handler at `/v1/sessions` (`session_ws.rs`): single endpoint with message-based handshake (first message is `Create` or `Subscribe`), connection loop with `tokio::select!` (gateway→client forwarding, client→gateway dispatch, automatic heartbeat tick at 10s), cleanup sends `Unsubscribe` on disconnect. Handshake timeout: 5s.
+- Create flow: WS handler registers subscriber, sends `SessionCreate` command, waits for `Subscribed` from mpsc (sent by `SessionCreated` effect executor), forwards to client.
+- Subscribe flow: WS handler registers subscriber, sends `SessionSubscribe` command, sends `Subscribed` to client immediately. If session doesn't exist, kernel emits `SubscriberRemoved` via P14 defensive cleanup, which arrives through mpsc and closes the connection.
+- 7 integration tests: create+append, subscribe notifications, nonexistent session (P14), subscriber timeout, multiple subscribers, disconnect cleanup, handshake timeout.
+
 ## Known Issues
 
 ### Stream registry orphan on runtime shutdown
@@ -143,10 +157,6 @@ A similar (less severe) issue exists for chat streams: if `register_stream` succ
 
 ## Not yet implemented
 
-- WS adapters for session mutations (create, append, subscribe, unsubscribe)
-- Runtime commands for session events (except `QuerySessionEntries` which is done)
-- Runtime command to register subscribers (`register_subscriber` exists on registry but no `RuntimeCommand` variant yet)
-- `SessionCreated` effect executor (resolve done via subscriber registry, spawn is no-op stub)
-- `SubscriberRemoved` effect executor (resolve done via `take_subscriber`, spawn is no-op stub)
 - `SessionExpired` effect executor (resolve done as pass-through, spawn is no-op stub — persistence adapters not yet wired)
+- Session entry replay on subscribe (new subscriber gets no history)
 - Cursor-based read improvements (adapter concern)
