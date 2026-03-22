@@ -5,8 +5,9 @@ Snapshot date: 2026-03-21
 ## Behavior
 
 - A pure reducer `reduce(state, event) -> {state, effects}` is implemented under `src/gateway/kernel.rs`.
-- Generic over worker/stream ID types (`GatewayState<WId, SId>`, `Event<WId, SId>`, `Effect<WId, SId>`).
-- The `reduce` function requires `WId: Clone + Ord + Display` and `SId: Clone + Eq + Hash + Display`.
+- Generic over worker, stream, and subscriber ID types (`GatewayState<WId, SId, SubId>`, `Event<WId, SId, SubId>`, `Effect<WId, SId, SubId>`).
+- `SId` identifies chat stream lifecycles (HTTP/SSE request-response). `SubId` identifies session subscriber connections (long-lived push subscriptions). These are distinct identity spaces — the compiler prevents accidental mixing.
+- The `reduce` function requires `WId: Clone + Ord + Display`, `SId: Clone + Eq + Hash + Display`, and `SubId: Clone + Eq + Hash + Display`.
 
 ### Pure immutable design
 
@@ -38,7 +39,7 @@ State collections use persistent immutable data structures from the `im` crate w
 - `session_counter: u64` -- monotonic counter for session ID generation. Incremented on each `SessionRequested`.
 - `available: OrdMap<WId, WorkerEntry>` -- workers waiting for jobs. `WorkerEntry` contains `deadline: u64` and `capabilities: HashSet<Capability>`.
 - `active_streams: HashMap<SId, u64>` -- client streams with jobs in flight, mapped to their deadline tick.
-- `sessions: HashMap<SessionId, session::State<SId>>` -- active sessions (see `session-behavior.md`).
+- `sessions: HashMap<SessionId, session::State<SubId>>` -- active sessions (see `session-behavior.md`). Uses `SubId` (not `SId`) because session subscribers are a distinct identity space from chat streams.
 
 Workers are one-use: consumed on dispatch, gone from kernel state. After job completion, the worker handler re-registers with a fresh ID. From the kernel's perspective, it's a new worker.
 
@@ -55,7 +56,7 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 | `WorkerHeartbeat { worker_id }`                                                | Worker signals liveness                     | Resets worker deadline to `tick + worker_ttl`                                                                |
 | `StreamHeartbeat { client_stream_id }`                                         | Stream signals activity                     | Resets stream deadline to `tick + stream_ttl`                                                                |
 | `Tick`                                                                         | Timer driven by runtime                     | Increments tick, expires stale workers and timed-out streams                                                 |
-| `SessionRequested { subscriber_id }`                                           | WS client requests new session              | Generates deterministic session ID, adds to `sessions` with creator subscribed, increments `session_counter` |
+| `SessionRequested { subscriber_id: SubId }`                                    | WS client requests new session              | Generates deterministic session ID, adds to `sessions` with creator subscribed, increments `session_counter` |
 | `SessionEvent { session_id, event }`                                           | Session operation delegated to child kernel | Delegates to `session::kernel::reduce` (see `session-behavior.md`)                                           |
 
 ### Effects (outputs)
@@ -66,7 +67,7 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 | `SendClientError { client_stream_id, message }`                    | Send error to client stream        |
 | `SendClientDone { client_stream_id }`                              | Signal stream completion to client |
 | `SessionCreated { session_id, subscriber_id }`                     | Notify creator of new session ID   |
-| `SessionEffect(session::Effect<SId>)`                              | Wrapped session effect             |
+| `SessionEffect(session::Effect<SubId>)`                            | Wrapped session effect             |
 | `SessionExpired { session_id, entries }`                           | Session expired with full log      |
 | `ProtocolViolation { source: ViolationSource, message }`           | Log invalid behavior               |
 
@@ -275,16 +276,19 @@ None.
 ## Status
 
 - Implemented as pure immutable reducer with persistent collections (`im::OrdMap`, `im::HashMap`, `im::HashSet`).
+- Three generic parameters: `WId` (worker), `SId` (chat stream), `SubId` (session subscriber). `SId` and `SubId` are distinct identity spaces enforced at compile time.
+- At the runtime level, `SId` is `ClientStreamId` and `SubId` is `SubscriberId` — distinct concrete types in separate registries. `ChannelRegistry` has three maps: `workers`, `streams`, and `subscribers`. Session effects resolve through the subscriber registry (`clone_subscriber`/`take_subscriber`), chat stream effects through the stream registry (`clone_stream`/`take_stream`).
+- `SubscriberRemoved` uses `take_subscriber` (terminal — removes handle from registry). `NotifySubscribers` and `SessionCreated` use `clone_subscriber` (non-terminal).
 - Capability-based worker dispatch.
 - Session creation via `SessionRequested` with deterministic ID generation (`hash(runtime_id, session_counter)`).
 - `runtime_id` set from UUID at runtime startup, ensuring unique IDs across restarts.
-- Session delegation to independent child kernel.
+- Session delegation to independent child kernel (which already uses `SubId` as its generic).
 - One-use worker IDs, tick-counted deadlines, heartbeat events, timeout-driven expiration, duplicate stream ID rejection.
 - `ProtocolViolation` uses `ViolationSource` enum (Worker/Stream/Session) with string IDs.
 - `subscriber_ttl` on state, propagated to sessions on creation.
 - `Tick` propagates to all sessions, expiring stale subscribers.
-- 63 kernel unit tests covering all transition rules including capability routing, expiration, session creation, tick propagation to sessions, and session expiry.
-- 17 property tests covering invariants I2-I11, P9-P13, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, and session expiry liveness.
+- 63 kernel unit tests + 5 registry unit tests covering all transition rules including capability routing, expiration, session creation, tick propagation to sessions, session expiry, and subscriber registry operations.
+- 17 property tests covering invariants I2-I11, P9-P13, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, and session expiry liveness. Session subscriber IDs drawn from a separate pool (`SUB_IDS`) distinct from stream IDs (`STREAM_IDS`).
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 
 ## Load into context when

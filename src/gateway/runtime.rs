@@ -6,7 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::gateway::channel_registry::WorkerHandle;
 
-use super::channel_registry::{ChannelRegistry, ClientStreamId, StreamHandle, WorkerId};
+use super::channel_registry::{
+    ChannelRegistry, ClientStreamId, StreamHandle, SubscriberId, WorkerId,
+};
 use super::effects::dispatch_job::DispatchJob;
 use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
@@ -56,12 +58,14 @@ pub struct StateSnapshot {
     pub active_streams: usize,
     pub worker_registry_count: usize,
     pub stream_registry_count: usize,
+    pub subscriber_registry_count: usize,
 }
 
-type KernelEvent = Event<WorkerId, ClientStreamId>;
-type KernelEffect = Effect<WorkerId, ClientStreamId>;
+type KernelEvent = Event<WorkerId, ClientStreamId, SubscriberId>;
+type KernelEffect = Effect<WorkerId, ClientStreamId, SubscriberId>;
 type ResolvedSId = (ClientStreamId, StreamHandle);
-type ResolvedEffect = Effect<WorkerHandle, ResolvedSId>;
+type ResolvedSubId = (SubscriberId, StreamHandle);
+type ResolvedEffect = Effect<WorkerHandle, ResolvedSId, ResolvedSubId>;
 
 #[derive(Debug)]
 pub enum RuntimeCommand {
@@ -240,8 +244,8 @@ pub enum RegisterError {
 }
 
 pub struct GatewayRuntime {
-    state: GatewayState<WorkerId, ClientStreamId>,
-    registry: ChannelRegistry<WorkerHandle, StreamHandle>,
+    state: GatewayState<WorkerId, ClientStreamId, SubscriberId>,
+    registry: ChannelRegistry<WorkerHandle, StreamHandle, StreamHandle>,
 }
 
 impl GatewayRuntime {
@@ -395,10 +399,10 @@ impl GatewayRuntime {
                     session_id,
                     subscriber_id,
                 } => {
-                    if let Some(stream_handle) = self.registry.clone_stream(&subscriber_id) {
+                    if let Some(handle) = self.registry.clone_subscriber(&subscriber_id) {
                         resolved.push(Effect::SessionCreated {
                             session_id,
-                            subscriber_id: (subscriber_id, stream_handle),
+                            subscriber_id: (subscriber_id, handle),
                         });
                     }
                 }
@@ -420,7 +424,9 @@ impl GatewayRuntime {
                         let resolved_subscribers: Vec<_> = subscribers
                             .into_iter()
                             .filter_map(|sid| {
-                                self.registry.clone_stream(&sid).map(|handle| (sid, handle))
+                                self.registry
+                                    .clone_subscriber(&sid)
+                                    .map(|handle| (sid, handle))
                             })
                             .collect();
                         if !resolved_subscribers.is_empty() {
@@ -434,7 +440,7 @@ impl GatewayRuntime {
                         }
                     }
                     session::Effect::SubscriberRemoved { subscriber_id } => {
-                        if let Some(handle) = self.registry.clone_stream(&subscriber_id) {
+                        if let Some(handle) = self.registry.take_subscriber(&subscriber_id) {
                             resolved.push(Effect::SessionEffect(
                                 session::Effect::SubscriberRemoved {
                                     subscriber_id: (subscriber_id, handle),
@@ -496,6 +502,7 @@ impl GatewayRuntime {
                             active_streams: self.state.active_streams.len(),
                             worker_registry_count: self.registry.worker_count(),
                             stream_registry_count: self.registry.stream_count(),
+                            subscriber_registry_count: self.registry.subscriber_count(),
                         };
                         let _ = reply_tx.send(snapshot);
                         (self, Vec::new())

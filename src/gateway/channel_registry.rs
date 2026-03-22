@@ -15,6 +15,9 @@ pub struct WorkerId(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClientStreamId(String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubscriberId(String);
+
 pub type WorkerHandle = oneshot::Sender<WorkerJob>;
 pub type StreamHandle = mpsc::Sender<StreamFrame>;
 
@@ -56,6 +59,12 @@ impl ClientStreamId {
     }
 }
 
+impl SubscriberId {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+}
+
 impl fmt::Display for WorkerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -68,22 +77,34 @@ impl fmt::Display for ClientStreamId {
     }
 }
 
-#[derive(Debug)]
-pub struct ChannelRegistry<WorkerHandle, StreamHandle> {
-    workers: HashMap<WorkerId, WorkerHandle>,
-    streams: HashMap<ClientStreamId, StreamHandle>,
+impl fmt::Display for SubscriberId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-impl<WorkerHandle, StreamHandle> Default for ChannelRegistry<WorkerHandle, StreamHandle> {
+#[derive(Debug)]
+pub struct ChannelRegistry<WorkerHandle, StreamHandle, SubscriberHandle> {
+    workers: HashMap<WorkerId, WorkerHandle>,
+    streams: HashMap<ClientStreamId, StreamHandle>,
+    subscribers: HashMap<SubscriberId, SubscriberHandle>,
+}
+
+impl<WorkerHandle, StreamHandle, SubscriberHandle> Default
+    for ChannelRegistry<WorkerHandle, StreamHandle, SubscriberHandle>
+{
     fn default() -> Self {
         Self {
             workers: HashMap::new(),
             streams: HashMap::new(),
+            subscribers: HashMap::new(),
         }
     }
 }
 
-impl<WorkerHandle, StreamHandle> ChannelRegistry<WorkerHandle, StreamHandle> {
+impl<WorkerHandle, StreamHandle, SubscriberHandle>
+    ChannelRegistry<WorkerHandle, StreamHandle, SubscriberHandle>
+{
     pub fn new() -> Self {
         Self::default()
     }
@@ -127,6 +148,30 @@ impl<WorkerHandle, StreamHandle> ChannelRegistry<WorkerHandle, StreamHandle> {
         self.streams.insert(stream_id.clone(), handle);
         stream_id
     }
+
+    pub fn register_subscriber(&mut self, handle: SubscriberHandle) -> SubscriberId {
+        let subscriber_id = SubscriberId::new(Uuid::new_v4().to_string());
+        self.subscribers.insert(subscriber_id.clone(), handle);
+        subscriber_id
+    }
+
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.len()
+    }
+
+    pub fn clone_subscriber(&self, subscriber_id: &SubscriberId) -> Option<SubscriberHandle>
+    where
+        SubscriberHandle: Clone,
+    {
+        self.subscribers.get(subscriber_id).cloned()
+    }
+
+    /// Remove and return the subscriber handle, consuming it.
+    /// Used for terminal effects — the handle is gone after this,
+    /// which closes the channel if no other senders remain.
+    pub fn take_subscriber(&mut self, subscriber_id: &SubscriberId) -> Option<SubscriberHandle> {
+        self.subscribers.remove(subscriber_id)
+    }
 }
 
 #[cfg(test)]
@@ -137,7 +182,7 @@ mod tests {
 
     #[test]
     fn register_worker_returns_unique_ids() {
-        let mut registry = ChannelRegistry::<u8, ()>::new();
+        let mut registry = ChannelRegistry::<u8, (), ()>::new();
 
         let first = registry.register_worker(1u8);
         let second = registry.register_worker(2u8);
@@ -148,7 +193,7 @@ mod tests {
 
     #[test]
     fn take_worker_removes_handle() {
-        let mut registry = ChannelRegistry::<u8, ()>::new();
+        let mut registry = ChannelRegistry::<u8, (), ()>::new();
         let worker_id = registry.register_worker(42u8);
 
         assert_eq!(registry.take_worker(&worker_id), Some(42u8));
@@ -158,7 +203,7 @@ mod tests {
 
     #[test]
     fn clone_stream_returns_handle_without_removing() {
-        let mut registry = ChannelRegistry::<(), u8>::new();
+        let mut registry = ChannelRegistry::<(), u8, ()>::new();
         let stream_id = registry.register_stream(42u8);
 
         assert_eq!(registry.clone_stream(&stream_id), Some(42u8));
@@ -168,14 +213,14 @@ mod tests {
 
     #[test]
     fn clone_stream_returns_none_for_unknown() {
-        let registry = ChannelRegistry::<(), u8>::new();
+        let registry = ChannelRegistry::<(), u8, ()>::new();
         let fake_id = ClientStreamId::new("nonexistent".to_string());
         assert_eq!(registry.clone_stream(&fake_id), None);
     }
 
     #[test]
     fn take_stream_removes_handle() {
-        let mut registry = ChannelRegistry::<(), u8>::new();
+        let mut registry = ChannelRegistry::<(), u8, ()>::new();
         let stream_id = registry.register_stream(42u8);
 
         assert_eq!(registry.take_stream(&stream_id), Some(42u8));
@@ -186,15 +231,60 @@ mod tests {
 
     #[test]
     fn take_stream_returns_none_for_unknown() {
-        let mut registry = ChannelRegistry::<(), u8>::new();
+        let mut registry = ChannelRegistry::<(), u8, ()>::new();
         let fake_id = ClientStreamId::new("nonexistent".to_string());
         assert_eq!(registry.take_stream(&fake_id), None);
+    }
+
+    #[test]
+    fn register_subscriber_returns_unique_ids() {
+        let mut registry = ChannelRegistry::<(), (), u8>::new();
+
+        let first = registry.register_subscriber(1u8);
+        let second = registry.register_subscriber(2u8);
+
+        assert_ne!(first, second);
+        assert_eq!(registry.subscriber_count(), 2);
+    }
+
+    #[test]
+    fn clone_subscriber_returns_handle_without_removing() {
+        let mut registry = ChannelRegistry::<(), (), u8>::new();
+        let sub_id = registry.register_subscriber(42u8);
+
+        assert_eq!(registry.clone_subscriber(&sub_id), Some(42u8));
+        // Still in registry
+        assert_eq!(registry.clone_subscriber(&sub_id), Some(42u8));
+    }
+
+    #[test]
+    fn clone_subscriber_returns_none_for_unknown() {
+        let registry = ChannelRegistry::<(), (), u8>::new();
+        let fake_id = SubscriberId::new("nonexistent".to_string());
+        assert_eq!(registry.clone_subscriber(&fake_id), None);
+    }
+
+    #[test]
+    fn take_subscriber_removes_handle() {
+        let mut registry = ChannelRegistry::<(), (), u8>::new();
+        let sub_id = registry.register_subscriber(42u8);
+
+        assert_eq!(registry.take_subscriber(&sub_id), Some(42u8));
+        assert_eq!(registry.take_subscriber(&sub_id), None);
+        assert_eq!(registry.clone_subscriber(&sub_id), None);
+    }
+
+    #[test]
+    fn take_subscriber_returns_none_for_unknown() {
+        let mut registry = ChannelRegistry::<(), (), u8>::new();
+        let fake_id = SubscriberId::new("nonexistent".to_string());
+        assert_eq!(registry.take_subscriber(&fake_id), None);
     }
 
     proptest! {
         #[test]
         fn take_returns_registered_handle_for_each_id(handles in proptest::collection::vec(any::<u32>(), 0..128)) {
-            let mut registry = ChannelRegistry::<u32, ()>::new();
+            let mut registry = ChannelRegistry::<u32, (), ()>::new();
             let mut registrations: Vec<(WorkerId, u32)> = Vec::new();
 
             for handle in handles {

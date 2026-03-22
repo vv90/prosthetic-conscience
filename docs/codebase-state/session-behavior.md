@@ -10,14 +10,16 @@ Load into session context when working on: session kernel logic, session HTTP/WS
 
 - `src/gateway/session/kernel.rs` — `State<SubId>`, `Event<SubId>`, `Effect<SubId>`, `reduce()`
 - `src/gateway/session/mod.rs` — module declaration
-- `src/gateway/kernel.rs` — `SessionId`, `sessions` field on `GatewayState`, `Event::SessionRequested`, `Effect::SessionCreated`, `Event::SessionEvent`, `generate_session_id()`
+- `src/gateway/kernel.rs` — `SessionId`, `sessions: HashMap<SessionId, session::State<SubId>>` on `GatewayState`, `Event::SessionRequested { subscriber_id: SubId }`, `Effect::SessionCreated`, `Event::SessionEvent`, `generate_session_id()`
 - `docs/codebase-state/todo-near-term.md` — session feature intent and implementation process
 
 ## Architecture
 
 The session kernel is a fully independent submodule (`gateway::session::kernel`) with its own `Event`, `Effect`, `State`, and `reduce()`. It has no imports from or awareness of the parent kernel.
 
-The parent kernel delegates via `Event::SessionEvent { session_id, event }` — it extracts the session from its `HashMap<SessionId, session::State<SId>>` using `extract` (which gives owned state without cloning) and passes it to `session::kernel::reduce()`. The updated session state is re-inserted via `update`. This enforces domain isolation structurally: session logic cannot access worker/stream state because it never receives it.
+The parent kernel's `SubId` generic flows directly into the session kernel's `SubId` generic — the same type parameter, enforcing that session subscriber identities are distinct from chat stream identities (`SId`) at compile time.
+
+The parent kernel delegates via `Event::SessionEvent { session_id, event }` — it extracts the session from its `HashMap<SessionId, session::State<SubId>>` using `extract` (which gives owned state without cloning) and passes it to `session::kernel::reduce()`. The updated session state is re-inserted via `update`. This enforces domain isolation structurally: session logic cannot access worker/stream state because it never receives it.
 
 A `SessionEvent` for a non-existent session produces a `ProtocolViolation`. Sessions must be explicitly created before they can receive events.
 
@@ -116,11 +118,21 @@ These are properties that hold for all reachable states and all valid event sequ
 - I8 (`sessions_only_grow`) replaced by P13 (sessions only removed when subscribers empty).
 - 6 parent kernel unit tests (T16-T21) + 3 parent property tests (P10-P12).
 
+**Registry and effect resolution separation** (done)
+
+- `SubscriberId` newtype in `channel_registry.rs` — distinct from `ClientStreamId`. UUID-based generation.
+- `ChannelRegistry` has three maps: `workers` (WorkerId → WorkerHandle), `streams` (ClientStreamId → StreamHandle), `subscribers` (SubscriberId → SubscriberHandle).
+- Session effects resolve through the subscriber registry: `SessionCreated` and `NotifySubscribers` use `clone_subscriber` (non-terminal), `SubscriberRemoved` uses `take_subscriber` (terminal — removes handle from registry).
+- Chat stream effects resolve through the stream registry as before.
+- `StateSnapshot` includes `subscriber_registry_count`.
+- 5 subscriber registry unit tests (register unique IDs, clone without removing, clone unknown, take removes, take unknown).
+
 ## Not yet implemented
 
 - WS adapters for session mutations (create, append, subscribe, unsubscribe)
 - Runtime commands for session events (except `QuerySessionEntries` which is done)
-- `SessionCreated` effect executor (resolve and spawn are stubbed)
-- `SubscriberRemoved` effect executor (resolve done, spawn is no-op stub)
+- Runtime command to register subscribers (`register_subscriber` exists on registry but no `RuntimeCommand` variant yet)
+- `SessionCreated` effect executor (resolve done via subscriber registry, spawn is no-op stub)
+- `SubscriberRemoved` effect executor (resolve done via `take_subscriber`, spawn is no-op stub)
 - `SessionExpired` effect executor (resolve done as pass-through, spawn is no-op stub — persistence adapters not yet wired)
 - Cursor-based read improvements (adapter concern)
