@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 95d87276ecd17b485bc880b13c8b6c4bdceec044b5e235ea16594cb089da9e50 # shrinks to events = [WorkerRegistered { worker_id: "w0" }, HttpChatRequested { client_stream_id: "s2", payload: Object {"model": String("demo")}, stream: true }, WorkerRegistered { worker_id: "w0" }, HttpChatRequested { client_stream_id: "s2", payload: Object {"model": String("demo")}, stream: true }]
+cc 81dd4967455f34af3233299b35f1b59c7844e515e03ce12703122717dbb19555 # shrinks to events = [SessionEvent { session_id: SessionId("sess0"), event: Subscribed { subscriber_id: "sub0", tick: 0 } }]

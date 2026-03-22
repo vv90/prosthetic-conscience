@@ -105,6 +105,33 @@ pub enum Event<WId, SId, SubId> {
     },
 }
 
+#[cfg(test)]
+impl<WId, SId, SubId> Event<WId, SId, SubId> {
+    /// Returns all SubIds referenced by this event.
+    ///
+    /// SAFETY-CRITICAL FOR INVARIANT TESTING: This method must use explicit
+    /// match arms with NO wildcard (`_ =>`) pattern. When a new variant is
+    /// added to this enum, the compiler will force the author to handle it
+    /// here, ensuring they decide whether it carries a SubId. Returning an
+    /// incorrect or incomplete result silently breaks property test P14
+    /// (every SubId that enters the kernel eventually receives a terminal
+    /// SubscriberRemoved effect), allowing subscriber handle leaks to go
+    /// undetected.
+    pub fn sub_ids(&self) -> Vec<&SubId> {
+        match self {
+            Event::HttpChatRequested { .. } => vec![],
+            Event::WorkerRegistered { .. } => vec![],
+            Event::AssignmentCleared { .. } => vec![],
+            Event::AssignmentFailed { .. } => vec![],
+            Event::WorkerHeartbeat { .. } => vec![],
+            Event::StreamHeartbeat { .. } => vec![],
+            Event::Tick => vec![],
+            Event::SessionRequested { subscriber_id } => vec![subscriber_id],
+            Event::SessionEvent { event, .. } => event.sub_ids(),
+        }
+    }
+}
+
 use super::effects::{
     dispatch_job::DispatchJob,
     protocol_violation::{ProtocolViolation, ViolationSource},
@@ -463,13 +490,35 @@ where
                         .collect(),
                 }
             }
-            None => Transition {
-                state,
-                effects: vec![Effect::ProtocolViolation(ProtocolViolation {
+            None => {
+                let mut effects = vec![Effect::ProtocolViolation(ProtocolViolation {
                     source: ViolationSource::Session(session_id.to_string()),
                     message: String::from("event for unknown session"),
-                })],
-            },
+                })];
+                // Emit SubscriberRemoved for any SubId referenced in an
+                // event targeting an unknown session. The kernel cannot
+                // trust that the impure runtime layer already cleaned up
+                // the subscriber handle — defensive cleanup here prevents
+                // registry handle leaks regardless of runtime behavior.
+                //
+                // No wildcard arm: adding a new session::Event variant
+                // is a compile error until handled here.
+                let cleanup_sub_id = match session_event {
+                    session::Event::EntryAppended { .. } => None,
+                    session::Event::Subscribed { subscriber_id, .. } => Some(subscriber_id),
+                    session::Event::Unsubscribed { subscriber_id } => Some(subscriber_id),
+                    session::Event::Tick { .. } => None,
+                    session::Event::SubscriberHeartbeat { subscriber_id, .. } => {
+                        Some(subscriber_id)
+                    }
+                };
+                if let Some(subscriber_id) = cleanup_sub_id {
+                    effects.push(Effect::SessionEffect(session::Effect::SubscriberRemoved {
+                        subscriber_id,
+                    }));
+                }
+                Transition { state, effects }
+            }
         },
     }
 }
@@ -3079,6 +3128,82 @@ mod tests {
 
                     state = transition.state;
                 }
+            }
+
+            #[test]
+            fn every_subscribed_sub_id_eventually_gets_removed(
+                events in arb_event_sequence()
+            ) {
+                // P14: Every SubId that enters the kernel via SessionRequested
+                // or SessionEvent::Subscribed eventually receives a
+                // SubscriberRemoved effect (given enough ticks).
+                // This covers both successful subscriptions and subscriptions
+                // to non-existent sessions.
+                let mut state: GatewayState<WId, SId, SubId> = GatewayState::new(0, 3, 3, 30);
+                let mut entered_sub_ids: std::collections::BTreeSet<SubId> =
+                    std::collections::BTreeSet::new();
+                let mut removed_sub_ids: std::collections::BTreeSet<SubId> =
+                    std::collections::BTreeSet::new();
+
+                // Apply all events, tracking subscriber entries and removals
+                for event in events {
+                    // Track SubIds entering the kernel.
+                    // Uses Event::sub_ids() which has no wildcard arm —
+                    // adding a new event variant without updating sub_ids()
+                    // is a compile error.
+                    for sub_id in event.sub_ids() {
+                        entered_sub_ids.insert(sub_id.clone());
+                    }
+
+                    let transition = reduce(state, event);
+
+                    // Track SubscriberRemoved effects
+                    for effect in &transition.effects {
+                        if let Effect::SessionEffect(
+                            crate::gateway::session::Effect::SubscriberRemoved {
+                                subscriber_id,
+                            },
+                        ) = effect
+                        {
+                            removed_sub_ids.insert(subscriber_id.clone());
+                        }
+                    }
+
+                    state = transition.state;
+                }
+
+                // Drain: apply enough ticks to expire all subscribers and sessions
+                // subscriber_ttl is 30, so tick 31 should expire everything
+                for tick in 0..35 {
+                    let transition = reduce(state, Event::Tick);
+                    for effect in &transition.effects {
+                        if let Effect::SessionEffect(
+                            crate::gateway::session::Effect::SubscriberRemoved {
+                                subscriber_id,
+                            },
+                        ) = effect
+                        {
+                            removed_sub_ids.insert(subscriber_id.clone());
+                        }
+                    }
+                    state = transition.state;
+
+                    // Early exit if all accounted for
+                    if entered_sub_ids.is_subset(&removed_sub_ids) {
+                        break;
+                    }
+                    let _ = tick;
+                }
+
+                // Every SubId that entered must have been removed
+                let missing: Vec<_> = entered_sub_ids
+                    .difference(&removed_sub_ids)
+                    .collect();
+                prop_assert!(
+                    missing.is_empty(),
+                    "SubIds entered kernel but never received SubscriberRemoved: {:?}",
+                    missing
+                );
             }
 
             #[test]

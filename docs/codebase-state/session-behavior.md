@@ -1,6 +1,6 @@
 # Session Behavior
 
-Snapshot date: 2026-03-21
+Snapshot date: 2026-03-22
 
 Status: **partial** — session kernel reduce logic implemented, session creation redesigned (`SessionRequested`). HTTP/WS adapters and runtime commands not yet wired.
 
@@ -21,7 +21,7 @@ The parent kernel's `SubId` generic flows directly into the session kernel's `Su
 
 The parent kernel delegates via `Event::SessionEvent { session_id, event }` — it extracts the session from its `HashMap<SessionId, session::State<SubId>>` using `extract` (which gives owned state without cloning) and passes it to `session::kernel::reduce()`. The updated session state is re-inserted via `update`. This enforces domain isolation structurally: session logic cannot access worker/stream state because it never receives it.
 
-A `SessionEvent` for a non-existent session produces a `ProtocolViolation`. Sessions must be explicitly created before they can receive events.
+A `SessionEvent` for a non-existent session produces a `ProtocolViolation`. If the event carries a SubId (`Subscribed`, `Unsubscribed`, `SubscriberHeartbeat`), the kernel also emits `SubscriberRemoved` for defensive cleanup — the kernel cannot trust that the impure runtime already cleaned up the subscriber handle. Sessions must be explicitly created before they can receive events.
 
 ### Mutation model
 
@@ -81,6 +81,14 @@ These are properties that hold for all reachable states and all valid event sequ
 - **Subscriber termination liveness**: every subscriber that enters a session eventually receives a `SubscriberRemoved` effect (given enough ticks without heartbeats).
 - **Subscriber drain liveness**: all subscribers are eventually removed from the session (given enough ticks without heartbeats).
 
+### Parent kernel invariants (session-related)
+
+- **P14 — Universal subscriber cleanup**: every SubId that enters the parent kernel via any event (`SessionRequested`, `SessionEvent::Subscribed`, `SessionEvent::Unsubscribed`, `SessionEvent::SubscriberHeartbeat`) eventually receives a `SubscriberRemoved` effect (given enough ticks). This is enforced by two mechanisms: (1) session-level expiry for subscribers inside sessions, and (2) defensive cleanup in the parent kernel's unknown-session arm, which emits `SubscriberRemoved` for any SubId in a `SessionEvent` targeting a non-existent session.
+
+### Exhaustiveness enforcement
+
+Both the parent kernel's unknown-session cleanup and the P14 test use explicit match arms with no wildcard (`_ =>`) over `session::Event` variants. Adding a new variant that carries a `SubId` without handling it in either location is a compile error. The test uses `#[cfg(test)] Event::sub_ids()` methods (defined adjacent to each enum) for the same purpose.
+
 ## Implemented
 
 - Session kernel `reduce()` with five arms: `EntryAppended`, `Subscribed`, `Unsubscribed`, `Tick`, `SubscriberHeartbeat`
@@ -126,6 +134,12 @@ These are properties that hold for all reachable states and all valid event sequ
 - Chat stream effects resolve through the stream registry as before.
 - `StateSnapshot` includes `subscriber_registry_count`.
 - 5 subscriber registry unit tests (register unique IDs, clone without removing, clone unknown, take removes, take unknown).
+
+## Known Issues
+
+### Stream registry orphan on runtime shutdown
+
+A similar (less severe) issue exists for chat streams: if `register_stream` succeeds but the subsequent `http_chat_requested` command fails (runtime channel closed), the stream handle is orphaned in the registry. The kernel never heard about it, so no `SendClientDone` / `take_stream` will clean it up. In practice this only occurs during runtime shutdown (channel closed), so the registry is about to be dropped anyway. Noted for completeness.
 
 ## Not yet implemented
 

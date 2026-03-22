@@ -1,6 +1,6 @@
 # Gateway State Machine (Kernel)
 
-Snapshot date: 2026-03-21
+Snapshot date: 2026-03-22
 
 ## Behavior
 
@@ -79,19 +79,20 @@ Deadlines are expressed as tick counts, not wall-clock time. Under channel conge
 
 Universal properties that hold on every reachable state after any event sequence. Each is a property-test target.
 
-| #   | Invariant                                                                                                                       | Status      | Notes                                                                                                   |
-| --- | ------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------- |
-| I1  | Workers only exist in `available`. Once dispatched, they leave kernel state entirely.                                           | Implemented | One-use IDs. No dual-state possible.                                                                    |
-| I2  | Every stream removed from `active_streams` produces client-terminal effects (`SendClientDone`)                                  | Implemented | Via `AssignmentCleared` or `Tick` expiration.                                                           |
-| I3  | Every `DispatchJob` is emitted in the same transition that removes worker from `available` and adds stream to `active_streams`  | Implemented | Dispatch and state update are atomic within the reducer. Duplicate stream IDs rejected before dispatch. |
-| I4  | No event silently changes state without corresponding effects                                                                   | Implemented | Exceptions: `WorkerRegistered` (safe), `Tick` expiring workers (no client).                             |
-| I5  | Every `client_stream_id` that enters the kernel eventually gets terminal effects                                                | Implemented | Via pre-dispatch error, `AssignmentCleared`, or tick expiration.                                        |
-| I6  | Dispatch only targets workers whose capabilities include the required capability                                                | Implemented | `first_capable_worker_id` filters by capability.                                                        |
-| I7  | `session_counter` never decreases across any transition                                                                         | Implemented | Only `SessionRequested` increments it; all other events leave it unchanged.                             |
-| I8  | Sessions are only removed when their subscriber set is empty (replaced by P13)                                                  | Implemented | Replaced `sessions_only_grow` with `sessions_only_removed_when_subscribers_empty`.                      |
-| I9  | `SessionRequested` only modifies `sessions` and `session_counter` — all other state fields unchanged                            | Implemented | Structural isolation.                                                                                   |
-| I10 | All session IDs produced across any event sequence are unique (no duplicates in `sessions.keys()`)                              | Implemented | Deterministic `hash(runtime_id, session_counter)` with monotonic counter.                               |
-| I11 | Two gateway states with different `runtime_id` values produce strictly disjoint sets of session IDs for the same event sequence | Implemented | Ensures uniqueness across server restarts.                                                              |
+| #   | Invariant                                                                                                                       | Status      | Notes                                                                                                                               |
+| --- | ------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| I1  | Workers only exist in `available`. Once dispatched, they leave kernel state entirely.                                           | Implemented | One-use IDs. No dual-state possible.                                                                                                |
+| I2  | Every stream removed from `active_streams` produces client-terminal effects (`SendClientDone`)                                  | Implemented | Via `AssignmentCleared` or `Tick` expiration.                                                                                       |
+| I3  | Every `DispatchJob` is emitted in the same transition that removes worker from `available` and adds stream to `active_streams`  | Implemented | Dispatch and state update are atomic within the reducer. Duplicate stream IDs rejected before dispatch.                             |
+| I4  | No event silently changes state without corresponding effects                                                                   | Implemented | Exceptions: `WorkerRegistered` (safe), `Tick` expiring workers (no client).                                                         |
+| I5  | Every `client_stream_id` that enters the kernel eventually gets terminal effects                                                | Implemented | Via pre-dispatch error, `AssignmentCleared`, or tick expiration.                                                                    |
+| I6  | Dispatch only targets workers whose capabilities include the required capability                                                | Implemented | `first_capable_worker_id` filters by capability.                                                                                    |
+| I7  | `session_counter` never decreases across any transition                                                                         | Implemented | Only `SessionRequested` increments it; all other events leave it unchanged.                                                         |
+| I8  | Sessions are only removed when their subscriber set is empty (replaced by P13)                                                  | Implemented | Replaced `sessions_only_grow` with `sessions_only_removed_when_subscribers_empty`.                                                  |
+| I9  | `SessionRequested` only modifies `sessions` and `session_counter` — all other state fields unchanged                            | Implemented | Structural isolation.                                                                                                               |
+| I10 | All session IDs produced across any event sequence are unique (no duplicates in `sessions.keys()`)                              | Implemented | Deterministic `hash(runtime_id, session_counter)` with monotonic counter.                                                           |
+| I11 | Two gateway states with different `runtime_id` values produce strictly disjoint sets of session IDs for the same event sequence | Implemented | Ensures uniqueness across server restarts.                                                                                          |
+| P14 | Every SubId that enters the kernel via any event eventually receives a `SubscriberRemoved` effect (given enough ticks)          | Implemented | Covers both in-session expiry and unknown-session defensive cleanup. Uses `Event::sub_ids()` (no wildcard) for exhaustive tracking. |
 
 ## Transition Rules
 
@@ -159,10 +160,13 @@ Specific input-output contracts for each event. Each is a unit-test target.
 
 ### `SessionEvent`
 
-| Precondition                   | Effects                                                | State change                            |
-| ------------------------------ | ------------------------------------------------------ | --------------------------------------- |
-| `session_id` in `sessions`     | Wrapped session effects from child reducer             | Session state updated via child reducer |
-| `session_id` not in `sessions` | `[ProtocolViolation("event for unknown session ...")]` | No change                               |
+| Precondition                                               | Effects                                                                   | State change                            |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------- |
+| `session_id` in `sessions`                                 | Wrapped session effects from child reducer                                | Session state updated via child reducer |
+| `session_id` not in `sessions`, event carries SubId        | `[ProtocolViolation("event for unknown session ..."), SubscriberRemoved]` | No change                               |
+| `session_id` not in `sessions`, event does not carry SubId | `[ProtocolViolation("event for unknown session ...")]`                    | No change                               |
+
+The unknown-session arm uses an explicit match (no wildcard) over `session::Event` variants to extract SubIds for defensive cleanup. This ensures `SubscriberRemoved` is emitted for any SubId referenced in an event targeting a non-existent session, preventing registry handle leaks regardless of runtime behavior.
 
 ## Test Coverage
 
@@ -243,7 +247,7 @@ The source uses `String` (not generic ID types) to avoid type complexity at the 
 | `t20_session_with_entries_expires_with_entries_in_effect`         | T20: Session with entries but no subscribers expires with entries preserved   |
 | `t21_freshly_created_session_does_not_expire_on_same_tick`        | T21: Freshly created session does not expire on same tick                     |
 
-### Property tests (17 tests)
+### Property tests (18 tests)
 
 All use `proptest` over arbitrary sequences of up to 100 events from a small ID pool (3 worker IDs, 3 stream IDs, 2 session IDs) to encourage collisions.
 
@@ -266,6 +270,7 @@ All use `proptest` over arbitrary sequences of up to 100 events from a small ID 
 | `sessions_eventually_expire_without_heartbeats`        | P10: every session eventually produces `SessionExpired` (given enough ticks)                    |
 | `all_sessions_eventually_removed_without_heartbeats`   | P11: all sessions eventually removed from state (given enough ticks)                            |
 | `session_expired_carries_correct_entries`              | P12: `SessionExpired` carries the same entries that were in the session at removal              |
+| `every_subscribed_sub_id_eventually_gets_removed`      | P14: every SubId entering the kernel via any event eventually gets `SubscriberRemoved`          |
 
 A proptest regression file at `proptest-regressions/gateway/kernel.txt` captures the minimal case that caught the duplicate stream ID bug (now fixed, replayed on each run).
 
@@ -288,7 +293,7 @@ None.
 - `subscriber_ttl` on state, propagated to sessions on creation.
 - `Tick` propagates to all sessions, expiring stale subscribers.
 - 63 kernel unit tests + 5 registry unit tests covering all transition rules including capability routing, expiration, session creation, tick propagation to sessions, session expiry, and subscriber registry operations.
-- 17 property tests covering invariants I2-I11, P9-P13, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, and session expiry liveness. Session subscriber IDs drawn from a separate pool (`SUB_IDS`) distinct from stream IDs (`STREAM_IDS`).
+- 18 property tests covering invariants I2-I11, P9-P14, tick monotonicity, stream timeout effect pairs, request terminal effects, session ID uniqueness/isolation, session expiry liveness, and universal subscriber cleanup. Session subscriber IDs drawn from a separate pool (`SUB_IDS`) distinct from stream IDs (`STREAM_IDS`).
 - Runtime spawns a tick task using `try_send` (skips ticks under congestion).
 
 ## Load into context when

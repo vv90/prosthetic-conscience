@@ -82,6 +82,29 @@ pub enum Event<SubId> {
     SubscriberHeartbeat { subscriber_id: SubId, tick: u64 },
 }
 
+#[cfg(test)]
+impl<SubId> Event<SubId> {
+    /// Returns all SubIds referenced by this event.
+    ///
+    /// SAFETY-CRITICAL FOR INVARIANT TESTING: This method must use explicit
+    /// match arms with NO wildcard (`_ =>`) pattern. When a new variant is
+    /// added to this enum, the compiler will force the author to handle it
+    /// here, ensuring they decide whether it carries a SubId. Returning an
+    /// incorrect or incomplete result silently breaks property test P14
+    /// (every SubId that enters the kernel eventually receives a terminal
+    /// SubscriberRemoved effect), allowing subscriber handle leaks to go
+    /// undetected.
+    pub fn sub_ids(&self) -> Vec<&SubId> {
+        match self {
+            Event::EntryAppended { .. } => vec![],
+            Event::Subscribed { subscriber_id, .. } => vec![subscriber_id],
+            Event::Unsubscribed { subscriber_id } => vec![subscriber_id],
+            Event::Tick { .. } => vec![],
+            Event::SubscriberHeartbeat { subscriber_id, .. } => vec![subscriber_id],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect<SubId> {
     NotifySubscribers {
