@@ -13,8 +13,10 @@ use prosthetic_conscience::protocol::Capability;
 use prosthetic_conscience::protocol::GatewayToWorker;
 use serde_json::json;
 
+use prosthetic_conscience::protocol::SessionGatewayMessage;
 use support::client::{SseClient, SseEvent, transcribe};
 use support::gateway::TestGateway;
+use support::session::MockSessionClient;
 use support::worker::MockWorker;
 
 #[tokio::test]
@@ -60,6 +62,177 @@ async fn happy_path_streams_chunks_and_done() {
     })
     .await
     .expect("test timed out after 5 seconds");
+}
+
+// ── Session integration tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn session_create_and_append() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (mut client, session_id) = MockSessionClient::create(gw.addr).await;
+        assert!(!session_id.is_empty());
+
+        client.append(json!({"msg": "hello"})).await;
+
+        let entry = client.recv().await;
+        assert_eq!(
+            entry,
+            Some(SessionGatewayMessage::Entry {
+                index: 0,
+                payload: json!({"msg": "hello"}),
+            }),
+        );
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_subscribe_receives_notifications() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (mut client_a, session_id) = MockSessionClient::create(gw.addr).await;
+        let mut client_b = MockSessionClient::subscribe(gw.addr, &session_id).await;
+
+        // A appends — both receive
+        client_a.append(json!({"data": 1})).await;
+
+        let entry_a = client_a.recv().await;
+        let entry_b = client_b.recv().await;
+        let expected = Some(SessionGatewayMessage::Entry {
+            index: 0,
+            payload: json!({"data": 1}),
+        });
+        assert_eq!(entry_a, expected);
+        assert_eq!(entry_b, expected);
+
+        // B appends — both receive
+        client_b.append(json!({"data": 2})).await;
+
+        let entry_a2 = client_a.recv().await;
+        let entry_b2 = client_b.recv().await;
+        let expected2 = Some(SessionGatewayMessage::Entry {
+            index: 1,
+            payload: json!({"data": 2}),
+        });
+        assert_eq!(entry_a2, expected2);
+        assert_eq!(entry_b2, expected2);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_subscribe_nonexistent() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let mut client = MockSessionClient::subscribe(gw.addr, "no_such_session").await;
+
+        // P14 defensive cleanup: kernel emits SubscriberRemoved for unknown session
+        let msg = client.recv().await;
+        assert_eq!(msg, Some(SessionGatewayMessage::SubscriberRemoved));
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_subscriber_timeout() {
+    let config = GatewayConfig {
+        tick_interval: Duration::from_millis(50),
+        subscriber_ttl: 2,
+        ..GatewayConfig::default()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start_with_config(config).await;
+
+        let (mut client, _session_id) = MockSessionClient::create(gw.addr).await;
+
+        // subscriber_ttl=2, tick_interval=50ms → expires in ~100ms.
+        // WS handler auto-heartbeat is 10s, so it won't fire in time.
+        let msg = client.recv().await;
+        assert_eq!(msg, Some(SessionGatewayMessage::SubscriberRemoved));
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_multiple_subscribers() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (mut client_a, session_id) = MockSessionClient::create(gw.addr).await;
+        let mut client_b = MockSessionClient::subscribe(gw.addr, &session_id).await;
+        let mut client_c = MockSessionClient::subscribe(gw.addr, &session_id).await;
+
+        client_a.append(json!({"x": 1})).await;
+
+        let expected = Some(SessionGatewayMessage::Entry {
+            index: 0,
+            payload: json!({"x": 1}),
+        });
+        assert_eq!(client_a.recv().await, expected);
+        assert_eq!(client_b.recv().await, expected);
+        assert_eq!(client_c.recv().await, expected);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_disconnect_unsubscribes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (mut client_a, session_id) = MockSessionClient::create(gw.addr).await;
+        let mut client_b = MockSessionClient::subscribe(gw.addr, &session_id).await;
+
+        // B appends, both receive
+        client_b.append(json!({"before": true})).await;
+        let _ = client_a.recv().await;
+        let _ = client_b.recv().await;
+
+        // B disconnects
+        client_b.close().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // A appends — only A should receive
+        client_a.append(json!({"after": true})).await;
+
+        let entry = client_a.recv().await;
+        assert_eq!(
+            entry,
+            Some(SessionGatewayMessage::Entry {
+                index: 1,
+                payload: json!({"after": true}),
+            }),
+        );
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_handshake_timeout() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gw = TestGateway::start().await;
+
+        let mut client = MockSessionClient::connect_raw(gw.addr).await;
+
+        // Server handshake timeout is 5s. Connection should close.
+        let msg = client.recv().await;
+        assert_eq!(
+            msg, None,
+            "expected connection to close after handshake timeout"
+        );
+    })
+    .await
+    .expect("test timed out after 10 seconds");
 }
 
 // --- Transcription integration tests ---

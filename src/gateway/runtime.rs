@@ -7,11 +7,13 @@ use tokio::sync::{mpsc, oneshot};
 use crate::gateway::channel_registry::WorkerHandle;
 
 use super::channel_registry::{
-    ChannelRegistry, ClientStreamId, StreamHandle, SubscriberId, WorkerId,
+    ChannelRegistry, ClientStreamId, StreamHandle, SubscriberHandle, SubscriberId, WorkerId,
 };
 use super::effects::dispatch_job::DispatchJob;
 use super::effects::send_client_done::SendClientDone;
 use super::effects::send_client_error::SendClientError;
+use crate::protocol::SessionGatewayMessage;
+
 use super::kernel::Capability;
 use super::kernel::{Effect, Event, GatewayState, SessionId, Transition, reduce};
 use super::session;
@@ -64,7 +66,7 @@ pub struct StateSnapshot {
 type KernelEvent = Event<WorkerId, ClientStreamId, SubscriberId>;
 type KernelEffect = Effect<WorkerId, ClientStreamId, SubscriberId>;
 type ResolvedSId = (ClientStreamId, StreamHandle);
-type ResolvedSubId = (SubscriberId, StreamHandle);
+type ResolvedSubId = (SubscriberId, SubscriberHandle);
 type ResolvedEffect = Effect<WorkerHandle, ResolvedSId, ResolvedSubId>;
 
 #[derive(Debug)]
@@ -105,6 +107,27 @@ pub enum RuntimeCommand {
         after: usize,
         limit: usize,
         reply_tx: oneshot::Sender<Option<SessionEntriesQuery>>,
+    },
+    SessionCreate {
+        handle: SubscriberHandle,
+        reply_tx: oneshot::Sender<SubscriberId>,
+    },
+    SessionSubscribe {
+        session_id: SessionId,
+        handle: SubscriberHandle,
+        reply_tx: oneshot::Sender<SubscriberId>,
+    },
+    SessionAppendEntry {
+        session_id: SessionId,
+        payload: Value,
+    },
+    SessionSubscriberHeartbeat {
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
+    },
+    SessionUnsubscribe {
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
     },
 }
 
@@ -229,6 +252,69 @@ impl RuntimeHandle {
         .await?;
         reply_rx.await.map_err(|_| RuntimeSendError)
     }
+
+    pub async fn session_create(
+        &self,
+        handle: SubscriberHandle,
+    ) -> Result<SubscriberId, RegisterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.submit_command(RuntimeCommand::SessionCreate { handle, reply_tx })
+            .await?;
+        let subscriber_id = reply_rx.await?;
+        Ok(subscriber_id)
+    }
+
+    pub async fn session_subscribe(
+        &self,
+        session_id: SessionId,
+        handle: SubscriberHandle,
+    ) -> Result<SubscriberId, RegisterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.submit_command(RuntimeCommand::SessionSubscribe {
+            session_id,
+            handle,
+            reply_tx,
+        })
+        .await?;
+        let subscriber_id = reply_rx.await?;
+        Ok(subscriber_id)
+    }
+
+    pub async fn session_append_entry(
+        &self,
+        session_id: SessionId,
+        payload: Value,
+    ) -> Result<(), RuntimeSendError> {
+        self.submit_command(RuntimeCommand::SessionAppendEntry {
+            session_id,
+            payload,
+        })
+        .await
+    }
+
+    pub async fn session_subscriber_heartbeat(
+        &self,
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
+    ) -> Result<(), RuntimeSendError> {
+        self.submit_command(RuntimeCommand::SessionSubscriberHeartbeat {
+            session_id,
+            subscriber_id,
+        })
+        .await
+    }
+
+    pub async fn session_unsubscribe(
+        &self,
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
+    ) -> Result<(), RuntimeSendError> {
+        self.submit_command(RuntimeCommand::SessionUnsubscribe {
+            session_id,
+            subscriber_id,
+        })
+        .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -245,7 +331,7 @@ pub enum RegisterError {
 
 pub struct GatewayRuntime {
     state: GatewayState<WorkerId, ClientStreamId, SubscriberId>,
-    registry: ChannelRegistry<WorkerHandle, StreamHandle, StreamHandle>,
+    registry: ChannelRegistry<WorkerHandle, StreamHandle, SubscriberHandle>,
 }
 
 impl GatewayRuntime {
@@ -333,6 +419,71 @@ impl GatewayRuntime {
         let _ = reply_tx.send(stream_id);
 
         (self, Vec::new())
+    }
+
+    pub fn handle_session_create(
+        mut self,
+        handle: SubscriberHandle,
+        reply_tx: oneshot::Sender<SubscriberId>,
+    ) -> (Self, Vec<KernelEffect>) {
+        let subscriber_id = self.registry.register_subscriber(handle);
+        let _ = reply_tx.send(subscriber_id.clone());
+        self.apply_event(Event::SessionRequested { subscriber_id })
+    }
+
+    pub fn handle_session_subscribe(
+        mut self,
+        session_id: SessionId,
+        handle: SubscriberHandle,
+        reply_tx: oneshot::Sender<SubscriberId>,
+    ) -> (Self, Vec<KernelEffect>) {
+        let subscriber_id = self.registry.register_subscriber(handle);
+        let _ = reply_tx.send(subscriber_id.clone());
+        let tick = self.state.tick;
+        self.apply_event(Event::SessionEvent {
+            session_id,
+            event: session::Event::Subscribed {
+                subscriber_id,
+                tick,
+            },
+        })
+    }
+
+    pub fn handle_session_append_entry(
+        self,
+        session_id: SessionId,
+        payload: Value,
+    ) -> (Self, Vec<KernelEffect>) {
+        self.apply_event(Event::SessionEvent {
+            session_id,
+            event: session::Event::EntryAppended { payload },
+        })
+    }
+
+    pub fn handle_session_subscriber_heartbeat(
+        self,
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
+    ) -> (Self, Vec<KernelEffect>) {
+        let tick = self.state.tick;
+        self.apply_event(Event::SessionEvent {
+            session_id,
+            event: session::Event::SubscriberHeartbeat {
+                subscriber_id,
+                tick,
+            },
+        })
+    }
+
+    pub fn handle_session_unsubscribe(
+        self,
+        session_id: SessionId,
+        subscriber_id: SubscriberId,
+    ) -> (Self, Vec<KernelEffect>) {
+        self.apply_event(Event::SessionEvent {
+            session_id,
+            event: session::Event::Unsubscribed { subscriber_id },
+        })
     }
 
     fn resolve_effects(
@@ -522,6 +673,26 @@ impl GatewayRuntime {
                         let _ = reply_tx.send(result);
                         (self, Vec::new())
                     }
+                    RuntimeCommand::SessionCreate { handle, reply_tx } => {
+                        self.handle_session_create(handle, reply_tx)
+                    }
+                    RuntimeCommand::SessionSubscribe {
+                        session_id,
+                        handle,
+                        reply_tx,
+                    } => self.handle_session_subscribe(session_id, handle, reply_tx),
+                    RuntimeCommand::SessionAppendEntry {
+                        session_id,
+                        payload,
+                    } => self.handle_session_append_entry(session_id, payload),
+                    RuntimeCommand::SessionSubscriberHeartbeat {
+                        session_id,
+                        subscriber_id,
+                    } => self.handle_session_subscriber_heartbeat(session_id, subscriber_id),
+                    RuntimeCommand::SessionUnsubscribe {
+                        session_id,
+                        subscriber_id,
+                    } => self.handle_session_unsubscribe(session_id, subscriber_id),
                 },
                 RuntimeMessage::Event(event) => self.apply_event(event),
             };
@@ -600,12 +771,38 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                 Effect::SendClientError(e) => e.execute().await,
                 Effect::SendClientDone(e) => e.execute().await,
                 Effect::ProtocolViolation(e) => e.execute().await,
-                Effect::SessionCreated { .. } => {
-                    // No-op until session WS adapters are wired
+                Effect::SessionCreated {
+                    session_id,
+                    subscriber_id: (_, handle),
+                } => {
+                    let _ = handle
+                        .send(SessionGatewayMessage::Subscribed {
+                            session_id: session_id.0,
+                        })
+                        .await;
                 }
-                Effect::SessionEffect(_) => {
-                    // No-op until session adapters are wired
-                }
+                Effect::SessionEffect(session_effect) => match session_effect {
+                    session::Effect::NotifySubscribers {
+                        entry_index,
+                        payload,
+                        subscribers,
+                    } => {
+                        for (_, handle) in subscribers {
+                            let _ = handle
+                                .send(SessionGatewayMessage::Entry {
+                                    index: entry_index,
+                                    payload: payload.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    session::Effect::SubscriberRemoved {
+                        subscriber_id: (_, handle),
+                    } => {
+                        let _ = handle.send(SessionGatewayMessage::SubscriberRemoved).await;
+                        // handle is dropped here, closing the channel
+                    }
+                },
                 Effect::SessionExpired { .. } => {
                     // No-op until persistence adapters are wired
                 }

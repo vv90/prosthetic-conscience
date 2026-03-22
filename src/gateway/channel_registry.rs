@@ -20,6 +20,7 @@ pub struct SubscriberId(String);
 
 pub type WorkerHandle = oneshot::Sender<WorkerJob>;
 pub type StreamHandle = mpsc::Sender<StreamFrame>;
+pub type SubscriberHandle = mpsc::Sender<crate::protocol::SessionGatewayMessage>;
 
 // pub trait SendWorkerJob {
 //     fn send(self, job: WorkerJob) -> Result<(), WorkerJob>;

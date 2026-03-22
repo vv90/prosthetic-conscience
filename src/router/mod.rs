@@ -3,6 +3,7 @@ mod auth;
 mod chat_completions;
 mod response;
 mod session_entries;
+mod session_ws;
 pub mod state;
 mod ui;
 mod worker_ws_upgrade;
@@ -16,6 +17,7 @@ use self::audio_transcriptions::audio_transcriptions;
 use self::auth::require_auth;
 use self::chat_completions::chat_completions;
 use self::session_entries::get_entries;
+use self::session_ws::session_ws_upgrade;
 use self::ui::transcribe_ui;
 use self::worker_ws_upgrade::worker_ws_upgrade;
 
@@ -54,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/models", get(list_models))
+        .route("/v1/sessions", get(session_ws_upgrade))
         .route("/v1/sessions/{session_id}/entries", get(get_entries))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
