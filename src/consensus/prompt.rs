@@ -65,6 +65,10 @@ pub fn build_system_prompt(engine: &ConsensusEngine, config: &PromptConfig) -> S
         prompt,
         "- draft_resolve(claim_id, author, outcome): Propose resolution"
     );
+    let _ = writeln!(
+        prompt,
+        "- draft_comment(author, body, claim_id?): Draft a freeform comment"
+    );
     let _ = writeln!(prompt, "- show_drafts: See your pending drafts");
     let _ = writeln!(prompt, "- remove_draft(draft_id): Remove a draft");
     let _ = writeln!(
@@ -79,6 +83,10 @@ pub fn build_system_prompt(engine: &ConsensusEngine, config: &PromptConfig) -> S
     let _ = writeln!(
         prompt,
         "- preview_claim_detail(claim_id): Preview a claim with drafts applied"
+    );
+    let _ = writeln!(
+        prompt,
+        "- impact_analysis: Compare committed state with your current drafts"
     );
 
     // Guidelines

@@ -8,6 +8,10 @@ use prosthetic_conscience::client::response_assembler;
 use prosthetic_conscience::client::tool_loop;
 use prosthetic_conscience::client::tools::ToolRegistry;
 use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
+use prosthetic_conscience::consensus::engine::ConsensusEngine;
+use prosthetic_conscience::consensus::types::{ClaimId, ClaimKind, Entry};
+use prosthetic_conscience::consensus_cli::app::{AppConfig, ConsensusApp};
+use prosthetic_conscience::consensus_cli::llm::ConsensusLlm;
 use prosthetic_conscience::gateway::runtime::GatewayConfig;
 use prosthetic_conscience::protocol::Capability;
 use prosthetic_conscience::protocol::GatewayToWorker;
@@ -233,6 +237,39 @@ async fn session_handshake_timeout() {
     })
     .await
     .expect("test timed out after 10 seconds");
+}
+
+#[tokio::test]
+async fn consensus_app_join_bootstraps_from_existing_session() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let (mut client, session_id) = MockSessionClient::create(gw.addr).await;
+
+        let payload = serde_json::to_value(Entry::Claim {
+            claim_id: ClaimId("item1".into()),
+            author: "alice".into(),
+            body: "Authentication approach?".into(),
+            claim_kind: ClaimKind::Item,
+            parent_id: None,
+        })
+        .unwrap();
+        client.append(payload).await;
+        let _ = client.recv().await;
+
+        let config = AppConfig {
+            gateway_url: format!("http://{}", gw.addr),
+            auth_token: None,
+            model: "test".into(),
+            participant: "assistant".into(),
+        };
+        let app = ConsensusApp::join(config, session_id).await.unwrap();
+        let overview = app.overview();
+        assert_eq!(overview.total_claims, 1);
+        assert_eq!(overview.items.len(), 1);
+        assert_eq!(overview.items[0].id, ClaimId("item1".into()));
+    })
+    .await
+    .expect("test timed out after 5 seconds");
 }
 
 // --- Transcription integration tests ---
@@ -528,6 +565,111 @@ async fn tool_loop_executes_tool_and_re_requests() {
             messages.len(),
             messages
         );
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn consensus_llm_drafts_claim_via_tool_loop() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let mut worker = MockWorker::connect(gw.addr).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let llm = ConsensusLlm::new(
+            format!("http://{}", gw.addr),
+            None,
+            "test".into(),
+            "assistant".into(),
+        );
+
+        let loop_handle = tokio::spawn(async move {
+            let mut engine = ConsensusEngine::new();
+            let mut history = vec![json!({"role": "user", "content": "Draft a proposal to use JWT"})];
+            let msg = llm.run_turn(&mut engine, &mut history).await.unwrap();
+            (msg, history, engine.show_drafts().to_vec())
+        });
+
+        let job1 = worker.recv_job().await;
+        match &job1 {
+            GatewayToWorker::Job { payload, .. } => {
+                let tools = payload["tools"].as_array().unwrap();
+                let tool_names: Vec<&str> = tools
+                    .iter()
+                    .filter_map(|tool| tool["function"]["name"].as_str())
+                    .collect();
+                assert!(tool_names.contains(&"draft_claim"));
+                assert!(tool_names.contains(&"draft_comment"));
+                assert!(tool_names.contains(&"impact_analysis"));
+                assert!(!tool_names.contains(&"submit_drafts"));
+                assert!(!tool_names.contains(&"clear_drafts"));
+            }
+        }
+
+        worker
+            .send_chunk(json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_draft",
+                            "type": "function",
+                            "function": {
+                                "name": "draft_claim",
+                                "arguments": "{\"author\":\"assistant\",\"body\":\"Use JWT\",\"kind\":\"proposal\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }))
+            .await;
+        worker.send_end().await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let job2 = worker.recv_job().await;
+        match &job2 {
+            GatewayToWorker::Job { payload, .. } => {
+                let messages = payload["messages"].as_array().unwrap();
+                let tool_msg = messages.last().unwrap();
+                assert_eq!(tool_msg["role"], "tool");
+                assert_eq!(tool_msg["tool_call_id"], "call_draft");
+            }
+        }
+
+        worker
+            .send_chunk(json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": "I drafted a proposal for review."
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .await;
+        worker.send_end().await;
+
+        let (msg, _history, drafts) = loop_handle.await.unwrap();
+        assert_eq!(
+            msg.content,
+            Some("I drafted a proposal for review.".to_owned())
+        );
+        assert_eq!(drafts.len(), 1);
+        assert!(matches!(
+            &drafts[0].entry,
+            Entry::Claim {
+                author,
+                body,
+                claim_kind,
+                ..
+            } if author == "assistant" && body == "Use JWT" && *claim_kind == ClaimKind::Proposal
+        ));
     })
     .await
     .expect("test timed out after 5 seconds");

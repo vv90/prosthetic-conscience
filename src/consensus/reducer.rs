@@ -357,6 +357,7 @@ mod tests {
     #[test]
     fn comment_does_not_affect_state() {
         let state = replay(&[Entry::Comment {
+            claim_id: None,
             author: "dave".into(),
             body: "Interesting discussion".into(),
         }]);
@@ -567,6 +568,7 @@ mod tests {
                 ),
                 // Comments
                 prop::sample::select(AUTHORS).prop_map(|author| Entry::Comment {
+                    claim_id: None,
                     author: String::from(author),
                     body: "A comment".into(),
                 }),

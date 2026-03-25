@@ -36,6 +36,47 @@ pub enum EngineError {
     DraftNotFound(DraftId),
 }
 
+/// Summary of a newly introduced claim in impact analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactNewClaim {
+    pub claim_id: ClaimId,
+    pub body: String,
+    pub author: String,
+    pub kind: ClaimKind,
+    pub status: Option<EpistemicStatus>,
+}
+
+/// A before/after status transition caused by the current drafts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactStatusChange {
+    pub claim_id: ClaimId,
+    pub body: String,
+    pub before: Option<EpistemicStatus>,
+    pub after: Option<EpistemicStatus>,
+}
+
+/// Impact of applying the current drafts to the committed state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImpactAnalysis {
+    pub new_claims: Vec<ImpactNewClaim>,
+    pub status_changes: Vec<ImpactStatusChange>,
+}
+
+/// Mapping from a provisional draft claim id to its final committed id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClaimIdMapping {
+    pub provisional: ClaimId,
+    pub final_id: ClaimId,
+}
+
+/// Finalized draft entries ready for network submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SubmissionBundle {
+    pub draft_ids: Vec<DraftId>,
+    pub entries: Vec<Entry>,
+    pub claim_id_map: Vec<ClaimIdMapping>,
+}
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -174,6 +215,25 @@ impl ConsensusEngine {
         id
     }
 
+    /// Draft a freeform comment, optionally attached to a claim.
+    pub fn draft_comment(
+        &mut self,
+        author: String,
+        body: String,
+        claim_id: Option<ClaimId>,
+    ) -> DraftId {
+        let id = self.alloc_draft_id();
+        self.drafts.push(DraftEntry {
+            id,
+            entry: Entry::Comment {
+                claim_id,
+                author,
+                body,
+            },
+        });
+        id
+    }
+
     // -- Draft management ---------------------------------------------------
 
     /// All pending drafts, in creation order.
@@ -218,6 +278,63 @@ impl ConsensusEngine {
         render::claim_detail(&state, &statuses, claim_id)
     }
 
+    /// Compare committed state with committed + drafts.
+    pub fn impact_analysis(&self) -> ImpactAnalysis {
+        let (committed_state, committed_statuses) = Self::materialize(&self.log);
+        let merged = self.merged_entries();
+        let (preview_state, preview_statuses) = Self::materialize(&merged);
+        Self::build_impact_analysis(
+            &committed_state,
+            &committed_statuses,
+            &preview_state,
+            &preview_statuses,
+        )
+    }
+
+    /// Clone the current drafts into a finalized submission bundle.
+    ///
+    /// Draft claim ids are rewritten using `next_claim_id`, while references to
+    /// existing committed claim ids are preserved.
+    pub fn submission_bundle<F>(&self, mut next_claim_id: F) -> SubmissionBundle
+    where
+        F: FnMut() -> ClaimId,
+    {
+        let mut claim_id_map: HashMap<ClaimId, ClaimId> = HashMap::new();
+
+        for draft in &self.drafts {
+            if let Entry::Claim { claim_id, .. } = &draft.entry {
+                claim_id_map
+                    .entry(claim_id.clone())
+                    .or_insert_with(&mut next_claim_id);
+            }
+        }
+
+        let mut draft_ids = Vec::with_capacity(self.drafts.len());
+        let entries = self
+            .drafts
+            .iter()
+            .map(|draft| {
+                draft_ids.push(draft.id);
+                Self::rewrite_entry_claim_ids(&draft.entry, &claim_id_map)
+            })
+            .collect();
+
+        let mut claim_id_map: Vec<ClaimIdMapping> = claim_id_map
+            .into_iter()
+            .map(|(provisional, final_id)| ClaimIdMapping {
+                provisional,
+                final_id,
+            })
+            .collect();
+        claim_id_map.sort_by(|a, b| a.provisional.0.cmp(&b.provisional.0));
+
+        SubmissionBundle {
+            draft_ids,
+            entries,
+            claim_id_map,
+        }
+    }
+
     // -- Internal -----------------------------------------------------------
 
     fn alloc_draft_id(&mut self) -> DraftId {
@@ -241,6 +358,133 @@ impl ConsensusEngine {
         let labels = grounded_labelling(&graph);
         let statuses = compute_all(&state, &labels, &index);
         (state, statuses)
+    }
+
+    fn build_impact_analysis(
+        committed_state: &MaterializedState,
+        committed_statuses: &HashMap<ClaimId, EpistemicStatus>,
+        preview_state: &MaterializedState,
+        preview_statuses: &HashMap<ClaimId, EpistemicStatus>,
+    ) -> ImpactAnalysis {
+        let mut new_claims = Vec::new();
+        for (claim_id, claim) in &preview_state.claims {
+            if !committed_state.claims.contains_key(claim_id) {
+                new_claims.push(ImpactNewClaim {
+                    claim_id: claim_id.clone(),
+                    body: claim.body.clone(),
+                    author: claim.author.clone(),
+                    kind: claim.kind,
+                    status: preview_statuses.get(claim_id).copied(),
+                });
+            }
+        }
+        new_claims.sort_by(|a, b| a.claim_id.0.cmp(&b.claim_id.0));
+
+        let mut claim_ids: Vec<ClaimId> = committed_state
+            .claims
+            .keys()
+            .chain(preview_state.claims.keys())
+            .cloned()
+            .collect();
+        claim_ids.sort_by(|a, b| a.0.cmp(&b.0));
+        claim_ids.dedup_by(|a, b| a.0 == b.0);
+
+        let mut status_changes = Vec::new();
+        for claim_id in claim_ids {
+            if !committed_state.claims.contains_key(&claim_id) {
+                continue;
+            }
+
+            let before = committed_statuses.get(&claim_id).copied();
+            let after = preview_statuses.get(&claim_id).copied();
+            if before != after {
+                let body = preview_state
+                    .claims
+                    .get(&claim_id)
+                    .or_else(|| committed_state.claims.get(&claim_id))
+                    .map(|claim| claim.body.clone())
+                    .unwrap_or_default();
+                status_changes.push(ImpactStatusChange {
+                    claim_id,
+                    body,
+                    before,
+                    after,
+                });
+            }
+        }
+        status_changes.sort_by(|a, b| a.claim_id.0.cmp(&b.claim_id.0));
+
+        ImpactAnalysis {
+            new_claims,
+            status_changes,
+        }
+    }
+
+    fn rewrite_claim_id(claim_id: &ClaimId, claim_id_map: &HashMap<ClaimId, ClaimId>) -> ClaimId {
+        claim_id_map
+            .get(claim_id)
+            .cloned()
+            .unwrap_or_else(|| claim_id.clone())
+    }
+
+    fn rewrite_entry_claim_ids(entry: &Entry, claim_id_map: &HashMap<ClaimId, ClaimId>) -> Entry {
+        match entry {
+            Entry::Claim {
+                claim_id,
+                author,
+                body,
+                claim_kind,
+                parent_id,
+            } => Entry::Claim {
+                claim_id: Self::rewrite_claim_id(claim_id, claim_id_map),
+                author: author.clone(),
+                body: body.clone(),
+                claim_kind: *claim_kind,
+                parent_id: parent_id
+                    .as_ref()
+                    .map(|id| Self::rewrite_claim_id(id, claim_id_map)),
+            },
+            Entry::Relation {
+                source_id,
+                target_id,
+                kind,
+                author,
+            } => Entry::Relation {
+                source_id: Self::rewrite_claim_id(source_id, claim_id_map),
+                target_id: Self::rewrite_claim_id(target_id, claim_id_map),
+                kind: *kind,
+                author: author.clone(),
+            },
+            Entry::Stance {
+                target_id,
+                author,
+                position,
+            } => Entry::Stance {
+                target_id: Self::rewrite_claim_id(target_id, claim_id_map),
+                author: author.clone(),
+                position: *position,
+            },
+            Entry::Resolve {
+                claim_id,
+                author,
+                outcome,
+            } => Entry::Resolve {
+                claim_id: Self::rewrite_claim_id(claim_id, claim_id_map),
+                author: author.clone(),
+                outcome: *outcome,
+            },
+            Entry::Comment {
+                claim_id,
+                author,
+                body,
+            } => Entry::Comment {
+                claim_id: claim_id
+                    .as_ref()
+                    .map(|id| Self::rewrite_claim_id(id, claim_id_map)),
+                author: author.clone(),
+                body: body.clone(),
+            },
+        }
     }
 }
 
@@ -267,6 +511,7 @@ mod tests {
         });
         assert_eq!(engine.log().len(), 1);
         engine.append(Entry::Comment {
+            claim_id: None,
             author: "bob".into(),
             body: "Interesting".into(),
         });
@@ -378,6 +623,25 @@ mod tests {
         engine.draft_stance(ClaimId("c1".into()), "bob".into(), Position::Consent);
         engine.draft_resolve(ClaimId("c1".into()), "alice".into(), Outcome::Accepted);
         assert_eq!(engine.show_drafts().len(), 3);
+    }
+
+    #[test]
+    fn draft_comment_adds_comment_entry() {
+        let mut engine = ConsensusEngine::new();
+        engine.draft_comment(
+            "alice".into(),
+            "Needs more evidence".into(),
+            Some(ClaimId("c1".into())),
+        );
+        assert_eq!(engine.show_drafts().len(), 1);
+        assert!(matches!(
+            &engine.show_drafts()[0].entry,
+            Entry::Comment {
+                claim_id: Some(claim_id),
+                author,
+                body,
+            } if claim_id.0 == "c1" && author == "alice" && body == "Needs more evidence"
+        ));
     }
 
     #[test]
@@ -499,6 +763,109 @@ mod tests {
 
         let detail = engine.preview_claim_detail(&ClaimId("c1".into())).unwrap();
         assert_eq!(detail.attacked_by.len(), 1);
+    }
+
+    #[test]
+    fn impact_analysis_reports_new_claims_and_status_changes() {
+        let mut engine = ConsensusEngine::new();
+        engine.append(Entry::Claim {
+            claim_id: ClaimId("c1".into()),
+            author: "alice".into(),
+            body: "Target".into(),
+            claim_kind: ClaimKind::Fact,
+            parent_id: None,
+        });
+        engine.append(Entry::Claim {
+            claim_id: ClaimId("c2".into()),
+            author: "bob".into(),
+            body: "Attacker".into(),
+            claim_kind: ClaimKind::Fact,
+            parent_id: None,
+        });
+
+        let draft_id = engine.draft_claim("carol".into(), "New fact".into(), ClaimKind::Fact, None);
+        let draft_claim_id = match &engine.show_drafts()[0].entry {
+            Entry::Claim { claim_id, .. } => claim_id.clone(),
+            other => panic!("expected claim draft, got {other:?}"),
+        };
+        assert_eq!(draft_id, DraftId(0));
+        engine.draft_relation(
+            ClaimId("c2".into()),
+            ClaimId("c1".into()),
+            RelationKind::Attacks,
+            "bob".into(),
+        );
+
+        let impact = engine.impact_analysis();
+        assert_eq!(impact.new_claims.len(), 1);
+        assert_eq!(impact.new_claims[0].claim_id, draft_claim_id);
+        assert_eq!(impact.status_changes.len(), 1);
+        assert_eq!(impact.status_changes[0].claim_id, ClaimId("c1".into()));
+        assert_eq!(
+            impact.status_changes[0].before,
+            Some(EpistemicStatus::Unexamined)
+        );
+        assert_eq!(
+            impact.status_changes[0].after,
+            Some(EpistemicStatus::Defeated)
+        );
+    }
+
+    #[test]
+    fn submission_bundle_rewrites_provisional_ids_consistently() {
+        let mut engine = ConsensusEngine::new();
+        engine.append(Entry::Claim {
+            claim_id: ClaimId("item1".into()),
+            author: "alice".into(),
+            body: "What should we do?".into(),
+            claim_kind: ClaimKind::Item,
+            parent_id: None,
+        });
+        let draft_claim_id = engine.draft_claim(
+            "bob".into(),
+            "Use JWT".into(),
+            ClaimKind::Proposal,
+            Some(ClaimId("item1".into())),
+        );
+        let provisional = match engine
+            .show_drafts()
+            .iter()
+            .find(|draft| draft.id == draft_claim_id)
+            .map(|draft| &draft.entry)
+            .unwrap()
+        {
+            Entry::Claim { claim_id, .. } => claim_id.clone(),
+            other => panic!("expected claim draft, got {other:?}"),
+        };
+        engine.draft_stance(provisional.clone(), "carol".into(), Position::Consent);
+        engine.draft_comment(
+            "dave".into(),
+            "Looks good".into(),
+            Some(provisional.clone()),
+        );
+
+        let mut ids = vec!["final-1", "final-2"].into_iter();
+        let bundle = engine.submission_bundle(|| ClaimId(ids.next().unwrap().into()));
+
+        assert_eq!(bundle.claim_id_map.len(), 1);
+        assert_eq!(bundle.claim_id_map[0].provisional, provisional);
+        assert_eq!(bundle.claim_id_map[0].final_id, ClaimId("final-1".into()));
+        assert_eq!(bundle.entries.len(), 3);
+        assert!(matches!(
+            &bundle.entries[0],
+            Entry::Claim { claim_id, parent_id, .. }
+                if *claim_id == ClaimId("final-1".into())
+                && *parent_id == Some(ClaimId("item1".into()))
+        ));
+        assert!(matches!(
+            &bundle.entries[1],
+            Entry::Stance { target_id, .. } if *target_id == ClaimId("final-1".into())
+        ));
+        assert!(matches!(
+            &bundle.entries[2],
+            Entry::Comment { claim_id, .. }
+                if *claim_id == Some(ClaimId("final-1".into()))
+        ));
     }
 
     // -- Integration tests --------------------------------------------------

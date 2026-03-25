@@ -185,6 +185,14 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
             Ok(json!({ "draft_id": draft_id }))
         }
 
+        "draft_comment" => {
+            let author = require_str(&args, "author")?;
+            let body = require_str(&args, "body")?;
+            let claim_id = optional_str(&args, "claim_id").map(|s| ClaimId(s.to_owned()));
+            let draft_id = engine.draft_comment(author.to_owned(), body.to_owned(), claim_id);
+            Ok(json!({ "draft_id": draft_id }))
+        }
+
         // -- Draft management --
         "show_drafts" => Ok(to_json(&engine.show_drafts())),
 
@@ -215,6 +223,8 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
                 &engine.preview_claim_detail(&ClaimId(id.to_owned())),
             ))
         }
+
+        "impact_analysis" => Ok(to_json(&engine.impact_analysis())),
 
         _ => Err(ToolError::UnknownTool(tool.to_owned())),
     }
@@ -306,6 +316,19 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "draft_comment",
+            description: "Draft a freeform comment, optionally attached to a specific claim.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "author": {"type": "string", "description": "Author of the comment"},
+                    "body": {"type": "string", "description": "Comment text"},
+                    "claim_id": {"type": "string", "description": "Optional related claim identifier"}
+                },
+                "required": ["author", "body"]
+            }),
+        },
+        ToolDef {
             name: "show_drafts",
             description: "Show all pending draft entries that have not yet been submitted.",
             parameters: empty_params(),
@@ -341,7 +364,20 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             description: "Preview a claim's detail as it would look if all current drafts were submitted.",
             parameters: claim_id_param(),
         },
+        ToolDef {
+            name: "impact_analysis",
+            description: "Compare the current committed state with the state produced by applying all current drafts.",
+            parameters: empty_params(),
+        },
     ]
+}
+
+/// Tool definitions safe to advertise to the model in the terminal client.
+pub fn llm_tool_definitions() -> Vec<ToolDef> {
+    tool_definitions()
+        .into_iter()
+        .filter(|def| !matches!(def.name, "submit_drafts" | "clear_drafts"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -444,6 +480,18 @@ mod tests {
     }
 
     #[test]
+    fn draft_comment() {
+        let mut engine = ConsensusEngine::new();
+        let result = dispatch(
+            &mut engine,
+            "draft_comment",
+            json!({"author": "alice", "body": "Needs more evidence", "claim_id": "c1"}),
+        )
+        .unwrap();
+        assert!(result["draft_id"].is_number());
+    }
+
+    #[test]
     fn show_drafts_returns_array() {
         let mut engine = ConsensusEngine::new();
         dispatch(
@@ -533,15 +581,54 @@ mod tests {
     }
 
     #[test]
+    fn impact_analysis_reports_changes() {
+        let mut engine = ConsensusEngine::new();
+        engine.append(super::super::types::Entry::Claim {
+            claim_id: ClaimId("c1".into()),
+            author: "alice".into(),
+            body: "Target".into(),
+            claim_kind: ClaimKind::Fact,
+            parent_id: None,
+        });
+        engine.append(super::super::types::Entry::Claim {
+            claim_id: ClaimId("c2".into()),
+            author: "bob".into(),
+            body: "Attacker".into(),
+            claim_kind: ClaimKind::Fact,
+            parent_id: None,
+        });
+        dispatch(
+            &mut engine,
+            "draft_relation",
+            json!({"source_id": "c2", "target_id": "c1", "kind": "attacks", "author": "bob"}),
+        )
+        .unwrap();
+
+        let result = dispatch(&mut engine, "impact_analysis", empty()).unwrap();
+        assert_eq!(result["status_changes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["status_changes"][0]["claim_id"], "c1");
+    }
+
+    #[test]
     fn tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 12);
+        assert_eq!(defs.len(), 14);
         // All have non-empty names and descriptions
         for def in &defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
             assert!(def.parameters.is_object());
         }
+    }
+
+    #[test]
+    fn llm_tool_definitions_exclude_submit_and_clear() {
+        let defs = llm_tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|def| def.name).collect();
+        assert!(!names.contains(&"submit_drafts"));
+        assert!(!names.contains(&"clear_drafts"));
+        assert!(names.contains(&"draft_comment"));
+        assert!(names.contains(&"remove_draft"));
     }
 
     #[test]

@@ -5,9 +5,10 @@
 
 use std::fmt::Write;
 
+use super::engine::{DraftEntry, ImpactAnalysis};
 use super::render::{AttentionSignal, ClaimDetail, ClaimSummary, OverviewData};
 use super::status::EpistemicStatus;
-use super::types::{Outcome, Position};
+use super::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -180,6 +181,67 @@ pub fn format_claim_detail(detail: &ClaimDetail) -> String {
     out
 }
 
+/// Format the current draft buffer for terminal display.
+pub fn format_drafts(drafts: &[DraftEntry]) -> String {
+    if drafts.is_empty() {
+        return String::from("Pending drafts: none");
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Pending drafts: {}", drafts.len());
+    for draft in drafts {
+        let _ = writeln!(out, "  {}", format_draft_entry(draft));
+    }
+    out
+}
+
+/// Format the current impact analysis for terminal display.
+pub fn format_impact_analysis(impact: &ImpactAnalysis) -> String {
+    let mut out = String::new();
+
+    if impact.new_claims.is_empty() && impact.status_changes.is_empty() {
+        return String::from("Impact: no structural changes");
+    }
+
+    let _ = writeln!(
+        out,
+        "Impact: {} new claims, {} status changes",
+        impact.new_claims.len(),
+        impact.status_changes.len(),
+    );
+
+    if !impact.new_claims.is_empty() {
+        let _ = writeln!(out, "New claims:");
+        for claim in &impact.new_claims {
+            let status = claim.status.map(format_status).unwrap_or("unknown");
+            let _ = writeln!(
+                out,
+                "  [{}] \"{}\" by {} — {} ({})",
+                claim.claim_id.0,
+                claim.body,
+                claim.author,
+                format_kind(claim.kind),
+                status
+            );
+        }
+    }
+
+    if !impact.status_changes.is_empty() {
+        let _ = writeln!(out, "Status changes:");
+        for change in &impact.status_changes {
+            let before = change.before.map(format_status).unwrap_or("none");
+            let after = change.after.map(format_status).unwrap_or("resolved");
+            let _ = writeln!(
+                out,
+                "  [{}] \"{}\" — {} -> {}",
+                change.claim_id.0, change.body, before, after
+            );
+        }
+    }
+
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -198,6 +260,81 @@ fn format_claim_oneliner(c: &ClaimSummary) -> String {
             "[{}] \"{}\" by {} — {} ({})",
             c.id.0, c.body, c.author, status_str, stance_str
         )
+    }
+}
+
+fn format_draft_entry(draft: &DraftEntry) -> String {
+    match &draft.entry {
+        Entry::Claim {
+            claim_id,
+            body,
+            author,
+            claim_kind,
+            parent_id,
+        } => {
+            let parent = parent_id
+                .as_ref()
+                .map(|id| format!(" parent={}", id.0))
+                .unwrap_or_default();
+            format!(
+                "#{} claim [{}] \"{}\" by {} ({}){}",
+                draft.id.0,
+                claim_id.0,
+                body,
+                author,
+                format_kind(*claim_kind),
+                parent
+            )
+        }
+        Entry::Relation {
+            source_id,
+            target_id,
+            kind,
+            author,
+        } => format!(
+            "#{} relation {} {} {} by {}",
+            draft.id.0,
+            source_id.0,
+            format_relation_kind(*kind),
+            target_id.0,
+            author
+        ),
+        Entry::Stance {
+            target_id,
+            author,
+            position,
+        } => format!(
+            "#{} stance {} on {} by {}",
+            draft.id.0,
+            format_position(*position),
+            target_id.0,
+            author
+        ),
+        Entry::Resolve {
+            claim_id,
+            author,
+            outcome,
+        } => format!(
+            "#{} resolve {} as {} by {}",
+            draft.id.0,
+            claim_id.0,
+            format_outcome(*outcome),
+            author
+        ),
+        Entry::Comment {
+            claim_id,
+            author,
+            body,
+        } => {
+            let target = claim_id
+                .as_ref()
+                .map(|id| format!(" on {}", id.0))
+                .unwrap_or_default();
+            format!(
+                "#{} comment{} by {} — \"{}\"",
+                draft.id.0, target, author, body
+            )
+        }
     }
 }
 
@@ -236,12 +373,19 @@ fn format_position(pos: Position) -> &'static str {
 
 fn format_kind(kind: super::types::ClaimKind) -> &'static str {
     match kind {
-        super::types::ClaimKind::Item => "item",
-        super::types::ClaimKind::Proposal => "proposal",
-        super::types::ClaimKind::Fact => "fact",
-        super::types::ClaimKind::Conditional => "conditional",
-        super::types::ClaimKind::Value => "value",
-        super::types::ClaimKind::Reference => "reference",
+        ClaimKind::Item => "item",
+        ClaimKind::Proposal => "proposal",
+        ClaimKind::Fact => "fact",
+        ClaimKind::Conditional => "conditional",
+        ClaimKind::Value => "value",
+        ClaimKind::Reference => "reference",
+    }
+}
+
+fn format_relation_kind(kind: RelationKind) -> &'static str {
+    match kind {
+        RelationKind::Attacks => "attacks",
+        RelationKind::Supports => "supports",
     }
 }
 

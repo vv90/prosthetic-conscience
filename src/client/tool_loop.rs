@@ -5,7 +5,9 @@
 use serde_json::{Value, json};
 
 use super::gateway_client::{ClientError, GatewayClient};
-use super::response_assembler::{self, AssemblerError, CompletedMessage};
+use super::response_assembler::{
+    self, AssemblerError, CompletedMessage, assistant_message_value, tool_result_message,
+};
 use super::tools::{ToolError, ToolRegistry};
 
 #[derive(Debug, thiserror::Error)]
@@ -18,49 +20,6 @@ pub enum ToolLoopError {
     Tool(#[from] ToolError),
     #[error("max tool rounds ({max}) exceeded")]
     MaxRoundsExceeded { max: usize },
-}
-
-/// Build the JSON representation of an assistant message for conversation history.
-///
-/// If the message has tool calls, they are included so the model sees its own
-/// prior tool calls when processing the follow-up request.
-fn assistant_message_value(msg: &CompletedMessage) -> Value {
-    if msg.tool_calls.is_empty() {
-        json!({
-            "role": "assistant",
-            "content": msg.content.as_deref().unwrap_or(""),
-        })
-    } else {
-        let tool_calls: Vec<Value> = msg
-            .tool_calls
-            .iter()
-            .map(|tc| {
-                json!({
-                    "id": tc.id,
-                    "type": tc.call_type,
-                    "function": {
-                        "name": tc.function_name,
-                        "arguments": tc.arguments_json,
-                    }
-                })
-            })
-            .collect();
-
-        json!({
-            "role": "assistant",
-            "content": msg.content.as_deref(),
-            "tool_calls": tool_calls,
-        })
-    }
-}
-
-/// Build a tool result message for conversation history.
-fn tool_result_message(tool_call_id: &str, content: &str) -> Value {
-    json!({
-        "role": "tool",
-        "tool_call_id": tool_call_id,
-        "content": content,
-    })
 }
 
 /// Run the tool use loop: send a chat request, detect tool calls, execute

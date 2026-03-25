@@ -18,7 +18,7 @@ Entry types (`types.rs`), log replay (`reducer.rs`), graph extraction (`to_graph
 
 `status.rs` combining solver labels + stances → 5-category status (Established, Unexamined, Contested, Defeated, Unresolved). 11 unit + 1 integration + 5 property = 17 tests.
 
-### Phase 4: Consensus engine and structured rendering
+### ~~Phase 4: Consensus engine and structured rendering~~ (done)
 
 The engine is the stateful core that owns the log, materialized state, solver results, and draft buffer. Rendering returns structured types for both UI and LLM consumption.
 
@@ -31,15 +31,34 @@ The engine is the stateful core that owns the log, materialized state, solver re
 7. Draft buffer: `add_draft`, `edit_draft`, `remove_draft`, `show_drafts`, `submit_drafts`.
 8. Impact analysis: run solver on current state + hypothetical draft entries, diff results.
 
-### Phase 5: Terminal prototype binary
+Additional engine features added during Phase 5:
+
+- `draft_comment`: draft freeform `Comment` entries (optionally attached to a claim).
+- `impact_analysis()`: compare committed state with committed + drafts, report new claims and status changes.
+- `submission_bundle()`: finalize drafts into entries with provisional→final claim ID rewriting.
+- `Comment` entry type extended with optional `claim_id` field (backward-compatible, `skip_serializing_if`).
+- `llm_tool_definitions()`: filtered tool list excluding `submit_drafts` and `clear_drafts` for LLM safety.
+- `format_drafts()`, `format_impact_analysis()`: text rendering for draft buffer and impact diff.
+
+### ~~Phase 5: Terminal prototype binary~~ (done)
 
 Separate binary (`pc-consensus`), not an extension of `pc-client`. Uses the engine directly.
 
-9. Binary skeleton: session WS subscription + LLM tool loop.
-10. Session sync: subscribe to session log, feed entries through engine's `append_entry`.
-11. LLM system prompt: inject overview rendering as context before each turn.
-12. Tool dispatch: LLM calls engine methods via tool interface (query, draft, submit).
-13. Draft review cycle: LLM drafts entries, participant reviews in conversation, explicit submit.
+9. Binary skeleton: `src/bin/pc-consensus.rs` with clap arg parsing (`--gateway-url`, `--auth-token`, `--model`, `--participant`, `create`/`join` subcommands).
+10. Session sync: `src/consensus_cli/session.rs` — WS client with create/join handshake, `SessionEvent` stream, reconnect with exponential backoff, paginated `fetch_entries` for catch-up via `GET /v1/sessions/:id/entries`.
+11. LLM system prompt: rebuilt on every turn with current overview, pending drafts, impact analysis, and filtered tool list. LLM explicitly told only the human can commit drafts.
+12. Tool dispatch: LLM calls engine methods via `consensus::tools::dispatch()`. Tool errors returned as tool result messages (not fatal). Invalid JSON arguments reported back to LLM for self-correction.
+13. Draft review cycle: LLM drafts entries, participant reviews via `/drafts` and `/submit` commands. Submission requires explicit `y` confirmation. Submissions tracked through reconnects via `PendingSubmission` state machine.
+
+Shared infrastructure extracted during Phase 5:
+
+- `src/chat_gateway/` module: `GatewayClient` (HTTP/SSE) and `response_assembler` (delta chunk assembly) extracted from `src/client/`. Shared by both `pc-client` and `pc-consensus`. `assistant_message_value` and `tool_result_message` helpers live here.
+- `src/client/gateway_client.rs` and `src/client/response_assembler.rs` are now re-export shims (`pub use crate::chat_gateway::*`) for backward compatibility with `pc-client` and existing tests.
+
+Outstanding issues:
+
+- **WS heartbeat**: `session.rs` `connected_loop` has no ping/pong or application-level heartbeat tick. Dead TCP connections (NAT timeout, network partition) won't be detected until the next send fails. Server-side auto-heartbeat keeps the kernel subscriber alive while the TCP connection is healthy, but silent failures can leave the client thinking it's connected for an extended period.
+- **Conversation history truncation**: LLM `history` grows without bound across turns. Needs configurable max context size with older messages dropped (system prompt is rebuilt fresh each turn so it's always current).
 
 ### Phase 6: Crate extraction and WASM target
 

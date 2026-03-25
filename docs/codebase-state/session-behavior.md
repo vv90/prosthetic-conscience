@@ -155,8 +155,20 @@ Both the parent kernel's unknown-session cleanup and the P14 test use explicit m
 
 A similar (less severe) issue exists for chat streams: if `register_stream` succeeds but the subsequent `http_chat_requested` command fails (runtime channel closed), the stream handle is orphaned in the registry. The kernel never heard about it, so no `SendClientDone` / `take_stream` will clean it up. In practice this only occurs during runtime shutdown (channel closed), so the registry is about to be dropped anyway. Noted for completeness.
 
+## Client-side session consumer
+
+`src/consensus_cli/session.rs` implements a WS session client (`SessionClient`) used by the `pc-consensus` binary. It connects to `/v1/sessions`, performs the Create/Subscribe handshake, and exposes an async `SessionEvent` stream (Entry, Disconnected, Reconnected, Warning). Uses `tokio_tungstenite` for WS transport.
+
+Key behaviors:
+
+- **Reconnect with backoff**: on WS disconnect, the background task reconnects with exponential backoff (1s → 30s cap). Commands received during disconnect get `SessionError::Disconnected`.
+- **Catch-up via HTTP**: after connect/reconnect, the app fetches missing entries via `GET /v1/sessions/:id/entries?after={next_index}&limit=1000` and replays them through the consensus engine.
+- **Out-of-order buffering**: entries arriving out of order (index > next_index) are buffered in a `BTreeMap` and drained when the gap is filled.
+- **No heartbeat yet**: the client does not send WS ping/pong or application-level heartbeat messages. Dead connections are only detected on the next send attempt.
+
 ## Not yet implemented
 
 - `SessionExpired` effect executor (resolve done as pass-through, spawn is no-op stub — persistence adapters not yet wired)
 - Session entry replay on subscribe (new subscriber gets no history)
 - Cursor-based read improvements (adapter concern)
+- Client-side WS heartbeat (ping/pong + application-level heartbeat tick)

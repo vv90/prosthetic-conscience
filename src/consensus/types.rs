@@ -106,6 +106,8 @@ pub enum Entry {
         outcome: Outcome,
     },
     Comment {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claim_id: Option<ClaimId>,
         author: String,
         body: String,
     },
@@ -283,6 +285,30 @@ mod tests {
     }
 
     #[test]
+    fn comment_entry_with_claim_reference_round_trip() {
+        let entry = Entry::Comment {
+            claim_id: Some(ClaimId("c1".into())),
+            author: "alice".into(),
+            body: "Needs more evidence".into(),
+        };
+        let json_str = serde_json::to_string(&entry).unwrap();
+        let parsed: Entry = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn comment_entry_omits_optional_claim_id() {
+        let entry = Entry::Comment {
+            claim_id: None,
+            author: "alice".into(),
+            body: "General note".into(),
+        };
+        let v: Value = serde_json::to_value(&entry).unwrap();
+        assert!(v.get("claim_id").is_none());
+        assert_eq!(v["type"], "comment");
+    }
+
+    #[test]
     fn resolve_entry_round_trip() {
         let entry = Entry::Resolve {
             claim_id: ClaimId("c1".into()),
@@ -309,6 +335,7 @@ mod tests {
     #[test]
     fn comment_entry_round_trip() {
         let entry = Entry::Comment {
+            claim_id: None,
             author: "dave".into(),
             body: "I think we need more context".into(),
         };
@@ -320,6 +347,7 @@ mod tests {
     #[test]
     fn comment_entry_json_shape() {
         let entry = Entry::Comment {
+            claim_id: None,
             author: "dave".into(),
             body: "Good point".into(),
         };
