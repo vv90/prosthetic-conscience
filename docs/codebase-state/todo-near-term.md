@@ -1,45 +1,60 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-24
+Snapshot date: 2026-03-25
 
 ## Consensus protocol implementation
 
 Goal: implement the client-side consensus protocol described in `docs/consensus-protocol-design.md`. The protocol runs entirely client-side — the gateway remains content-opaque. Implementation lives in `src/consensus/`.
 
-### Phase 1: Solver (pure graph computation)
+### ~~Phase 1: Solver~~ (done)
 
-No entry types needed. The solver works on an abstract graph: node IDs and directed edges with a kind (attack/support).
+Grounded semantics fixpoint in `src/consensus/solver.rs`. 14 unit tests + 7 property tests = 21 tests.
 
-1. Grounded semantics fixpoint algorithm: iteratively label nodes as IN/OUT/UNDEC.
-2. Property tests: idempotency, unattacked nodes are IN, attacked-by-IN is OUT, fixpoint stability, empty graph, single-node graph, mutual attack cycles.
-3. Support edge propagation (BAF extension): decide and implement semantics for support edges alongside attacks.
+### ~~Phase 2: Reducer~~ (done)
 
-### Phase 2: Reducer (log replay → graph)
+Entry types (`types.rs`), log replay (`reducer.rs`), graph extraction (`to_graph()`). Serde-tagged `Entry` enum with `Claim`, `Relation`, `Stance`, `Resolve`, `Comment`. 17 serde + 20 unit + 5 property = 42 tests.
 
-Introduce entry types as the reducer needs them. Minimal set to produce a graph the solver can consume.
+### ~~Phase 3: Epistemic status~~ (done)
 
-4. Entry types: `claim` (claim_id, author, body), `relation` (source_id, target_id, kind, author), `stance` (target_id, author, position). Minimal position vocabulary.
-5. Pure reducer: fold over `Vec<Entry>` → `MaterializedState` containing the argumentation graph + stance maps.
-6. Property tests: deterministic replay, monotonic claim growth, stance supersession, unknown-ID handling.
+`status.rs` combining solver labels + stances → 5-category status (Established, Unexamined, Contested, Defeated, Unresolved). 11 unit + 1 integration + 5 property = 17 tests.
 
-### Phase 3: Epistemic status
+### Phase 4: Consensus engine and structured rendering
 
-7. Combine solver output (IN/OUT/UNDEC) + stance coverage → epistemic status per claim (established, unexamined, contested, defeated, unresolved).
-8. Tests for all five status categories and edge cases (e.g., IN with no stances vs IN with mixed stances).
+The engine is the stateful core that owns the log, materialized state, solver results, and draft buffer. Rendering returns structured types for both UI and LLM consumption.
 
-### Phase 4: Resolve, amend, impact analysis
+1. Structured render types: `OverviewData`, `ClaimDetail`, `AttentionSignal` — serde-serializable for WASM↔JS boundary.
+2. `ConsensusEngine` struct: owns log + state + drafts, provides query/draft/submit methods.
+3. Overview rendering: claim counts, open items, proposals with statuses, attention signals.
+4. Claim detail rendering: body, author, status, stances, relations in/out.
+5. Attention rendering: participant-specific prioritized list (unexamined, unstanced, bottlenecks).
+6. Text formatting layer: `format.rs` — renders structured types to text for terminal/LLM.
+7. Draft buffer: `add_draft`, `edit_draft`, `remove_draft`, `show_drafts`, `submit_drafts`.
+8. Impact analysis: run solver on current state + hypothetical draft entries, diff results.
 
-Add entry types incrementally:
+### Phase 5: Terminal prototype binary
 
-9. `resolve` entry: close a proposal, reducer removes it from active graph. Tests for all outcome variants.
-10. `amend` entry: update claim body, verify solver results recompute correctly. Tests for stance preservation.
-11. Impact analysis: run solver on `current_graph + hypothetical_entries`, diff results. Tests for status change detection.
+Separate binary (`pc-consensus`), not an extension of `pc-client`. Uses the engine directly.
 
-### Phase 5: LLM harness
+9. Binary skeleton: session WS subscription + LLM tool loop.
+10. Session sync: subscribe to session log, feed entries through engine's `append_entry`.
+11. LLM system prompt: inject overview rendering as context before each turn.
+12. Tool dispatch: LLM calls engine methods via tool interface (query, draft, submit).
+13. Draft review cycle: LLM drafts entries, participant reviews in conversation, explicit submit.
 
-12. Entry drafting: natural language → structured entry candidates.
-13. Attention routing: surface unexamined claims, solver-detected bottlenecks, stance coverage gaps.
-14. Conversational interface: manage draft review/edit/submit cycle with participant.
+### Phase 6: Crate extraction and WASM target
+
+The consensus module has zero non-WASM dependencies (only `std::collections`, `serde`). Extract before UI work.
+
+14. Extract `src/consensus/` → `crates/consensus/` as a standalone workspace crate.
+15. Verify `cargo build --target wasm32-unknown-unknown` compiles clean.
+16. Add `wasm-bindgen` exports for engine methods (for future JS/TS UI).
+
+### Deferred
+
+- `amend` entry type: add when needed (body-text update, stance invalidation semantics TBD).
+- BAF support edge propagation: `supported_by` field exists in solver graph, semantics undecided.
+- Incremental state update: full replay is sufficient at deliberation scale.
+- Web UI: browser-side WASM module + JS for WS/LLM/DOM. Architecture decided, implementation deferred.
 
 ## Integration testing (remaining)
 

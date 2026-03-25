@@ -46,7 +46,7 @@ pub enum RelationKind {
 /// A participant's discrete position on a proposal.
 ///
 /// Derived from Sociocracy + Fist-to-Five + Kaner gradients of agreement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Position {
     Block,
@@ -116,7 +116,7 @@ pub enum Entry {
 // ---------------------------------------------------------------------------
 
 /// Resolution status of a claim (set by a `resolve` entry).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Resolution {
     pub outcome: Outcome,
     pub author: String,

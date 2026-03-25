@@ -10,7 +10,8 @@ use super::solver::Label;
 use super::types::{ClaimId, MaterializedState, StanceState};
 
 /// The epistemic status of a claim, combining solver output with stance coverage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EpistemicStatus {
     /// IN + accepted by participants (no negative stances).
     Established,
