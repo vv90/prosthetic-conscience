@@ -1,6 +1,9 @@
+pub mod engine;
 pub mod format;
+pub mod prompt;
 pub mod reducer;
 pub mod render;
 pub mod solver;
 pub mod status;
+pub mod tools;
 pub mod types;
