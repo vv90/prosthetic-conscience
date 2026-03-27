@@ -9,9 +9,12 @@ use prosthetic_conscience::client::tool_loop;
 use prosthetic_conscience::client::tools::ToolRegistry;
 use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
 use prosthetic_conscience::consensus::engine::ConsensusEngine;
+use prosthetic_conscience::consensus::fixtures::authentication_deliberation_log;
 use prosthetic_conscience::consensus::types::{ClaimId, ClaimKind, Entry};
 use prosthetic_conscience::consensus_cli::app::{AppConfig, ConsensusApp};
 use prosthetic_conscience::consensus_cli::llm::ConsensusLlm;
+use prosthetic_conscience::consensus_cli::seed::join_and_seed_session;
+use prosthetic_conscience::consensus_cli::session::SessionClient;
 use prosthetic_conscience::gateway::runtime::GatewayConfig;
 use prosthetic_conscience::protocol::Capability;
 use prosthetic_conscience::protocol::GatewayToWorker;
@@ -237,6 +240,74 @@ async fn session_handshake_timeout() {
     })
     .await
     .expect("test timed out after 10 seconds");
+}
+
+#[tokio::test]
+async fn consensus_seed_joins_existing_session_and_persists_fixture_entries() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gw = TestGateway::start().await;
+        let log = authentication_deliberation_log();
+        let (_subscriber, session_id) = MockSessionClient::create(gw.addr).await;
+
+        let seeded = join_and_seed_session(
+            format!("http://{}", gw.addr),
+            None,
+            session_id.clone(),
+            &log.entries,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(seeded.session_id, session_id);
+        assert_eq!(seeded.total_entries, log.entries.len());
+
+        let session = SessionClient::join(
+            format!("http://{}", gw.addr),
+            None,
+            seeded.session_id.clone(),
+        )
+        .await
+        .unwrap();
+
+        let page = session.fetch_entries(0, log.entries.len()).await.unwrap();
+        let expected = log
+            .entries
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(page.total, expected.len());
+        assert_eq!(page.entries, expected);
+    })
+    .await
+    .expect("test timed out after 10 seconds");
+}
+
+#[tokio::test]
+async fn consensus_seed_fails_for_unknown_session_id() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let log = authentication_deliberation_log();
+
+        let error = join_and_seed_session(
+            format!("http://{}", gw.addr),
+            None,
+            String::from("no-such-session"),
+            &log.entries,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("subscriber removed")
+                || error.to_string().contains("unknown session")
+                || error.to_string().contains("session"),
+            "unexpected error: {error}"
+        );
+    })
+    .await
+    .expect("test timed out after 5 seconds");
 }
 
 #[tokio::test]

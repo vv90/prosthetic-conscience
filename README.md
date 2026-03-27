@@ -22,7 +22,7 @@ Requires Rust 2024 edition (1.85+).
 cargo build --release
 ```
 
-This produces three binaries: `prosthetic-conscience` (gateway), `pc-worker` (worker agent), and `pc-client` (interactive client).
+This produces four primary binaries: `prosthetic-conscience` (gateway), `pc-worker` (worker agent), `pc-client` (interactive client), and `pc-consensus` (consensus terminal client). It also includes `pc-consensus-sim`, a deterministic log generator for offline consensus experiments, and `pc-consensus-seed`, a session seeder for importing fixture logs into the gateway.
 
 ## Running
 
@@ -147,7 +147,48 @@ cargo run --bin pc-client -- --container my-sandbox
 # Model calls execute_shell, tool runs "ls /workspace" in container, model reports results
 ```
 
-### 5. Or send a raw request
+### 5. Start the consensus deliberation REPL
+
+Use `pc-consensus` to join a shared consensus session with the LLM-backed deliberation assistant.
+
+Create a new session:
+
+```bash
+cargo run --bin pc-consensus -- \
+  --participant alice \
+  --model default \
+  create
+```
+
+Join an existing session, such as one created by `pc-consensus-seed`:
+
+```bash
+cargo run --bin pc-consensus -- \
+  --participant evaluator \
+  --model default \
+  join <session-id>
+```
+
+Once inside the REPL, you can type natural-language deliberation messages or use commands like:
+
+```text
+/overview
+/claim prop-hybrid
+/drafts
+/submit
+/clear
+/help
+```
+
+Example prompts to try:
+
+```text
+Summarize the current deliberation and tell me what needs attention.
+Draft the minimum entries needed to address the strongest remaining objection.
+If I were Carol, what should I propose next to move this toward convergence?
+```
+
+### 6. Or send a raw request
 
 ```
 curl -N http://127.0.0.1:3000/v1/chat/completions \
@@ -170,7 +211,7 @@ data: {"choices":[{"delta":{"content":" there"},...}],...}
 data: [DONE]
 ```
 
-### 6. Or use Open WebUI
+### 7. Or use Open WebUI
 
 Any OpenAI-compatible client works. For a full chat interface, run [Open WebUI](https://github.com/open-webui/open-webui):
 
@@ -185,7 +226,7 @@ docker run -d \
 
 Then open `http://localhost:8080`.
 
-### 7. Built-in transcription UI
+### 8. Built-in transcription UI
 
 The gateway serves a minimal web UI for testing audio transcription at the root URL. Open `http://127.0.0.1:3000/` in a browser.
 
@@ -201,7 +242,68 @@ If `PC_AUTH_TOKEN` is set, enter the token in the auth field before recording.
 cargo test --all-targets --all-features
 ```
 
-106 tests (102 run + 4 ignored): 94 unit (kernel + protocol + registry + response assembler + tool trait + tool implementations), 12 integration (full pipeline through real HTTP/WebSocket including tool loop round-trip). 4 Docker-dependent shell tool tests are `#[ignore]` by default.
+The suite covers unit and integration tests across the gateway, protocol, worker, client, and consensus layers. Docker-dependent shell tool tests are `#[ignore]` by default.
+
+### Consensus Log Fixture Generator
+
+Generate a realistic consensus session log without needing a running gateway or worker:
+
+```bash
+cargo run --bin pc-consensus-sim -- --output fixtures/auth-deliberation.session.json
+```
+
+Useful formats:
+
+- `--format session-response` matches the `GET /v1/sessions/<id>/entries` response shape.
+- `--format entries` emits just the raw entry array.
+- `--format bundle` adds scenario metadata plus a computed final overview for LLM experiments.
+- `--format jsonl` writes one entry per line.
+
+### Consensus Session Seeder
+
+Seed an existing session in the gateway with either the checked-in fixture file or a built-in scenario.
+
+Create the session beforehand, for example with:
+
+```bash
+cargo run --bin pc-consensus -- \
+  --participant alice \
+  --model default \
+  create
+```
+
+Keep at least one subscriber connected to that session while and after seeding, otherwise the gateway may remove the session once it has no subscribers left.
+
+Then seed that existing session id:
+
+```bash
+# Seed from the checked-in fixture file
+cargo run --bin pc-consensus-seed -- \
+  <session-id> \
+  --input fixtures/auth-deliberation.session.json
+
+# Seed from the built-in scenario directly
+cargo run --bin pc-consensus-seed -- \
+  <session-id> \
+  --scenario authentication-deliberation
+```
+
+The seeder prints the session id plus a fetch URL for the seeded entries. One simple workflow is:
+
+```text
+terminal 1: cargo run --bin pc-consensus -- --participant alice --model default create
+terminal 2: cargo run --bin pc-consensus-seed -- <session-id> --input fixtures/auth-deliberation.session.json
+terminal 3: cargo run --bin pc-consensus -- --participant evaluator --model default join <session-id>
+```
+
+You can then join the same session with:
+
+```bash
+cargo run --bin pc-consensus -- \
+  --participant evaluator \
+  --model default \
+  join <session-id>
+```
 
 ## Project structure
 

@@ -1,0 +1,359 @@
+{
+  "entries": [
+    {
+      "type": "claim",
+      "claim_id": "item-auth",
+      "author": "carol",
+      "body": "Decide the authentication approach for the public API and the admin dashboard before beta.",
+      "claim_kind": "item"
+    },
+    {
+      "type": "comment",
+      "claim_id": "item-auth",
+      "author": "carol",
+      "body": "We need one decision that operations can actually support in the first release."
+    },
+    {
+      "type": "claim",
+      "claim_id": "ref-oidc-practice",
+      "author": "carol",
+      "body": "External OIDC providers give us mature MFA, recovery, and federation flows that are expensive to reproduce internally.",
+      "claim_kind": "reference"
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-public-api-clients",
+      "author": "bob",
+      "body": "The public API already has a browser SPA client and the mobile app will need token-based access soon.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-no-shared-session-store",
+      "author": "dave",
+      "body": "We do not have a low-latency shared session store across regions in the current platform.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "claim",
+      "claim_id": "value-fast-revocation",
+      "author": "alice",
+      "body": "We should prefer an approach that lets us revoke compromised access quickly during incident response.",
+      "claim_kind": "value"
+    },
+    {
+      "type": "claim",
+      "claim_id": "prop-jwt",
+      "author": "bob",
+      "body": "Use self-issued JWT access tokens for both the public API and the admin dashboard.",
+      "claim_kind": "proposal",
+      "parent_id": "item-auth"
+    },
+    {
+      "type": "claim",
+      "claim_id": "prop-session",
+      "author": "alice",
+      "body": "Use HTTP-only session cookies backed by our application for both the admin dashboard and browser clients.",
+      "claim_kind": "proposal",
+      "parent_id": "item-auth"
+    },
+    {
+      "type": "claim",
+      "claim_id": "prop-oidc",
+      "author": "carol",
+      "body": "Use a third-party OIDC provider for all authentication and rely on its hosted flows.",
+      "claim_kind": "proposal",
+      "parent_id": "item-auth"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-public-api-clients",
+      "target_id": "prop-jwt",
+      "kind": "supports",
+      "author": "bob"
+    },
+    {
+      "type": "relation",
+      "source_id": "ref-oidc-practice",
+      "target_id": "prop-oidc",
+      "kind": "supports",
+      "author": "carol"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-no-shared-session-store",
+      "target_id": "prop-session",
+      "kind": "attacks",
+      "author": "dave"
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-jwt-revocation-hard",
+      "author": "alice",
+      "body": "Self-issued JWTs are hard to revoke before expiry unless we also run a denylist or token introspection service.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-jwt-revocation-hard",
+      "target_id": "prop-jwt",
+      "kind": "attacks",
+      "author": "alice"
+    },
+    {
+      "type": "claim",
+      "claim_id": "cond-revocation-gap",
+      "author": "alice",
+      "body": "If disabled users keep valid tokens for too long, the security team loses a practical way to contain account compromise.",
+      "claim_kind": "conditional"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-jwt-revocation-hard",
+      "target_id": "cond-revocation-gap",
+      "kind": "supports",
+      "author": "alice"
+    },
+    {
+      "type": "relation",
+      "source_id": "value-fast-revocation",
+      "target_id": "cond-revocation-gap",
+      "kind": "supports",
+      "author": "alice"
+    },
+    {
+      "type": "relation",
+      "source_id": "cond-revocation-gap",
+      "target_id": "prop-jwt",
+      "kind": "attacks",
+      "author": "alice"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-jwt",
+      "author": "bob",
+      "position": "support"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-jwt",
+      "author": "alice",
+      "position": "block"
+    },
+    {
+      "type": "comment",
+      "claim_id": "prop-jwt",
+      "author": "alice",
+      "body": "I could only support self-issued JWTs if we also commit to near-immediate revocation for disabled or compromised accounts."
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-admin-browser-only",
+      "author": "dave",
+      "body": "The admin dashboard is used only by employees in browsers, so cookie-based UX is acceptable there.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-admin-browser-only",
+      "target_id": "prop-session",
+      "kind": "supports",
+      "author": "dave"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-session",
+      "author": "carol",
+      "position": "object"
+    },
+    {
+      "type": "comment",
+      "claim_id": "prop-session",
+      "author": "carol",
+      "body": "Regional failover becomes risky if the session store turns into an implicit control plane dependency."
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-external-idp-cost",
+      "author": "bob",
+      "body": "A third-party identity provider adds vendor cost, tenant setup overhead, and a migration burden for the team.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-external-idp-cost",
+      "target_id": "prop-oidc",
+      "kind": "attacks",
+      "author": "bob"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-oidc",
+      "author": "bob",
+      "position": "object"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-oidc",
+      "author": "alice",
+      "position": "support"
+    },
+    {
+      "type": "comment",
+      "claim_id": "item-auth",
+      "author": "carol",
+      "body": "Splitting workforce auth from public API auth may resolve the apparent tradeoff instead of forcing one mechanism everywhere."
+    },
+    {
+      "type": "resolve",
+      "claim_id": "prop-oidc",
+      "author": "carol",
+      "outcome": "withdrawn"
+    },
+    {
+      "type": "claim",
+      "claim_id": "prop-hybrid",
+      "author": "carol",
+      "body": "Use an external OIDC provider for workforce and admin auth, issue provider-backed JWTs for the public API, and keep a thin adapter layer so we can swap vendors later.",
+      "claim_kind": "proposal",
+      "parent_id": "item-auth"
+    },
+    {
+      "type": "relation",
+      "source_id": "ref-oidc-practice",
+      "target_id": "prop-hybrid",
+      "kind": "supports",
+      "author": "carol"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-public-api-clients",
+      "target_id": "prop-hybrid",
+      "kind": "supports",
+      "author": "bob"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-no-shared-session-store",
+      "target_id": "prop-hybrid",
+      "kind": "supports",
+      "author": "dave"
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-adapter-abstraction",
+      "author": "carol",
+      "body": "A narrow identity adapter keeps provider-specific code out of the application so a later migration stays feasible.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-adapter-abstraction",
+      "target_id": "prop-hybrid",
+      "kind": "supports",
+      "author": "carol"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-hybrid",
+      "author": "bob",
+      "position": "consent"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-hybrid",
+      "author": "alice",
+      "position": "champion"
+    },
+    {
+      "type": "claim",
+      "claim_id": "fact-provider-outage-risk",
+      "author": "dave",
+      "body": "A provider outage could lock administrators out during an incident unless we preserve a documented break-glass path.",
+      "claim_kind": "fact"
+    },
+    {
+      "type": "relation",
+      "source_id": "fact-provider-outage-risk",
+      "target_id": "prop-hybrid",
+      "kind": "attacks",
+      "author": "dave"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-hybrid",
+      "author": "dave",
+      "position": "object"
+    },
+    {
+      "type": "comment",
+      "claim_id": "prop-hybrid",
+      "author": "dave",
+      "body": "I like the direction, but I need a concrete outage story before I can consent."
+    },
+    {
+      "type": "claim",
+      "claim_id": "cond-break-glass",
+      "author": "alice",
+      "body": "If we keep two audited local break-glass admin accounts outside the provider, the outage risk becomes operationally acceptable.",
+      "claim_kind": "conditional"
+    },
+    {
+      "type": "relation",
+      "source_id": "cond-break-glass",
+      "target_id": "fact-provider-outage-risk",
+      "kind": "attacks",
+      "author": "alice"
+    },
+    {
+      "type": "relation",
+      "source_id": "cond-break-glass",
+      "target_id": "prop-hybrid",
+      "kind": "supports",
+      "author": "alice"
+    },
+    {
+      "type": "comment",
+      "claim_id": "prop-hybrid",
+      "author": "bob",
+      "body": "This preserves mobile-friendly tokens without asking us to invent our own authentication stack from scratch."
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-hybrid",
+      "author": "dave",
+      "position": "consent"
+    },
+    {
+      "type": "stance",
+      "target_id": "prop-hybrid",
+      "author": "carol",
+      "position": "support"
+    },
+    {
+      "type": "resolve",
+      "claim_id": "prop-jwt",
+      "author": "carol",
+      "outcome": "rejected"
+    },
+    {
+      "type": "resolve",
+      "claim_id": "prop-session",
+      "author": "carol",
+      "outcome": "tabled"
+    },
+    {
+      "type": "resolve",
+      "claim_id": "prop-hybrid",
+      "author": "carol",
+      "outcome": "accepted"
+    },
+    {
+      "type": "comment",
+      "claim_id": "item-auth",
+      "author": "carol",
+      "body": "Decision: move forward with the hybrid plan, document vendor exit constraints, and track break-glass controls in the rollout checklist."
+    }
+  ],
+  "total": 53
+}

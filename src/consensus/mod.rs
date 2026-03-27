@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod fixtures;
 pub mod format;
 pub mod prompt;
 pub mod reducer;
