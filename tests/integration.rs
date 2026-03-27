@@ -261,6 +261,7 @@ async fn consensus_app_join_bootstraps_from_existing_session() {
             auth_token: None,
             model: "test".into(),
             participant: "assistant".into(),
+            max_history: 100,
         };
         let app = ConsensusApp::join(config, session_id).await.unwrap();
         let overview = app.overview();
@@ -582,6 +583,7 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
             None,
             "test".into(),
             "assistant".into(),
+            100,
         );
 
         let loop_handle = tokio::spawn(async move {

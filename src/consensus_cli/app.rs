@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub auth_token: Option<String>,
     pub model: String,
     pub participant: String,
+    pub max_history: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +72,7 @@ impl ConsensusApp {
             config.auth_token.clone(),
             config.model,
             config.participant,
+            config.max_history,
         );
         let session = SessionClient::create(config.gateway_url, config.auth_token).await?;
         let mut app = Self {
@@ -94,6 +96,7 @@ impl ConsensusApp {
             config.auth_token.clone(),
             config.model,
             config.participant,
+            config.max_history,
         );
         let session =
             SessionClient::join(config.gateway_url, config.auth_token, session_id).await?;
@@ -543,6 +546,7 @@ mod tests {
                 None,
                 String::from("default"),
                 String::from("assistant"),
+                100,
             ),
             session: SessionClient::stub("session"),
             engine: ConsensusEngine::new(),
@@ -569,6 +573,7 @@ mod tests {
             None,
             String::from("default"),
             String::from("assistant"),
+            100,
         );
         let session = SessionClient::stub("session");
         let mut app = ConsensusApp {

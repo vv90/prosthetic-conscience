@@ -22,6 +22,10 @@ struct Args {
     #[arg(long)]
     participant: String,
 
+    /// Maximum number of conversation history messages to retain per LLM turn.
+    #[arg(long, default_value = "100")]
+    max_history: usize,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -45,6 +49,7 @@ async fn main() {
         auth_token: args.auth_token,
         model: args.model,
         participant: args.participant,
+        max_history: args.max_history,
     };
 
     let app = match args.command {
