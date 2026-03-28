@@ -1,10 +1,8 @@
 FROM rust:1-slim AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libc6-dev make perl && \
-    rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
+COPY static/ static/
 RUN cargo build --release --bin prosthetic-conscience --bin pc-worker
 
 FROM debian:bookworm-slim AS gateway
