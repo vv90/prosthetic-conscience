@@ -751,6 +751,13 @@ fn optional_claim_ref_matches(value: &Value, field: &str, expected: Option<&str>
 }
 
 fn claim_ref_value_matches(value: &Value, expected: &str) -> bool {
+    if let Some(raw) = value.as_str() {
+        return raw == expected
+            || raw == format!("claim:{expected}")
+            || raw == format!("draft:{expected}")
+            || raw == format!("#{expected}");
+    }
+
     value
         .get("claim_id")
         .and_then(Value::as_str)

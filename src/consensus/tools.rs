@@ -51,9 +51,32 @@ fn require_u64(args: &Value, field: &'static str) -> Result<u64, ToolError> {
 }
 
 fn parse_claim_ref(value: &Value, field: &'static str) -> Result<ClaimRef, ToolError> {
+    if let Some(raw) = value.as_str() {
+        if let Some(rest) = raw.strip_prefix("draft:") {
+            let draft_id = rest.parse::<u64>().map_err(|_| {
+                ToolError::InvalidArgument(format!(
+                    "{field}: invalid draft reference '{raw}', expected draft:<number>"
+                ))
+            })?;
+            return Ok(ClaimRef::Draft(DraftId(draft_id)));
+        }
+        if let Some(rest) = raw.strip_prefix('#') {
+            let draft_id = rest.parse::<u64>().map_err(|_| {
+                ToolError::InvalidArgument(format!(
+                    "{field}: invalid draft reference '{raw}', expected #<number>"
+                ))
+            })?;
+            return Ok(ClaimRef::Draft(DraftId(draft_id)));
+        }
+        if let Some(rest) = raw.strip_prefix("claim:") {
+            return Ok(ClaimRef::Committed(ClaimId(rest.to_owned())));
+        }
+        return Ok(ClaimRef::Committed(ClaimId(raw.to_owned())));
+    }
+
     let object = value.as_object().ok_or_else(|| {
         ToolError::InvalidArgument(format!(
-            "{field}: expected an object containing exactly one of claim_id or draft_id"
+            "{field}: expected a string claim reference or an object containing exactly one of claim_id or draft_id"
         ))
     })?;
     let claim_id = object.get("claim_id").and_then(Value::as_str);
@@ -256,25 +279,10 @@ fn claim_id_param() -> Value {
 
 fn claim_ref_param(description: &str) -> Value {
     json!({
+        "type": "string",
         "description": description,
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "claim_id": {"type": "string", "description": "Committed claim identifier"}
-                },
-                "required": ["claim_id"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "draft_id": {"type": "number", "description": "Local draft claim identifier"}
-                },
-                "required": ["draft_id"],
-                "additionalProperties": false
-            }
-        ]
+        "examples": ["claim:prop-hybrid", "draft:7"],
+        "default": "claim:example-claim"
     })
 }
 
@@ -299,7 +307,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 "properties": {
                     "body": {"type": "string", "description": "The claim text"},
                     "kind": {"type": "string", "enum": ["item", "proposal", "fact", "conditional", "value", "reference"], "description": "Type of claim"},
-                    "parent": claim_ref_param("Optional parent claim reference. Use claim_id for committed claims or draft_id for a locally drafted claim.")
+                    "parent": claim_ref_param("Optional parent claim reference. Use claim:<id> for committed claims or draft:<id> for a locally drafted claim.")
                 },
                 "required": ["body", "kind"]
             }),
@@ -310,8 +318,8 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "source": claim_ref_param("The claim making the attack/support"),
-                    "target": claim_ref_param("The claim being attacked/supported"),
+                    "source": claim_ref_param("The claim making the attack/support. Use claim:<id> or draft:<id>."),
+                    "target": claim_ref_param("The claim being attacked/supported. Use claim:<id> or draft:<id>."),
                     "kind": {"type": "string", "enum": ["attacks", "supports"], "description": "Relation type"}
                 },
                 "required": ["source", "target", "kind"]
@@ -323,7 +331,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "target": claim_ref_param("The claim to take a stance on"),
+                    "target": claim_ref_param("The claim to take a stance on. Use claim:<id> or draft:<id>."),
                     "position": {"type": "string", "enum": ["block", "object", "stand_aside", "abstain", "consent", "support", "champion"], "description": "Position on the claim: consent=simple agreement, support=positive support, champion=strong advocacy/leadership, object/block=disagreement"}
                 },
                 "required": ["target", "position"]
@@ -335,7 +343,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "claim": claim_ref_param("The proposal to resolve"),
+                    "claim": claim_ref_param("The proposal to resolve. Use claim:<id> or draft:<id>."),
                     "outcome": {"type": "string", "enum": ["accepted", "rejected", "tabled", "withdrawn"], "description": "Resolution outcome"}
                 },
                 "required": ["claim", "outcome"]
@@ -348,7 +356,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "body": {"type": "string", "description": "Comment text"},
-                    "claim": claim_ref_param("Optional related claim reference")
+                    "claim": claim_ref_param("Optional related claim reference. Use claim:<id> or draft:<id>.")
                 },
                 "required": ["body"]
             }),
@@ -390,7 +398,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "claim": claim_ref_param("The committed or draft-local claim to preview")
+                    "claim": claim_ref_param("The committed or draft-local claim to preview. Use claim:<id> or draft:<id>.")
                 },
                 "required": ["claim"]
             }),

@@ -304,7 +304,7 @@ impl ConsensusLlm {
              consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership.\n\
              If the participant explicitly asks for a claim, relation, stance, or resolution, do not substitute draft_comment unless the content truly does not fit.\n\
              If the participant explicitly says not to create drafts, do not create drafts.\n\
-             When referring to committed claims inside tool arguments, use claim references like {{\"claim_id\":\"prop-hybrid\"}}. When referring to locally drafted claims, use {{\"draft_id\": 3}}.\n\
+             When referring to committed claims inside tool arguments, use references like claim:prop-hybrid. When referring to locally drafted claims, use draft:3.\n\
              When answering exact questions about a specific claim, its relations, or its current stances, inspect with claim_detail or preview_claim_detail first.\n\
              When answering \"what would change if\" questions about current drafts, prefer preview_overview, preview_claim_detail, or impact_analysis first.\n\
              When you use no_structured_action, do not merely echo the participant's words. Add a concrete next step, clarification, or grounded explanation.\n\
@@ -410,8 +410,8 @@ mod tests {
         assert!(prompt.contains("By default, do not create or revise drafts"));
         assert!(prompt.contains("smallest contribution would be"));
         assert!(prompt.contains("choose the weakest stance"));
-        assert!(prompt.contains("{\"claim_id\":\"prop-hybrid\"}"));
-        assert!(prompt.contains("{\"draft_id\": 3}"));
+        assert!(prompt.contains("claim:prop-hybrid"));
+        assert!(prompt.contains("draft:3"));
         assert!(prompt.contains("inspect with claim_detail or preview_claim_detail first"));
         assert!(prompt.contains("If the participant explicitly says not to create drafts"));
         assert!(prompt.contains("prefer draft_relation over draft_stance"));

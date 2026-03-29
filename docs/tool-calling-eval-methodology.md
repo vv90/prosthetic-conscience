@@ -43,7 +43,7 @@ Important draft-model details:
 
 - Drafts are evaluated as draft-local `DraftContent`, not as committed log entries.
 - Draft authorship is deterministic engine state, not part of the LLM-visible draft tool schema.
-- References in tool arguments can point either to committed claims (`{"claim_id":"..."}`) or to locally drafted claims (`{"draft_id": 7}`).
+- References in tool arguments can point either to committed claims (`claim:<id>`) or to locally drafted claims (`draft:<id>`).
 - Preview and submission materialize those local drafts back into committed `Entry` values only when needed.
 
 ## Metrics

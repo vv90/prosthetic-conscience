@@ -184,7 +184,7 @@ Notes:
 
 - Draft authorship is derived from `--participant`; the LLM does not supply draft `author` fields directly.
 - Pending draft claims are identified locally by `#<draft_id>` in `/drafts`.
-- When a tool or trace refers to a committed claim it uses `{"claim_id":"..."}`; when it refers to a local draft claim it uses `{"draft_id": N}`.
+- When a tool or trace refers to a committed claim it uses `claim:<id>`; when it refers to a local draft claim it uses `draft:<id>`.
 
 Example prompts to try:
 
