@@ -5,10 +5,10 @@
 
 use std::fmt::Write;
 
-use super::engine::{DraftEntry, ImpactAnalysis};
+use super::engine::{ClaimRef, DraftContent, DraftEntry, ImpactAnalysis};
 use super::render::{AttentionSignal, ClaimDetail, ClaimSummary, OverviewData};
 use super::status::EpistemicStatus;
-use super::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
+use super::types::{ClaimKind, Outcome, Position, RelationKind};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -216,8 +216,8 @@ pub fn format_impact_analysis(impact: &ImpactAnalysis) -> String {
             let status = claim.status.map(format_status).unwrap_or("unknown");
             let _ = writeln!(
                 out,
-                "  [{}] \"{}\" by {} — {} ({})",
-                claim.claim_id.0,
+                "  [#{}] \"{}\" by {} — {} ({})",
+                claim.draft_id.0,
                 claim.body,
                 claim.author,
                 format_kind(claim.kind),
@@ -265,76 +265,60 @@ fn format_claim_oneliner(c: &ClaimSummary) -> String {
 
 fn format_draft_entry(draft: &DraftEntry) -> String {
     match &draft.entry {
-        Entry::Claim {
-            claim_id,
+        DraftContent::Claim {
             body,
-            author,
             claim_kind,
-            parent_id,
+            parent,
         } => {
-            let parent = parent_id
+            let parent = parent
                 .as_ref()
-                .map(|id| format!(" parent={}", id.0))
+                .map(|claim_ref| format!(" parent={}", format_claim_ref(claim_ref)))
                 .unwrap_or_default();
             format!(
-                "#{} claim [{}] \"{}\" by {} ({}){}",
+                "#{} claim \"{}\" ({}){}",
                 draft.id.0,
-                claim_id.0,
                 body,
-                author,
                 format_kind(*claim_kind),
                 parent
             )
         }
-        Entry::Relation {
-            source_id,
-            target_id,
+        DraftContent::Relation {
+            source,
+            target,
             kind,
-            author,
         } => format!(
-            "#{} relation {} {} {} by {}",
+            "#{} relation {} {} {}",
             draft.id.0,
-            source_id.0,
+            format_claim_ref(source),
             format_relation_kind(*kind),
-            target_id.0,
-            author
+            format_claim_ref(target),
         ),
-        Entry::Stance {
-            target_id,
-            author,
-            position,
-        } => format!(
-            "#{} stance {} on {} by {}",
+        DraftContent::Stance { target, position } => format!(
+            "#{} stance {} on {}",
             draft.id.0,
             format_position(*position),
-            target_id.0,
-            author
+            format_claim_ref(target),
         ),
-        Entry::Resolve {
-            claim_id,
-            author,
-            outcome,
-        } => format!(
-            "#{} resolve {} as {} by {}",
+        DraftContent::Resolve { claim, outcome } => format!(
+            "#{} resolve {} as {}",
             draft.id.0,
-            claim_id.0,
+            format_claim_ref(claim),
             format_outcome(*outcome),
-            author
         ),
-        Entry::Comment {
-            claim_id,
-            author,
-            body,
-        } => {
-            let target = claim_id
+        DraftContent::Comment { claim, body } => {
+            let target = claim
                 .as_ref()
-                .map(|id| format!(" on {}", id.0))
+                .map(|claim_ref| format!(" on {}", format_claim_ref(claim_ref)))
                 .unwrap_or_default();
-            format!(
-                "#{} comment{} by {} — \"{}\"",
-                draft.id.0, target, author, body
-            )
+            format!("#{} comment{} — \"{}\"", draft.id.0, target, body)
         }
+    }
+}
+
+fn format_claim_ref(claim_ref: &ClaimRef) -> String {
+    match claim_ref {
+        ClaimRef::Committed(claim_id) => format!("claim:{}", claim_id.0),
+        ClaimRef::Draft(draft_id) => format!("draft:{}", draft_id.0),
     }
 }
 

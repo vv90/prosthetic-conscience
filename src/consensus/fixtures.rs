@@ -57,7 +57,7 @@ pub struct TrialLog {
 impl TrialLog {
     /// Materialized overview of the final committed state.
     pub fn final_overview(&self) -> OverviewData {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = ConsensusEngine::new(String::new());
         for entry in &self.entries {
             engine.append(entry.clone());
         }

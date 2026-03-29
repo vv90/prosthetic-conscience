@@ -8,7 +8,7 @@ use prosthetic_conscience::client::response_assembler;
 use prosthetic_conscience::client::tool_loop;
 use prosthetic_conscience::client::tools::ToolRegistry;
 use prosthetic_conscience::client::tools::current_time::GetCurrentTime;
-use prosthetic_conscience::consensus::engine::ConsensusEngine;
+use prosthetic_conscience::consensus::engine::{ConsensusEngine, DraftContent};
 use prosthetic_conscience::consensus::fixtures::authentication_deliberation_log;
 use prosthetic_conscience::consensus::types::{ClaimId, ClaimKind, Entry};
 use prosthetic_conscience::consensus_cli::app::{AppConfig, ConsensusApp};
@@ -659,8 +659,9 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
         );
 
         let loop_handle = tokio::spawn(async move {
-            let mut engine = ConsensusEngine::new();
-            let mut history = vec![json!({"role": "user", "content": "Draft a proposal to use JWT"})];
+            let mut engine = ConsensusEngine::new(String::from("assistant"));
+            let mut history =
+                vec![json!({"role": "user", "content": "Draft a proposal to use JWT"})];
             let msg = llm.run_turn(&mut engine, &mut history).await.unwrap();
             (msg, history, engine.show_drafts().to_vec())
         });
@@ -676,6 +677,7 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
                 assert!(tool_names.contains(&"draft_claim"));
                 assert!(tool_names.contains(&"draft_comment"));
                 assert!(tool_names.contains(&"impact_analysis"));
+                assert!(tool_names.contains(&"show_drafts"));
                 assert!(!tool_names.contains(&"submit_drafts"));
                 assert!(!tool_names.contains(&"clear_drafts"));
             }
@@ -693,7 +695,7 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
                             "type": "function",
                             "function": {
                                 "name": "draft_claim",
-                                "arguments": "{\"author\":\"assistant\",\"body\":\"Use JWT\",\"kind\":\"proposal\"}"
+                                "arguments": "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"
                             }
                         }]
                     },
@@ -737,12 +739,11 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
         assert_eq!(drafts.len(), 1);
         assert!(matches!(
             &drafts[0].entry,
-            Entry::Claim {
-                author,
+            DraftContent::Claim {
                 body,
                 claim_kind,
                 ..
-            } if author == "assistant" && body == "Use JWT" && *claim_kind == ClaimKind::Proposal
+            } if body == "Use JWT" && *claim_kind == ClaimKind::Proposal
         ));
     })
     .await

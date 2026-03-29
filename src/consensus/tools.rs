@@ -6,7 +6,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::engine::{ConsensusEngine, DraftId, EngineError};
+use super::engine::{ClaimRef, ConsensusEngine, DraftId, EngineError};
 use super::types::{ClaimId, ClaimKind, Outcome, Position, RelationKind};
 
 // ---------------------------------------------------------------------------
@@ -44,14 +44,41 @@ fn require_str<'a>(args: &'a Value, field: &'static str) -> Result<&'a str, Tool
         .ok_or(ToolError::MissingArgument(field))
 }
 
-fn optional_str<'a>(args: &'a Value, field: &str) -> Option<&'a str> {
-    args.get(field).and_then(Value::as_str)
-}
-
 fn require_u64(args: &Value, field: &'static str) -> Result<u64, ToolError> {
     args.get(field)
         .and_then(Value::as_u64)
         .ok_or(ToolError::MissingArgument(field))
+}
+
+fn parse_claim_ref(value: &Value, field: &'static str) -> Result<ClaimRef, ToolError> {
+    let object = value.as_object().ok_or_else(|| {
+        ToolError::InvalidArgument(format!(
+            "{field}: expected an object containing exactly one of claim_id or draft_id"
+        ))
+    })?;
+    let claim_id = object.get("claim_id").and_then(Value::as_str);
+    let draft_id = object.get("draft_id").and_then(Value::as_u64);
+    match (claim_id, draft_id) {
+        (Some(claim_id), None) => Ok(ClaimRef::Committed(ClaimId(claim_id.to_owned()))),
+        (None, Some(draft_id)) => Ok(ClaimRef::Draft(DraftId(draft_id))),
+        (Some(_), Some(_)) => Err(ToolError::InvalidArgument(format!(
+            "{field}: provide exactly one of claim_id or draft_id"
+        ))),
+        (None, None) => Err(ToolError::InvalidArgument(format!(
+            "{field}: expected either claim_id or draft_id"
+        ))),
+    }
+}
+
+fn require_claim_ref(args: &Value, field: &'static str) -> Result<ClaimRef, ToolError> {
+    let value = args.get(field).ok_or(ToolError::MissingArgument(field))?;
+    parse_claim_ref(value, field)
+}
+
+fn optional_claim_ref(args: &Value, field: &'static str) -> Result<Option<ClaimRef>, ToolError> {
+    args.get(field)
+        .map(|value| parse_claim_ref(value, field))
+        .transpose()
 }
 
 fn require_claim_kind(args: &Value, field: &'static str) -> Result<ClaimKind, ToolError> {
@@ -132,64 +159,39 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
 
         // -- Draft creation --
         "draft_claim" => {
-            let author = require_str(&args, "author")?;
             let body = require_str(&args, "body")?;
             let kind = require_claim_kind(&args, "kind")?;
-            let parent_id = optional_str(&args, "parent_id").map(|s| ClaimId(s.to_owned()));
-            let draft_id = engine.draft_claim(author.to_owned(), body.to_owned(), kind, parent_id);
-            // Extract the provisional claim_id from the draft we just created
-            let claim_id = engine
-                .show_drafts()
-                .iter()
-                .rev()
-                .find(|d| d.id == draft_id)
-                .and_then(|d| {
-                    if let super::types::Entry::Claim { ref claim_id, .. } = d.entry {
-                        Some(claim_id.0.clone())
-                    } else {
-                        None
-                    }
-                });
-            Ok(json!({ "draft_id": draft_id, "claim_id": claim_id }))
+            let parent = optional_claim_ref(&args, "parent")?;
+            let draft_id = engine.draft_claim(body.to_owned(), kind, parent)?;
+            Ok(json!({ "draft_id": draft_id }))
         }
 
         "draft_relation" => {
-            let source_id = require_str(&args, "source_id")?;
-            let target_id = require_str(&args, "target_id")?;
+            let source = require_claim_ref(&args, "source")?;
+            let target = require_claim_ref(&args, "target")?;
             let kind = require_relation_kind(&args, "kind")?;
-            let author = require_str(&args, "author")?;
-            let draft_id = engine.draft_relation(
-                ClaimId(source_id.to_owned()),
-                ClaimId(target_id.to_owned()),
-                kind,
-                author.to_owned(),
-            );
+            let draft_id = engine.draft_relation(source, target, kind)?;
             Ok(json!({ "draft_id": draft_id }))
         }
 
         "draft_stance" => {
-            let target_id = require_str(&args, "target_id")?;
-            let author = require_str(&args, "author")?;
+            let target = require_claim_ref(&args, "target")?;
             let position = require_position(&args, "position")?;
-            let draft_id =
-                engine.draft_stance(ClaimId(target_id.to_owned()), author.to_owned(), position);
+            let draft_id = engine.draft_stance(target, position)?;
             Ok(json!({ "draft_id": draft_id }))
         }
 
         "draft_resolve" => {
-            let claim_id = require_str(&args, "claim_id")?;
-            let author = require_str(&args, "author")?;
+            let claim = require_claim_ref(&args, "claim")?;
             let outcome = require_outcome(&args, "outcome")?;
-            let draft_id =
-                engine.draft_resolve(ClaimId(claim_id.to_owned()), author.to_owned(), outcome);
+            let draft_id = engine.draft_resolve(claim, outcome)?;
             Ok(json!({ "draft_id": draft_id }))
         }
 
         "draft_comment" => {
-            let author = require_str(&args, "author")?;
             let body = require_str(&args, "body")?;
-            let claim_id = optional_str(&args, "claim_id").map(|s| ClaimId(s.to_owned()));
-            let draft_id = engine.draft_comment(author.to_owned(), body.to_owned(), claim_id);
+            let claim = optional_claim_ref(&args, "claim")?;
+            let draft_id = engine.draft_comment(body.to_owned(), claim)?;
             Ok(json!({ "draft_id": draft_id }))
         }
 
@@ -218,10 +220,8 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
         "preview_overview" => Ok(to_json(&engine.preview_overview())),
 
         "preview_claim_detail" => {
-            let id = require_str(&args, "claim_id")?;
-            Ok(to_json(
-                &engine.preview_claim_detail(&ClaimId(id.to_owned())),
-            ))
+            let claim = require_claim_ref(&args, "claim")?;
+            Ok(to_json(&engine.preview_claim_detail(&claim)))
         }
 
         "impact_analysis" => Ok(to_json(&engine.impact_analysis())),
@@ -254,6 +254,30 @@ fn claim_id_param() -> Value {
     })
 }
 
+fn claim_ref_param(description: &str) -> Value {
+    json!({
+        "description": description,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "claim_id": {"type": "string", "description": "Committed claim identifier"}
+                },
+                "required": ["claim_id"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "draft_id": {"type": "number", "description": "Local draft claim identifier"}
+                },
+                "required": ["draft_id"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
 /// Returns OpenAI-format tool definitions for all consensus tools.
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
@@ -264,79 +288,74 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "claim_detail",
-            description: "Get detailed information about a specific claim including its relations, stances, and epistemic status.",
+            description: "Get detailed information about a specific committed claim including its relations, stances, and epistemic status. Prefer this for exact factual questions about a claim.",
             parameters: claim_id_param(),
         },
         ToolDef {
             name: "draft_claim",
-            description: "Draft a new claim (item, proposal, fact, etc.) for later submission.",
+            description: "Draft a new claim (item, proposal, fact, etc.) for later submission on behalf of the current participant. The author is derived from the active participant automatically.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "author": {"type": "string", "description": "Author of the claim"},
                     "body": {"type": "string", "description": "The claim text"},
                     "kind": {"type": "string", "enum": ["item", "proposal", "fact", "conditional", "value", "reference"], "description": "Type of claim"},
-                    "parent_id": {"type": "string", "description": "Optional parent claim ID (e.g. item that a proposal addresses)"}
+                    "parent": claim_ref_param("Optional parent claim reference. Use claim_id for committed claims or draft_id for a locally drafted claim.")
                 },
-                "required": ["author", "body", "kind"]
+                "required": ["body", "kind"]
             }),
         },
         ToolDef {
             name: "draft_relation",
-            description: "Draft a relation (attack or support) between two claims.",
+            description: "Draft a relation (attack or support) between two claims on behalf of the current participant. References may target either committed claims or locally drafted claims.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "source_id": {"type": "string", "description": "The claim making the attack/support"},
-                    "target_id": {"type": "string", "description": "The claim being attacked/supported"},
-                    "kind": {"type": "string", "enum": ["attacks", "supports"], "description": "Relation type"},
-                    "author": {"type": "string", "description": "Author of the relation"}
+                    "source": claim_ref_param("The claim making the attack/support"),
+                    "target": claim_ref_param("The claim being attacked/supported"),
+                    "kind": {"type": "string", "enum": ["attacks", "supports"], "description": "Relation type"}
                 },
-                "required": ["source_id", "target_id", "kind", "author"]
+                "required": ["source", "target", "kind"]
             }),
         },
         ToolDef {
             name: "draft_stance",
-            description: "Draft a stance (position) on a claim. Positions range from block (strongest disagreement) to champion (strongest agreement).",
+            description: "Draft a stance (position) on a claim. Use the weakest matching stance: consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "target_id": {"type": "string", "description": "The claim to take a stance on"},
-                    "author": {"type": "string", "description": "Author of the stance"},
-                    "position": {"type": "string", "enum": ["block", "object", "stand_aside", "abstain", "consent", "support", "champion"], "description": "Position on the claim"}
+                    "target": claim_ref_param("The claim to take a stance on"),
+                    "position": {"type": "string", "enum": ["block", "object", "stand_aside", "abstain", "consent", "support", "champion"], "description": "Position on the claim: consent=simple agreement, support=positive support, champion=strong advocacy/leadership, object/block=disagreement"}
                 },
-                "required": ["target_id", "author", "position"]
+                "required": ["target", "position"]
             }),
         },
         ToolDef {
             name: "draft_resolve",
-            description: "Draft a resolution for a proposal (accepted, rejected, tabled, or withdrawn).",
+            description: "Draft a resolution for a proposal (accepted, rejected, tabled, or withdrawn) on behalf of the current participant.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "claim_id": {"type": "string", "description": "The proposal to resolve"},
-                    "author": {"type": "string", "description": "Author of the resolution"},
+                    "claim": claim_ref_param("The proposal to resolve"),
                     "outcome": {"type": "string", "enum": ["accepted", "rejected", "tabled", "withdrawn"], "description": "Resolution outcome"}
                 },
-                "required": ["claim_id", "author", "outcome"]
+                "required": ["claim", "outcome"]
             }),
         },
         ToolDef {
             name: "draft_comment",
-            description: "Draft a freeform comment, optionally attached to a specific claim.",
+            description: "Draft a concrete freeform comment for the shared log on behalf of the current participant, optionally attached to a specific claim. Do not use this for advice, hypotheticals, or as a placeholder when the user is still exploring what they mean.",
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "author": {"type": "string", "description": "Author of the comment"},
                     "body": {"type": "string", "description": "Comment text"},
-                    "claim_id": {"type": "string", "description": "Optional related claim identifier"}
+                    "claim": claim_ref_param("Optional related claim reference")
                 },
-                "required": ["author", "body"]
+                "required": ["body"]
             }),
         },
         ToolDef {
             name: "show_drafts",
-            description: "Show all pending draft entries that have not yet been submitted.",
+            description: "Show all pending draft entries that have not yet been submitted. Use when you need to inspect or revise the current draft buffer, not after every mutation.",
             parameters: empty_params(),
         },
         ToolDef {
@@ -367,20 +386,27 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "preview_claim_detail",
-            description: "Preview a claim's detail as it would look if all current drafts were submitted.",
-            parameters: claim_id_param(),
+            description: "Preview a claim's detail as it would look if all current drafts were submitted. Prefer this for exact questions about a claim when pending drafts may matter.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "claim": claim_ref_param("The committed or draft-local claim to preview")
+                },
+                "required": ["claim"]
+            }),
         },
         ToolDef {
             name: "impact_analysis",
-            description: "Compare the current committed state with the state produced by applying all current drafts.",
+            description: "Compare the current committed state with the state produced by applying all current drafts. Prefer this before answering \"what would change if\" questions about current drafts.",
             parameters: empty_params(),
         },
         ToolDef {
             name: "no_structured_action",
             description: "Use when the participant is asking for a summary, explanation, analysis, \
-                process help, hypothetical discussion, or otherwise is not making a concrete \
-                contribution to the shared log. Only draft when the participant is clearly \
-                expressing or requesting a contribution.",
+                process help, option comparison, hypothetical discussion, or is expressing only a \
+                tentative leaning. Also use this when you need one focused clarification before \
+                drafting. Only draft when the participant is clearly expressing or requesting a \
+                contribution that is specific enough to record.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -420,20 +446,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn engine() -> ConsensusEngine {
+        ConsensusEngine::new(String::from("assistant"))
+    }
+
     fn empty() -> Value {
         json!({})
     }
 
+    fn committed(claim_id: &str) -> Value {
+        json!({ "claim_id": claim_id })
+    }
+
+    fn draft(draft_id: u64) -> Value {
+        json!({ "draft_id": draft_id })
+    }
+
     #[test]
     fn unknown_tool() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(&mut engine, "nonexistent", empty());
         assert!(matches!(result, Err(ToolError::UnknownTool(_))));
     }
 
     #[test]
     fn overview_empty() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(&mut engine, "overview", empty()).unwrap();
         assert_eq!(result["total_claims"], 0);
         assert_eq!(result["total_relations"], 0);
@@ -442,7 +480,7 @@ mod tests {
 
     #[test]
     fn claim_detail_missing_arg() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(&mut engine, "claim_detail", empty());
         assert!(matches!(
             result,
@@ -452,39 +490,45 @@ mod tests {
 
     #[test]
     fn claim_detail_unknown_claim() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(&mut engine, "claim_detail", json!({"claim_id": "nope"})).unwrap();
         assert!(result.is_null());
     }
 
     #[test]
-    fn draft_claim_returns_ids() {
-        let mut engine = ConsensusEngine::new();
+    fn draft_claim_returns_only_draft_id() {
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "Use JWT", "kind": "proposal"}),
+            json!({"body": "Use JWT", "kind": "proposal"}),
         )
         .unwrap();
         assert!(result["draft_id"].is_number());
-        assert!(result["claim_id"].is_string());
-        assert!(result["claim_id"].as_str().unwrap().starts_with("draft-"));
+        assert!(result.get("claim_id").is_none());
     }
 
     #[test]
     fn draft_claim_missing_arg() {
-        let mut engine = ConsensusEngine::new();
-        let result = dispatch(&mut engine, "draft_claim", json!({"author": "alice"}));
+        let mut engine = engine();
+        let result = dispatch(&mut engine, "draft_claim", json!({}));
         assert!(matches!(result, Err(ToolError::MissingArgument("body"))));
     }
 
     #[test]
     fn draft_relation() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
+        let created = dispatch(
+            &mut engine,
+            "draft_claim",
+            json!({"body": "Use JWT", "kind": "proposal"}),
+        )
+        .unwrap();
+        let draft_id = created["draft_id"].as_u64().unwrap();
         let result = dispatch(
             &mut engine,
             "draft_relation",
-            json!({"source_id": "c1", "target_id": "c2", "kind": "attacks", "author": "bob"}),
+            json!({"source": draft(draft_id), "target": committed("c2"), "kind": "attacks"}),
         )
         .unwrap();
         assert!(result["draft_id"].is_number());
@@ -492,11 +536,11 @@ mod tests {
 
     #[test]
     fn draft_stance() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "draft_stance",
-            json!({"target_id": "c1", "author": "carol", "position": "block"}),
+            json!({"target": committed("c1"), "position": "block"}),
         )
         .unwrap();
         assert!(result["draft_id"].is_number());
@@ -504,11 +548,11 @@ mod tests {
 
     #[test]
     fn draft_resolve() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "draft_resolve",
-            json!({"claim_id": "p1", "author": "alice", "outcome": "accepted"}),
+            json!({"claim": committed("p1"), "outcome": "accepted"}),
         )
         .unwrap();
         assert!(result["draft_id"].is_number());
@@ -516,11 +560,11 @@ mod tests {
 
     #[test]
     fn draft_comment() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "draft_comment",
-            json!({"author": "alice", "body": "Needs more evidence", "claim_id": "c1"}),
+            json!({"body": "Needs more evidence", "claim": committed("c1")}),
         )
         .unwrap();
         assert!(result["draft_id"].is_number());
@@ -528,11 +572,11 @@ mod tests {
 
     #[test]
     fn show_drafts_returns_array() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "A", "kind": "fact"}),
+            json!({"body": "A", "kind": "fact"}),
         )
         .unwrap();
         let result = dispatch(&mut engine, "show_drafts", empty()).unwrap();
@@ -542,11 +586,11 @@ mod tests {
 
     #[test]
     fn remove_draft_valid() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let created = dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "A", "kind": "fact"}),
+            json!({"body": "A", "kind": "fact"}),
         )
         .unwrap();
         let draft_id = created["draft_id"].as_u64().unwrap();
@@ -556,24 +600,25 @@ mod tests {
 
     #[test]
     fn remove_draft_invalid() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(&mut engine, "remove_draft", json!({"draft_id": 999}));
         assert!(matches!(result, Err(ToolError::Engine(_))));
     }
 
     #[test]
     fn submit_drafts() {
-        let mut engine = ConsensusEngine::new();
-        dispatch(
+        let mut engine = engine();
+        let created = dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "A", "kind": "fact"}),
+            json!({"body": "A", "kind": "fact"}),
         )
         .unwrap();
+        let draft_id = created["draft_id"].as_u64().unwrap();
         dispatch(
             &mut engine,
             "draft_stance",
-            json!({"target_id": "c1", "author": "bob", "position": "consent"}),
+            json!({"target": draft(draft_id), "position": "consent"}),
         )
         .unwrap();
         let result = dispatch(&mut engine, "submit_drafts", empty()).unwrap();
@@ -586,11 +631,11 @@ mod tests {
 
     #[test]
     fn clear_drafts() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "A", "kind": "fact"}),
+            json!({"body": "A", "kind": "fact"}),
         )
         .unwrap();
         let result = dispatch(&mut engine, "clear_drafts", empty()).unwrap();
@@ -601,11 +646,11 @@ mod tests {
 
     #[test]
     fn preview_overview_includes_drafts() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "A proposal", "kind": "proposal"}),
+            json!({"body": "A proposal", "kind": "proposal"}),
         )
         .unwrap();
 
@@ -617,7 +662,7 @@ mod tests {
 
     #[test]
     fn impact_analysis_reports_changes() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(super::super::types::Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -635,7 +680,7 @@ mod tests {
         dispatch(
             &mut engine,
             "draft_relation",
-            json!({"source_id": "c2", "target_id": "c1", "kind": "attacks", "author": "bob"}),
+            json!({"source": committed("c2"), "target": committed("c1"), "kind": "attacks"}),
         )
         .unwrap();
 
@@ -674,7 +719,7 @@ mod tests {
 
     #[test]
     fn dispatch_no_structured_action_valid() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "no_structured_action",
@@ -687,7 +732,7 @@ mod tests {
 
     #[test]
     fn dispatch_no_structured_action_missing_reason() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = dispatch(
             &mut engine,
             "no_structured_action",
@@ -698,22 +743,22 @@ mod tests {
 
     #[test]
     fn round_trip_draft_show_submit() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
 
         // Draft a claim
         let created = dispatch(
             &mut engine,
             "draft_claim",
-            json!({"author": "alice", "body": "Use JWT for auth", "kind": "proposal"}),
+            json!({"body": "Use JWT for auth", "kind": "proposal"}),
         )
         .unwrap();
-        let claim_id = created["claim_id"].as_str().unwrap().to_owned();
+        let draft_id = created["draft_id"].as_u64().unwrap();
 
         // Draft a stance on it
         dispatch(
             &mut engine,
             "draft_stance",
-            json!({"target_id": claim_id, "author": "bob", "position": "consent"}),
+            json!({"target": draft(draft_id), "position": "consent"}),
         )
         .unwrap();
 
@@ -728,5 +773,60 @@ mod tests {
         // Buffer empty
         let after = dispatch(&mut engine, "show_drafts", empty()).unwrap();
         assert_eq!(after.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn claim_ref_validation_requires_exactly_one_field() {
+        let mut engine = engine();
+        let result = dispatch(
+            &mut engine,
+            "draft_stance",
+            json!({"target": {"claim_id": "c1", "draft_id": 7}, "position": "consent"}),
+        );
+        assert!(
+            matches!(result, Err(ToolError::InvalidArgument(message)) if message.contains("exactly one"))
+        );
+    }
+
+    #[test]
+    fn preview_claim_detail_accepts_draft_reference() {
+        let mut engine = engine();
+        let created = dispatch(
+            &mut engine,
+            "draft_claim",
+            json!({"body": "Draft proposal", "kind": "proposal"}),
+        )
+        .unwrap();
+        let draft_id = created["draft_id"].as_u64().unwrap();
+        let result = dispatch(
+            &mut engine,
+            "preview_claim_detail",
+            json!({"claim": draft(draft_id)}),
+        )
+        .unwrap();
+        assert_eq!(result["claim"]["id"], "draft-0");
+        assert_eq!(result["claim"]["body"], "Draft proposal");
+    }
+
+    #[test]
+    fn draft_tool_schemas_do_not_expose_author() {
+        let defs = tool_definitions();
+        let draft_claim = defs.iter().find(|def| def.name == "draft_claim").unwrap();
+        let draft_relation = defs
+            .iter()
+            .find(|def| def.name == "draft_relation")
+            .unwrap();
+        let draft_stance = defs.iter().find(|def| def.name == "draft_stance").unwrap();
+        let draft_resolve = defs.iter().find(|def| def.name == "draft_resolve").unwrap();
+        let draft_comment = defs.iter().find(|def| def.name == "draft_comment").unwrap();
+        for def in [
+            draft_claim,
+            draft_relation,
+            draft_stance,
+            draft_resolve,
+            draft_comment,
+        ] {
+            assert!(def.parameters["properties"].get("author").is_none());
+        }
     }
 }

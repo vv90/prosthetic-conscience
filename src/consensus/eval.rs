@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::chat_gateway::response_assembler::{
     CompletedMessage, CompletedToolCall, assistant_message_value, tool_result_message,
 };
-use crate::consensus::engine::{ConsensusEngine, DraftEntry};
+use crate::consensus::engine::{ClaimRef, ConsensusEngine, DraftContent, DraftEntry};
 use crate::consensus::fixtures::{FixtureScenario, scenario_log};
 use crate::consensus::render::OverviewData;
 use crate::consensus::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
@@ -232,8 +232,11 @@ pub async fn run_suite(
         for &history_turn_count in &history_turns {
             for &max_history in &max_history_values {
                 for repeat_index in 0..config.repeats {
-                    let mut engine =
-                        replay_checkpoint(&scenario_log.entries, case.checkpoint_entries);
+                    let mut engine = replay_checkpoint(
+                        &scenario_log.entries,
+                        case.checkpoint_entries,
+                        &case.participant,
+                    );
                     let mut history = build_synthetic_history(&engine, history_turn_count);
                     history.push(json!({"role": "user", "content": case.user_message}));
 
@@ -327,8 +330,12 @@ fn format_metric(metric: &MetricSummary) -> String {
     )
 }
 
-fn replay_checkpoint(entries: &[Entry], checkpoint_entries: usize) -> ConsensusEngine {
-    let mut engine = ConsensusEngine::new();
+fn replay_checkpoint(
+    entries: &[Entry],
+    checkpoint_entries: usize,
+    draft_author: &str,
+) -> ConsensusEngine {
+    let mut engine = ConsensusEngine::new(draft_author.to_owned());
     for entry in entries.iter().take(checkpoint_entries).cloned() {
         engine.append(entry);
     }
@@ -503,7 +510,7 @@ fn matches_expected_tool_call(
 
     match expected {
         ExpectedToolUse::DraftClaim {
-            author,
+            author: _,
             kind,
             parent_id,
             body_contains,
@@ -511,59 +518,54 @@ fn matches_expected_tool_call(
             .parsed_arguments
             .as_ref()
             .is_some_and(|arguments| {
-                optional_str_matches(arguments, "author", author.as_deref())
-                    && optional_enum_matches(arguments, "kind", kind.map(claim_kind_name))
-                    && optional_str_matches(arguments, "parent_id", parent_id.as_deref())
+                optional_enum_matches(arguments, "kind", kind.map(claim_kind_name))
+                    && optional_claim_ref_matches(arguments, "parent", parent_id.as_deref())
                     && required_body_matches(arguments, "body", body_contains)
             }),
         ExpectedToolUse::DraftRelation {
-            author,
             source_id,
             target_id,
             kind,
+            author: _,
         } => execution
             .parsed_arguments
             .as_ref()
             .is_some_and(|arguments| {
-                str_field(arguments, "source_id") == Some(source_id.as_str())
-                    && str_field(arguments, "target_id") == Some(target_id.as_str())
+                claim_ref_field_matches(arguments, "source", source_id)
+                    && claim_ref_field_matches(arguments, "target", target_id)
                     && str_field(arguments, "kind") == Some(relation_kind_name(*kind))
-                    && optional_str_matches(arguments, "author", author.as_deref())
             }),
         ExpectedToolUse::DraftStance {
-            author,
             target_id,
             position,
+            author: _,
         } => execution
             .parsed_arguments
             .as_ref()
             .is_some_and(|arguments| {
-                str_field(arguments, "target_id") == Some(target_id.as_str())
+                claim_ref_field_matches(arguments, "target", target_id)
                     && str_field(arguments, "position") == Some(position_name(*position))
-                    && optional_str_matches(arguments, "author", author.as_deref())
             }),
         ExpectedToolUse::DraftResolve {
-            author,
             claim_id,
             outcome,
+            author: _,
         } => execution
             .parsed_arguments
             .as_ref()
             .is_some_and(|arguments| {
-                str_field(arguments, "claim_id") == Some(claim_id.as_str())
+                claim_ref_field_matches(arguments, "claim", claim_id)
                     && str_field(arguments, "outcome") == Some(outcome_name(*outcome))
-                    && optional_str_matches(arguments, "author", author.as_deref())
             }),
         ExpectedToolUse::DraftComment {
-            author,
             claim_id,
             body_contains,
+            author: _,
         } => execution
             .parsed_arguments
             .as_ref()
             .is_some_and(|arguments| {
-                optional_str_matches(arguments, "author", author.as_deref())
-                    && optional_str_matches(arguments, "claim_id", claim_id.as_deref())
+                optional_claim_ref_matches(arguments, "claim", claim_id.as_deref())
                     && required_body_matches(arguments, "body", body_contains)
             }),
         ExpectedToolUse::NoStructuredAction {
@@ -589,93 +591,69 @@ fn matches_expected_draft(expected: &ExpectedToolUse, draft: &DraftEntry) -> boo
     match (expected, &draft.entry) {
         (
             ExpectedToolUse::DraftClaim {
-                author,
+                author: _,
                 kind,
                 parent_id,
                 body_contains,
             },
-            Entry::Claim {
-                author: actual_author,
+            DraftContent::Claim {
                 body,
                 claim_kind,
-                parent_id: actual_parent_id,
-                ..
+                parent,
             },
         ) => {
-            optional_string_matches(actual_author, author.as_deref())
-                && kind.is_none_or(|kind| kind == *claim_kind)
-                && parent_id.as_ref().is_none_or(|expected| {
-                    actual_parent_id.as_ref().map(|id| id.0.as_str()) == Some(expected.as_str())
-                })
+            kind.is_none_or(|kind| kind == *claim_kind)
+                && claim_ref_option_matches(parent.as_ref(), parent_id.as_deref())
                 && text_matches(body, body_contains)
         }
         (
             ExpectedToolUse::DraftRelation {
-                author,
                 source_id,
                 target_id,
                 kind,
+                author: _,
             },
-            Entry::Relation {
-                source_id: actual_source_id,
-                target_id: actual_target_id,
+            DraftContent::Relation {
+                source,
+                target,
                 kind: actual_kind,
-                author: actual_author,
             },
         ) => {
-            optional_string_matches(actual_author, author.as_deref())
-                && actual_source_id.0 == *source_id
-                && actual_target_id.0 == *target_id
+            claim_ref_matches(source, source_id)
+                && claim_ref_matches(target, target_id)
                 && *actual_kind == *kind
         }
         (
             ExpectedToolUse::DraftStance {
-                author,
                 target_id,
                 position,
+                author: _,
             },
-            Entry::Stance {
-                target_id: actual_target_id,
-                author: actual_author,
+            DraftContent::Stance {
+                target: actual_target,
                 position: actual_position,
             },
-        ) => {
-            optional_string_matches(actual_author, author.as_deref())
-                && actual_target_id.0 == *target_id
-                && *actual_position == *position
-        }
+        ) => claim_ref_matches(actual_target, target_id) && *actual_position == *position,
         (
             ExpectedToolUse::DraftResolve {
-                author,
                 claim_id,
                 outcome,
+                author: _,
             },
-            Entry::Resolve {
-                claim_id: actual_claim_id,
-                author: actual_author,
+            DraftContent::Resolve {
+                claim: actual_claim,
                 outcome: actual_outcome,
             },
-        ) => {
-            optional_string_matches(actual_author, author.as_deref())
-                && actual_claim_id.0 == *claim_id
-                && *actual_outcome == *outcome
-        }
+        ) => claim_ref_matches(actual_claim, claim_id) && *actual_outcome == *outcome,
         (
             ExpectedToolUse::DraftComment {
-                author,
                 claim_id,
                 body_contains,
+                author: _,
             },
-            Entry::Comment {
-                claim_id: actual_claim_id,
-                author: actual_author,
-                body,
-            },
+            DraftContent::Comment { claim, body },
         ) => {
-            optional_string_matches(actual_author, author.as_deref())
-                && claim_id.as_ref().is_none_or(|expected| {
-                    actual_claim_id.as_ref().map(|id| id.0.as_str()) == Some(expected.as_str())
-                })
+            claim_ref_option_matches(claim.as_ref(), claim_id.as_deref())
                 && text_matches(body, body_contains)
         }
         (ExpectedToolUse::AnyStructuredTool, _) => true,
@@ -739,16 +717,50 @@ fn str_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field).and_then(Value::as_str)
 }
 
-fn optional_str_matches(value: &Value, field: &str, expected: Option<&str>) -> bool {
-    expected.is_none_or(|expected| str_field(value, field) == Some(expected))
-}
-
 fn optional_enum_matches(value: &Value, field: &str, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| str_field(value, field) == Some(expected))
 }
 
-fn optional_string_matches(actual: &str, expected: Option<&str>) -> bool {
-    expected.is_none_or(|expected| actual == expected)
+fn claim_ref_matches(actual: &ClaimRef, expected: &str) -> bool {
+    match actual {
+        ClaimRef::Committed(claim_id) => {
+            claim_id.0 == expected || format!("claim:{}", claim_id.0) == expected
+        }
+        ClaimRef::Draft(draft_id) => {
+            format!("draft:{}", draft_id.0) == expected || format!("#{}", draft_id.0) == expected
+        }
+    }
+}
+
+fn claim_ref_option_matches(actual: Option<&ClaimRef>, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| actual.is_some_and(|actual| claim_ref_matches(actual, expected)))
+}
+
+fn claim_ref_field_matches(value: &Value, field: &str, expected: &str) -> bool {
+    value
+        .get(field)
+        .is_some_and(|claim_ref| claim_ref_value_matches(claim_ref, expected))
+}
+
+fn optional_claim_ref_matches(value: &Value, field: &str, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| {
+        value
+            .get(field)
+            .is_some_and(|claim_ref| claim_ref_value_matches(claim_ref, expected))
+    })
+}
+
+fn claim_ref_value_matches(value: &Value, expected: &str) -> bool {
+    value
+        .get("claim_id")
+        .and_then(Value::as_str)
+        .is_some_and(|claim_id| claim_id == expected || format!("claim:{claim_id}") == expected)
+        || value
+            .get("draft_id")
+            .and_then(Value::as_u64)
+            .is_some_and(|draft_id| {
+                format!("draft:{draft_id}") == expected || format!("#{draft_id}") == expected
+            })
 }
 
 fn required_body_matches(value: &Value, field: &str, contains: &[String]) -> bool {
@@ -832,11 +844,10 @@ mod tests {
             call_id: String::from("call_1"),
             function_name: String::from("draft_stance"),
             arguments_json: String::from(
-                "{\"author\":\"alice\",\"target_id\":\"prop-jwt\",\"position\":\"block\"}",
+                "{\"target\":{\"claim_id\":\"prop-jwt\"},\"position\":\"block\"}",
             ),
             parsed_arguments: Some(json!({
-                "author": "alice",
-                "target_id": "prop-jwt",
+                "target": { "claim_id": "prop-jwt" },
                 "position": "block",
             })),
             argument_parse_error: None,
@@ -845,9 +856,8 @@ mod tests {
         };
         let draft = DraftEntry {
             id: crate::consensus::engine::DraftId(1),
-            entry: Entry::Stance {
-                target_id: ClaimId(String::from("prop-jwt")),
-                author: String::from("alice"),
+            entry: DraftContent::Stance {
+                target: ClaimRef::Committed(ClaimId(String::from("prop-jwt"))),
                 position: Position::Block,
             },
         };
@@ -917,7 +927,7 @@ mod tests {
 
     #[test]
     fn synthetic_history_contains_tool_pairs() {
-        let history = build_synthetic_history(&ConsensusEngine::new(), 2);
+        let history = build_synthetic_history(&ConsensusEngine::new(String::new()), 2);
         assert_eq!(history.len(), 8);
         assert_eq!(history[0]["role"], "user");
         assert_eq!(history[1]["role"], "assistant");

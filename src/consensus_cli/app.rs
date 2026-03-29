@@ -73,14 +73,14 @@ impl ConsensusApp {
             config.gateway_url.clone(),
             config.auth_token.clone(),
             config.model,
-            config.participant,
+            config.participant.clone(),
             config.max_history,
         );
         let session = SessionClient::create(config.gateway_url, config.auth_token).await?;
         let mut app = Self {
             llm,
             session,
-            engine: ConsensusEngine::new(),
+            engine: ConsensusEngine::new(config.participant),
             history: Vec::new(),
             next_index: 0,
             buffered_entries: BTreeMap::new(),
@@ -98,7 +98,7 @@ impl ConsensusApp {
             config.gateway_url.clone(),
             config.auth_token.clone(),
             config.model,
-            config.participant,
+            config.participant.clone(),
             config.max_history,
         );
         let session =
@@ -106,7 +106,7 @@ impl ConsensusApp {
         let mut app = Self {
             llm,
             session,
-            engine: ConsensusEngine::new(),
+            engine: ConsensusEngine::new(config.participant),
             history: Vec::new(),
             next_index: 0,
             buffered_entries: BTreeMap::new(),
@@ -626,7 +626,7 @@ mod tests {
                 100,
             ),
             session: SessionClient::stub("session"),
-            engine: ConsensusEngine::new(),
+            engine: ConsensusEngine::new(String::from("assistant")),
             history: Vec::new(),
             next_index: 0,
             buffered_entries: BTreeMap::new(),
@@ -657,7 +657,7 @@ mod tests {
         let mut app = ConsensusApp {
             llm,
             session,
-            engine: ConsensusEngine::new(),
+            engine: ConsensusEngine::new(String::from("assistant")),
             history: Vec::new(),
             next_index: 0,
             buffered_entries: BTreeMap::new(),

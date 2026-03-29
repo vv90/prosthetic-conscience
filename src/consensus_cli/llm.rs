@@ -283,18 +283,32 @@ impl ConsensusLlm {
              The shared log is authoritative. You may inspect committed state and manipulate only local drafts.\n\
              Never claim a draft is committed. Only the human can commit drafts by typing /submit.\n\
              You must use a tool on every turn.\n\
+             All drafts are on behalf of the current participant, \"{participant}\". The tool layer injects authorship automatically, so never attribute a local draft to someone else.\n\
+             Your job is to hold a natural, proactive conversation that narrows the participant's intent until a draft is focused and well formed.\n\
+             By default, do not create or revise drafts until the participant explicitly asks you to prepare or record one, or clearly confirms after you ask.\n\
              Use a drafting tool only when the participant is making, revising, withdrawing, resolving, or \
              clearly asking you to prepare a concrete contribution to the shared log.\n\
+             If the participant is asking what they could say, what the smallest contribution would be, what would happen, \
+             or how to phrase something, do not draft immediately. Use no_structured_action to discuss options and, if needed, ask one focused follow-up.\n\
+             Soft preferences such as \"sounds right,\" \"leaning toward,\" or \"might support\" are usually not ready to record yet. \
+             Use no_structured_action to confirm whether they want to record that view and at what strength.\n\
              When the participant clearly expresses their own position, preference, objection, proposal, \
-             relation, or resolution — even informally — draft it using the appropriate tool.\n\
+             relation, or resolution and it is specific enough to record, draft it using the appropriate tool.\n\
              If the participant asks for a summary, explanation, comparison, process guidance, or strategy, \
              use no_structured_action unless they also ask you to draft something.\n\
              If the participant speaks hypothetically, attributes a view to someone else, or explores a \
              possibility without endorsing it, treat that as analysis by default rather than a new draft.\n\
              If the participant links existing claims by saying one supports, attacks, answers, or \
              resolves another concern, prefer draft_relation over draft_stance.\n\
-             When the participant expresses their own stance toward an existing claim, use draft_stance.\n\
+             When the participant expresses their own stance toward an existing claim, use draft_stance and choose the weakest stance that matches the words: \
+             consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership.\n\
+             If the participant explicitly asks for a claim, relation, stance, or resolution, do not substitute draft_comment unless the content truly does not fit.\n\
              If the participant explicitly says not to create drafts, do not create drafts.\n\
+             When referring to committed claims inside tool arguments, use claim references like {{\"claim_id\":\"prop-hybrid\"}}. When referring to locally drafted claims, use {{\"draft_id\": 3}}.\n\
+             When answering exact questions about a specific claim, its relations, or its current stances, inspect with claim_detail or preview_claim_detail first.\n\
+             When answering \"what would change if\" questions about current drafts, prefer preview_overview, preview_claim_detail, or impact_analysis first.\n\
+             When you use no_structured_action, do not merely echo the participant's words. Add a concrete next step, clarification, or grounded explanation.\n\
+             Do not call show_drafts after every mutation unless you need to inspect or revise the current draft buffer.\n\
              Use draft_comment for contributions that do not cleanly fit claim, relation, stance, or resolve.\n\
              Use no_structured_action whenever no draft is appropriate, and put the user-facing reply in raw_text_fallback.\n\n\
              ## Current deliberation state\n\
@@ -372,7 +386,7 @@ mod tests {
 
     #[test]
     fn prompt_includes_review_boundary_and_safe_tools() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = ConsensusEngine::new(String::from("assistant"));
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -392,6 +406,13 @@ mod tests {
         let prompt = llm.build_system_prompt(&engine);
         assert!(prompt.contains("Only the human can commit drafts"));
         assert!(prompt.contains("You must use a tool on every turn"));
+        assert!(prompt.contains("The tool layer injects authorship automatically"));
+        assert!(prompt.contains("By default, do not create or revise drafts"));
+        assert!(prompt.contains("smallest contribution would be"));
+        assert!(prompt.contains("choose the weakest stance"));
+        assert!(prompt.contains("{\"claim_id\":\"prop-hybrid\"}"));
+        assert!(prompt.contains("{\"draft_id\": 3}"));
+        assert!(prompt.contains("inspect with claim_detail or preview_claim_detail first"));
         assert!(prompt.contains("If the participant explicitly says not to create drafts"));
         assert!(prompt.contains("prefer draft_relation over draft_stance"));
         assert!(prompt.contains("no_structured_action"));
@@ -411,7 +432,7 @@ mod tests {
             100,
         );
 
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let history = vec![json!({"role": "user", "content": "Summarize the current state."})];
         let payload = llm.build_request_payload(&engine, &history, &tool_definitions_json());
 

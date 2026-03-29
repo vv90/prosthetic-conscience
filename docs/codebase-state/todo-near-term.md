@@ -33,9 +33,12 @@ The engine is the stateful core that owns the log, materialized state, solver re
 
 Additional engine features added during Phase 5:
 
+- Draft buffer refactor: local drafts are now stored as draft-local `DraftContent` rather than committed-style `Entry` values.
+- Draft-local claim references use `DraftId` via `ClaimRef::{Committed, Draft}` and are materialized into committed `Entry` values only for preview/submission.
+- Draft authorship is now engine-scoped from the active participant rather than LLM-supplied tool arguments.
 - `draft_comment`: draft freeform `Comment` entries (optionally attached to a claim).
 - `impact_analysis()`: compare committed state with committed + drafts, report new claims and status changes.
-- `submission_bundle()`: finalize drafts into entries with provisional→final claim ID rewriting.
+- `submission_bundle()`: finalize drafts into entries with `DraftId -> final ClaimId` rewriting.
 - `Comment` entry type extended with optional `claim_id` field (backward-compatible, `skip_serializing_if`).
 - `llm_tool_definitions()`: filtered tool list excluding `submit_drafts` and `clear_drafts` for LLM safety.
 - `format_drafts()`, `format_impact_analysis()`: text rendering for draft buffer and impact diff.
@@ -72,13 +75,13 @@ Eval harness (new):
 - `fixtures/tool-call-eval/authentication-tool-reliability.json`: checked-in benchmark suite with deterministic rubrics.
 - `docs/tool-calling-eval-methodology.md`: scoring methodology, metrics definitions, and recommended judge-model follow-up for ambiguous cases.
 - Metrics per run: `tool_call_made`, `structured_tool_call_made`, `expected_tool_match`, `expected_argument_match`, `expected_outcome_match`, `turn_success`.
+- Eval matching now scores draft-local `DraftContent` and semantic claim references rather than assuming committed-entry-shaped drafts.
 
 Outstanding issues:
 
 - **WS heartbeat**: `session.rs` `connected_loop` has no ping/pong or application-level heartbeat tick. Dead TCP connections (NAT timeout, network partition) won't be detected until the next send fails. Server-side auto-heartbeat keeps the kernel subscriber alive while the TCP connection is healthy, but silent failures can leave the client thinking it's connected for an extended period.
 - ~~**Conversation history truncation**: LLM `history` grows without bound across turns.~~ Resolved: `truncate_history()` with configurable `max_history` preserves tool-call/result pairs.
 - **History contamination from prose-only turns**: prior assistant messages that narrated tool calls in prose (no actual `tool_calls` in the message) pollute the conversation history, teaching the model by example to narrate rather than call tools. Detected in 2026-03-28 trial via llama-server logs showing prior history with `draft_claim\n{...}` as plain text content.
-- **Model uses wrong `author` field**: model passes `"author": "system"` instead of the participant name. The system prompt identifies the participant but the model doesn't consistently use it for tool arguments.
 - **Duplicate draft creation**: model sometimes creates identical drafts across consecutive tool rounds without deduplication.
 
 ### Phase 6: Crate extraction and WASM target

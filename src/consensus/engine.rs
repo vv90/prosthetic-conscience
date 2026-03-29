@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
 
 use super::reducer::{replay, to_graph};
 use super::render::{self, ClaimDetail, OverviewData};
@@ -22,11 +23,62 @@ use super::types::{ClaimId, ClaimKind, Entry, MaterializedState, Outcome, Positi
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct DraftId(pub u64);
 
+/// Reference to a claim from draft-local state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClaimRef {
+    Committed(ClaimId),
+    Draft(DraftId),
+}
+
+impl Serialize for ClaimRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            ClaimRef::Committed(claim_id) => map.serialize_entry("claim_id", claim_id)?,
+            ClaimRef::Draft(draft_id) => map.serialize_entry("draft_id", draft_id)?,
+        }
+        map.end()
+    }
+}
+
+/// Draft-local content awaiting submission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DraftContent {
+    Claim {
+        body: String,
+        claim_kind: ClaimKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<ClaimRef>,
+    },
+    Relation {
+        source: ClaimRef,
+        target: ClaimRef,
+        kind: RelationKind,
+    },
+    Stance {
+        target: ClaimRef,
+        position: Position,
+    },
+    Resolve {
+        claim: ClaimRef,
+        outcome: Outcome,
+    },
+    Comment {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claim: Option<ClaimRef>,
+        body: String,
+    },
+}
+
 /// A draft entry awaiting submission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DraftEntry {
     pub id: DraftId,
-    pub entry: Entry,
+    pub entry: DraftContent,
 }
 
 /// Errors that the engine can produce.
@@ -34,12 +86,19 @@ pub struct DraftEntry {
 pub enum EngineError {
     #[error("draft not found: {0:?}")]
     DraftNotFound(DraftId),
+    #[error("draft reference must target a claim: {0:?}")]
+    DraftReferenceMustTargetClaim(DraftId),
+    #[error("cannot remove draft {draft_id:?} because draft {referenced_by:?} depends on it")]
+    DraftReferenced {
+        draft_id: DraftId,
+        referenced_by: DraftId,
+    },
 }
 
 /// Summary of a newly introduced claim in impact analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImpactNewClaim {
-    pub claim_id: ClaimId,
+    pub draft_id: DraftId,
     pub body: String,
     pub author: String,
     pub kind: ClaimKind,
@@ -65,7 +124,7 @@ pub struct ImpactAnalysis {
 /// Mapping from a provisional draft claim id to its final committed id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClaimIdMapping {
-    pub provisional: ClaimId,
+    pub draft_id: DraftId,
     pub final_id: ClaimId,
 }
 
@@ -86,21 +145,17 @@ pub struct ConsensusEngine {
     log: Vec<Entry>,
     drafts: Vec<DraftEntry>,
     next_draft_id: u64,
-}
-
-impl Default for ConsensusEngine {
-    fn default() -> Self {
-        Self::new()
-    }
+    draft_author: String,
 }
 
 impl ConsensusEngine {
     /// Create an empty engine.
-    pub fn new() -> Self {
+    pub fn new(draft_author: String) -> Self {
         Self {
             log: Vec::new(),
             drafts: Vec::new(),
             next_draft_id: 0,
+            draft_author,
         }
     }
 
@@ -133,105 +188,89 @@ impl ConsensusEngine {
     // -- Draft creation -----------------------------------------------------
 
     /// Draft a new claim. Returns the assigned DraftId.
-    /// Generates a provisional `ClaimId("draft-{N}")`.
     pub fn draft_claim(
         &mut self,
-        author: String,
         body: String,
         kind: ClaimKind,
-        parent_id: Option<ClaimId>,
-    ) -> DraftId {
+        parent: Option<ClaimRef>,
+    ) -> Result<DraftId, EngineError> {
+        self.validate_optional_claim_ref(parent.as_ref())?;
         let id = self.alloc_draft_id();
-        let claim_id = ClaimId(format!("draft-{}", id.0));
         self.drafts.push(DraftEntry {
             id,
-            entry: Entry::Claim {
-                claim_id,
-                author,
+            entry: DraftContent::Claim {
                 body,
                 claim_kind: kind,
-                parent_id,
+                parent,
             },
         });
-        id
+        Ok(id)
     }
 
     /// Draft a relation between two claims.
     pub fn draft_relation(
         &mut self,
-        source_id: ClaimId,
-        target_id: ClaimId,
+        source: ClaimRef,
+        target: ClaimRef,
         kind: RelationKind,
-        author: String,
-    ) -> DraftId {
+    ) -> Result<DraftId, EngineError> {
+        self.validate_claim_ref(&source)?;
+        self.validate_claim_ref(&target)?;
         let id = self.alloc_draft_id();
         self.drafts.push(DraftEntry {
             id,
-            entry: Entry::Relation {
-                source_id,
-                target_id,
+            entry: DraftContent::Relation {
+                source,
+                target,
                 kind,
-                author,
             },
         });
-        id
+        Ok(id)
     }
 
     /// Draft a stance on a claim.
     pub fn draft_stance(
         &mut self,
-        target_id: ClaimId,
-        author: String,
+        target: ClaimRef,
         position: Position,
-    ) -> DraftId {
+    ) -> Result<DraftId, EngineError> {
+        self.validate_claim_ref(&target)?;
         let id = self.alloc_draft_id();
         self.drafts.push(DraftEntry {
             id,
-            entry: Entry::Stance {
-                target_id,
-                author,
-                position,
-            },
+            entry: DraftContent::Stance { target, position },
         });
-        id
+        Ok(id)
     }
 
     /// Draft a resolution for a claim.
     pub fn draft_resolve(
         &mut self,
-        claim_id: ClaimId,
-        author: String,
+        claim: ClaimRef,
         outcome: Outcome,
-    ) -> DraftId {
+    ) -> Result<DraftId, EngineError> {
+        self.validate_claim_ref(&claim)?;
         let id = self.alloc_draft_id();
         self.drafts.push(DraftEntry {
             id,
-            entry: Entry::Resolve {
-                claim_id,
-                author,
-                outcome,
-            },
+            entry: DraftContent::Resolve { claim, outcome },
         });
-        id
+        Ok(id)
     }
 
     /// Draft a freeform comment, optionally attached to a claim.
     pub fn draft_comment(
         &mut self,
-        author: String,
         body: String,
-        claim_id: Option<ClaimId>,
-    ) -> DraftId {
+        claim: Option<ClaimRef>,
+    ) -> Result<DraftId, EngineError> {
+        self.validate_optional_claim_ref(claim.as_ref())?;
         let id = self.alloc_draft_id();
         self.drafts.push(DraftEntry {
             id,
-            entry: Entry::Comment {
-                claim_id,
-                author,
-                body,
-            },
+            entry: DraftContent::Comment { claim, body },
         });
-        id
+        Ok(id)
     }
 
     // -- Draft management ---------------------------------------------------
@@ -248,13 +287,36 @@ impl ConsensusEngine {
             .iter()
             .position(|d| d.id == id)
             .ok_or(EngineError::DraftNotFound(id))?;
+        let removed_is_claim = matches!(self.drafts[pos].entry, DraftContent::Claim { .. });
+        if removed_is_claim
+            && let Some(referenced_by) = self
+                .drafts
+                .iter()
+                .filter(|draft| draft.id != id)
+                .find(|draft| Self::draft_references_draft(&draft.entry, id))
+                .map(|draft| draft.id)
+        {
+            return Err(EngineError::DraftReferenced {
+                draft_id: id,
+                referenced_by,
+            });
+        }
         self.drafts.remove(pos);
         Ok(())
     }
 
     /// Drain all drafts and return their entries for submission.
     pub fn submit_drafts(&mut self) -> Vec<Entry> {
-        self.drafts.drain(..).map(|d| d.entry).collect()
+        let entries: Vec<Entry> = self
+            .drafts
+            .iter()
+            .map(|draft| {
+                self.materialize_draft_for_preview(draft)
+                    .expect("draft refs are validated before submission")
+            })
+            .collect();
+        self.drafts.clear();
+        entries
     }
 
     /// Discard all drafts.
@@ -272,10 +334,13 @@ impl ConsensusEngine {
     }
 
     /// Claim detail including uncommitted drafts.
-    pub fn preview_claim_detail(&self, claim_id: &ClaimId) -> Option<ClaimDetail> {
+    pub fn preview_claim_detail(&self, claim: &ClaimRef) -> Option<ClaimDetail> {
+        let claim_id = self
+            .resolve_claim_ref_for_preview(claim)
+            .expect("draft refs are validated before preview");
         let merged = self.merged_entries();
         let (state, statuses) = Self::materialize(&merged);
-        render::claim_detail(&state, &statuses, claim_id)
+        render::claim_detail(&state, &statuses, &claim_id)
     }
 
     /// Compare committed state with committed + drafts.
@@ -284,6 +349,8 @@ impl ConsensusEngine {
         let merged = self.merged_entries();
         let (preview_state, preview_statuses) = Self::materialize(&merged);
         Self::build_impact_analysis(
+            &self.drafts,
+            &self.draft_author,
             &committed_state,
             &committed_statuses,
             &preview_state,
@@ -299,12 +366,12 @@ impl ConsensusEngine {
     where
         F: FnMut() -> ClaimId,
     {
-        let mut claim_id_map: HashMap<ClaimId, ClaimId> = HashMap::new();
+        let mut claim_id_map: HashMap<DraftId, ClaimId> = HashMap::new();
 
         for draft in &self.drafts {
-            if let Entry::Claim { claim_id, .. } = &draft.entry {
+            if matches!(draft.entry, DraftContent::Claim { .. }) {
                 claim_id_map
-                    .entry(claim_id.clone())
+                    .entry(draft.id)
                     .or_insert_with(&mut next_claim_id);
             }
         }
@@ -315,18 +382,16 @@ impl ConsensusEngine {
             .iter()
             .map(|draft| {
                 draft_ids.push(draft.id);
-                Self::rewrite_entry_claim_ids(&draft.entry, &claim_id_map)
+                self.materialize_draft_for_submission(draft, &claim_id_map)
+                    .expect("draft refs are validated before submission")
             })
             .collect();
 
         let mut claim_id_map: Vec<ClaimIdMapping> = claim_id_map
             .into_iter()
-            .map(|(provisional, final_id)| ClaimIdMapping {
-                provisional,
-                final_id,
-            })
+            .map(|(draft_id, final_id)| ClaimIdMapping { draft_id, final_id })
             .collect();
-        claim_id_map.sort_by(|a, b| a.provisional.0.cmp(&b.provisional.0));
+        claim_id_map.sort_by_key(|mapping| mapping.draft_id.0);
 
         SubmissionBundle {
             draft_ids,
@@ -344,11 +409,17 @@ impl ConsensusEngine {
     }
 
     fn merged_entries(&self) -> Vec<Entry> {
-        self.log
-            .iter()
-            .chain(self.drafts.iter().map(|d| &d.entry))
-            .cloned()
-            .collect()
+        let mut merged = self.log.clone();
+        merged.extend(
+            self.drafts
+                .iter()
+                .map(|draft| {
+                    self.materialize_draft_for_preview(draft)
+                        .expect("draft refs are validated before preview")
+                })
+                .collect::<Vec<_>>(),
+        );
+        merged
     }
 
     /// Run the full pipeline: replay → graph → solve → status.
@@ -361,24 +432,30 @@ impl ConsensusEngine {
     }
 
     fn build_impact_analysis(
+        drafts: &[DraftEntry],
+        draft_author: &str,
         committed_state: &MaterializedState,
         committed_statuses: &HashMap<ClaimId, EpistemicStatus>,
         preview_state: &MaterializedState,
         preview_statuses: &HashMap<ClaimId, EpistemicStatus>,
     ) -> ImpactAnalysis {
         let mut new_claims = Vec::new();
-        for (claim_id, claim) in &preview_state.claims {
-            if !committed_state.claims.contains_key(claim_id) {
+        for draft in drafts {
+            if let DraftContent::Claim {
+                body, claim_kind, ..
+            } = &draft.entry
+            {
+                let claim_id = Self::draft_claim_preview_id(draft.id);
                 new_claims.push(ImpactNewClaim {
-                    claim_id: claim_id.clone(),
-                    body: claim.body.clone(),
-                    author: claim.author.clone(),
-                    kind: claim.kind,
-                    status: preview_statuses.get(claim_id).copied(),
+                    draft_id: draft.id,
+                    body: body.clone(),
+                    author: draft_author.to_owned(),
+                    kind: *claim_kind,
+                    status: preview_statuses.get(&claim_id).copied(),
                 });
             }
         }
-        new_claims.sort_by(|a, b| a.claim_id.0.cmp(&b.claim_id.0));
+        new_claims.sort_by_key(|claim| claim.draft_id.0);
 
         let mut claim_ids: Vec<ClaimId> = committed_state
             .claims
@@ -420,70 +497,148 @@ impl ConsensusEngine {
         }
     }
 
-    fn rewrite_claim_id(claim_id: &ClaimId, claim_id_map: &HashMap<ClaimId, ClaimId>) -> ClaimId {
-        claim_id_map
-            .get(claim_id)
-            .cloned()
-            .unwrap_or_else(|| claim_id.clone())
+    fn draft_claim_preview_id(draft_id: DraftId) -> ClaimId {
+        ClaimId(format!("draft-{}", draft_id.0))
     }
 
-    fn rewrite_entry_claim_ids(entry: &Entry, claim_id_map: &HashMap<ClaimId, ClaimId>) -> Entry {
-        match entry {
-            Entry::Claim {
-                claim_id,
-                author,
+    fn validate_optional_claim_ref(&self, claim_ref: Option<&ClaimRef>) -> Result<(), EngineError> {
+        if let Some(claim_ref) = claim_ref {
+            self.validate_claim_ref(claim_ref)?;
+        }
+        Ok(())
+    }
+
+    fn validate_claim_ref(&self, claim_ref: &ClaimRef) -> Result<(), EngineError> {
+        match claim_ref {
+            ClaimRef::Committed(_) => Ok(()),
+            ClaimRef::Draft(draft_id) => match self.find_draft(*draft_id) {
+                Some(DraftEntry {
+                    entry: DraftContent::Claim { .. },
+                    ..
+                }) => Ok(()),
+                Some(_) => Err(EngineError::DraftReferenceMustTargetClaim(*draft_id)),
+                None => Err(EngineError::DraftNotFound(*draft_id)),
+            },
+        }
+    }
+
+    fn resolve_claim_ref_for_preview(&self, claim_ref: &ClaimRef) -> Result<ClaimId, EngineError> {
+        match claim_ref {
+            ClaimRef::Committed(claim_id) => Ok(claim_id.clone()),
+            ClaimRef::Draft(draft_id) => {
+                self.validate_claim_ref(claim_ref)?;
+                Ok(Self::draft_claim_preview_id(*draft_id))
+            }
+        }
+    }
+
+    fn resolve_claim_ref_for_submission(
+        &self,
+        claim_ref: &ClaimRef,
+        claim_id_map: &HashMap<DraftId, ClaimId>,
+    ) -> Result<ClaimId, EngineError> {
+        match claim_ref {
+            ClaimRef::Committed(claim_id) => Ok(claim_id.clone()),
+            ClaimRef::Draft(draft_id) => {
+                self.validate_claim_ref(claim_ref)?;
+                claim_id_map
+                    .get(draft_id)
+                    .cloned()
+                    .ok_or(EngineError::DraftNotFound(*draft_id))
+            }
+        }
+    }
+
+    fn materialize_draft_for_preview(&self, draft: &DraftEntry) -> Result<Entry, EngineError> {
+        self.materialize_draft(
+            draft,
+            |claim_ref| self.resolve_claim_ref_for_preview(claim_ref),
+            |draft_id| Ok(Self::draft_claim_preview_id(draft_id)),
+        )
+    }
+
+    fn materialize_draft_for_submission(
+        &self,
+        draft: &DraftEntry,
+        claim_id_map: &HashMap<DraftId, ClaimId>,
+    ) -> Result<Entry, EngineError> {
+        self.materialize_draft(
+            draft,
+            |claim_ref| self.resolve_claim_ref_for_submission(claim_ref, claim_id_map),
+            |draft_id| {
+                claim_id_map
+                    .get(&draft_id)
+                    .cloned()
+                    .ok_or(EngineError::DraftNotFound(draft_id))
+            },
+        )
+    }
+
+    fn materialize_draft<F, G>(
+        &self,
+        draft: &DraftEntry,
+        resolve_ref: F,
+        resolve_own_claim_id: G,
+    ) -> Result<Entry, EngineError>
+    where
+        F: Fn(&ClaimRef) -> Result<ClaimId, EngineError>,
+        G: Fn(DraftId) -> Result<ClaimId, EngineError>,
+    {
+        match &draft.entry {
+            DraftContent::Claim {
                 body,
                 claim_kind,
-                parent_id,
-            } => Entry::Claim {
-                claim_id: Self::rewrite_claim_id(claim_id, claim_id_map),
-                author: author.clone(),
+                parent,
+            } => Ok(Entry::Claim {
+                claim_id: resolve_own_claim_id(draft.id)?,
+                author: self.draft_author.clone(),
                 body: body.clone(),
                 claim_kind: *claim_kind,
-                parent_id: parent_id
-                    .as_ref()
-                    .map(|id| Self::rewrite_claim_id(id, claim_id_map)),
-            },
-            Entry::Relation {
-                source_id,
-                target_id,
+                parent_id: parent.as_ref().map(&resolve_ref).transpose()?,
+            }),
+            DraftContent::Relation {
+                source,
+                target,
                 kind,
-                author,
-            } => Entry::Relation {
-                source_id: Self::rewrite_claim_id(source_id, claim_id_map),
-                target_id: Self::rewrite_claim_id(target_id, claim_id_map),
+            } => Ok(Entry::Relation {
+                source_id: resolve_ref(source)?,
+                target_id: resolve_ref(target)?,
                 kind: *kind,
-                author: author.clone(),
-            },
-            Entry::Stance {
-                target_id,
-                author,
-                position,
-            } => Entry::Stance {
-                target_id: Self::rewrite_claim_id(target_id, claim_id_map),
-                author: author.clone(),
+                author: self.draft_author.clone(),
+            }),
+            DraftContent::Stance { target, position } => Ok(Entry::Stance {
+                target_id: resolve_ref(target)?,
+                author: self.draft_author.clone(),
                 position: *position,
-            },
-            Entry::Resolve {
-                claim_id,
-                author,
-                outcome,
-            } => Entry::Resolve {
-                claim_id: Self::rewrite_claim_id(claim_id, claim_id_map),
-                author: author.clone(),
+            }),
+            DraftContent::Resolve { claim, outcome } => Ok(Entry::Resolve {
+                claim_id: resolve_ref(claim)?,
+                author: self.draft_author.clone(),
                 outcome: *outcome,
-            },
-            Entry::Comment {
-                claim_id,
-                author,
-                body,
-            } => Entry::Comment {
-                claim_id: claim_id
-                    .as_ref()
-                    .map(|id| Self::rewrite_claim_id(id, claim_id_map)),
-                author: author.clone(),
+            }),
+            DraftContent::Comment { claim, body } => Ok(Entry::Comment {
+                claim_id: claim.as_ref().map(resolve_ref).transpose()?,
+                author: self.draft_author.clone(),
                 body: body.clone(),
-            },
+            }),
+        }
+    }
+
+    fn find_draft(&self, draft_id: DraftId) -> Option<&DraftEntry> {
+        self.drafts.iter().find(|draft| draft.id == draft_id)
+    }
+
+    fn draft_references_draft(entry: &DraftContent, draft_id: DraftId) -> bool {
+        let references =
+            |claim_ref: &ClaimRef| matches!(claim_ref, ClaimRef::Draft(id) if *id == draft_id);
+        match entry {
+            DraftContent::Claim { parent, .. } => parent.as_ref().is_some_and(references),
+            DraftContent::Relation { source, target, .. } => {
+                references(source) || references(target)
+            }
+            DraftContent::Stance { target, .. } => references(target),
+            DraftContent::Resolve { claim, .. } => references(claim),
+            DraftContent::Comment { claim, .. } => claim.as_ref().is_some_and(references),
         }
     }
 }
@@ -493,15 +648,19 @@ mod tests {
     use super::*;
     use crate::consensus::types::*;
 
+    fn engine() -> ConsensusEngine {
+        ConsensusEngine::new(String::from("assistant"))
+    }
+
     #[test]
     fn new_engine_is_empty() {
-        let engine = ConsensusEngine::new();
+        let engine = engine();
         assert!(engine.log().is_empty());
     }
 
     #[test]
     fn append_grows_log() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -520,7 +679,7 @@ mod tests {
 
     #[test]
     fn overview_empty() {
-        let engine = ConsensusEngine::new();
+        let engine = engine();
         let data = engine.overview();
         assert_eq!(data.total_claims, 0);
         assert_eq!(data.total_relations, 0);
@@ -530,7 +689,7 @@ mod tests {
 
     #[test]
     fn overview_categorizes_claims() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("item1".into()),
             author: "alice".into(),
@@ -554,13 +713,13 @@ mod tests {
 
     #[test]
     fn claim_detail_unknown_returns_none() {
-        let engine = ConsensusEngine::new();
+        let engine = engine();
         assert!(engine.claim_detail(&ClaimId("nope".into())).is_none());
     }
 
     #[test]
     fn claim_detail_returns_data() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -590,114 +749,188 @@ mod tests {
     // -- Draft tests --------------------------------------------------------
 
     #[test]
-    fn draft_claim_assigns_unique_id() {
-        let mut engine = ConsensusEngine::new();
-        let id1 = engine.draft_claim("alice".into(), "Claim A".into(), ClaimKind::Fact, None);
-        let id2 = engine.draft_claim("bob".into(), "Claim B".into(), ClaimKind::Proposal, None);
+    fn draft_claim_assigns_unique_id_and_has_no_committed_fields() {
+        let mut engine = engine();
+        let id1 = engine
+            .draft_claim("Claim A".into(), ClaimKind::Fact, None)
+            .unwrap();
+        let id2 = engine
+            .draft_claim("Claim B".into(), ClaimKind::Proposal, None)
+            .unwrap();
         assert_ne!(id1, id2);
         assert_eq!(engine.show_drafts().len(), 2);
-    }
-
-    #[test]
-    fn draft_claim_generates_provisional_id() {
-        let mut engine = ConsensusEngine::new();
-        let draft_id = engine.draft_claim("alice".into(), "A claim".into(), ClaimKind::Fact, None);
         let draft = &engine.show_drafts()[0];
-        assert_eq!(draft.id, draft_id);
-        if let Entry::Claim { ref claim_id, .. } = draft.entry {
-            assert_eq!(claim_id.0, format!("draft-{}", draft_id.0));
-        } else {
-            panic!("expected Claim entry");
-        }
+        assert_eq!(draft.id, id1);
+        assert!(matches!(
+            &draft.entry,
+            DraftContent::Claim {
+                body,
+                claim_kind: ClaimKind::Fact,
+                parent: None,
+            } if body == "Claim A"
+        ));
     }
 
     #[test]
-    fn draft_relation_stance_resolve() {
-        let mut engine = ConsensusEngine::new();
-        engine.draft_relation(
-            ClaimId("c1".into()),
-            ClaimId("c2".into()),
-            RelationKind::Attacks,
-            "alice".into(),
-        );
-        engine.draft_stance(ClaimId("c1".into()), "bob".into(), Position::Consent);
-        engine.draft_resolve(ClaimId("c1".into()), "alice".into(), Outcome::Accepted);
-        assert_eq!(engine.show_drafts().len(), 3);
+    fn draft_relation_stance_resolve_accept_claim_refs() {
+        let mut engine = engine();
+        let draft_claim = engine
+            .draft_claim("Claim A".into(), ClaimKind::Fact, None)
+            .unwrap();
+        engine
+            .draft_relation(
+                ClaimRef::Draft(draft_claim),
+                ClaimRef::Committed(ClaimId("c2".into())),
+                RelationKind::Attacks,
+            )
+            .unwrap();
+        engine
+            .draft_stance(ClaimRef::Draft(draft_claim), Position::Consent)
+            .unwrap();
+        engine
+            .draft_resolve(ClaimRef::Draft(draft_claim), Outcome::Accepted)
+            .unwrap();
+        assert_eq!(engine.show_drafts().len(), 4);
     }
 
     #[test]
     fn draft_comment_adds_comment_entry() {
-        let mut engine = ConsensusEngine::new();
-        engine.draft_comment(
-            "alice".into(),
-            "Needs more evidence".into(),
-            Some(ClaimId("c1".into())),
-        );
+        let mut engine = engine();
+        engine
+            .draft_comment(
+                "Needs more evidence".into(),
+                Some(ClaimRef::Committed(ClaimId("c1".into()))),
+            )
+            .unwrap();
         assert_eq!(engine.show_drafts().len(), 1);
         assert!(matches!(
             &engine.show_drafts()[0].entry,
-            Entry::Comment {
-                claim_id: Some(claim_id),
-                author,
+            DraftContent::Comment {
+                claim: Some(ClaimRef::Committed(claim_id)),
                 body,
-            } if claim_id.0 == "c1" && author == "alice" && body == "Needs more evidence"
+            } if claim_id.0 == "c1" && body == "Needs more evidence"
         ));
     }
 
     #[test]
     fn show_drafts_preserves_order() {
-        let mut engine = ConsensusEngine::new();
-        let id1 = engine.draft_claim("a".into(), "First".into(), ClaimKind::Fact, None);
-        let id2 = engine.draft_claim("b".into(), "Second".into(), ClaimKind::Fact, None);
+        let mut engine = engine();
+        let id1 = engine
+            .draft_claim("First".into(), ClaimKind::Fact, None)
+            .unwrap();
+        let id2 = engine
+            .draft_claim("Second".into(), ClaimKind::Fact, None)
+            .unwrap();
         let ids: Vec<DraftId> = engine.show_drafts().iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![id1, id2]);
     }
 
     #[test]
     fn remove_draft_succeeds() {
-        let mut engine = ConsensusEngine::new();
-        let id1 = engine.draft_claim("a".into(), "First".into(), ClaimKind::Fact, None);
-        let _id2 = engine.draft_claim("b".into(), "Second".into(), ClaimKind::Fact, None);
+        let mut engine = engine();
+        let id1 = engine
+            .draft_claim("First".into(), ClaimKind::Fact, None)
+            .unwrap();
+        let id2 = engine
+            .draft_claim("Second".into(), ClaimKind::Fact, None)
+            .unwrap();
         engine.remove_draft(id1).unwrap();
         assert_eq!(engine.show_drafts().len(), 1);
-        assert_eq!(engine.show_drafts()[0].id, _id2);
+        assert_eq!(engine.show_drafts()[0].id, id2);
     }
 
     #[test]
     fn remove_draft_not_found() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         let result = engine.remove_draft(DraftId(999));
         assert_eq!(result, Err(EngineError::DraftNotFound(DraftId(999))));
     }
 
     #[test]
-    fn submit_drafts_drains_buffer() {
-        let mut engine = ConsensusEngine::new();
-        engine.draft_claim("alice".into(), "A".into(), ClaimKind::Fact, None);
-        engine.draft_stance(ClaimId("c1".into()), "bob".into(), Position::Block);
+    fn remove_draft_rejects_when_other_draft_depends_on_it() {
+        let mut engine = engine();
+        let claim_draft = engine
+            .draft_claim("A".into(), ClaimKind::Fact, None)
+            .unwrap();
+        let dependent = engine
+            .draft_stance(ClaimRef::Draft(claim_draft), Position::Block)
+            .unwrap();
+        let result = engine.remove_draft(claim_draft);
+        assert_eq!(
+            result,
+            Err(EngineError::DraftReferenced {
+                draft_id: claim_draft,
+                referenced_by: dependent,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_draft_refs_fail_immediately() {
+        let mut engine = engine();
+        let comment_draft = engine.draft_comment("Note".into(), None).unwrap();
+        assert_eq!(
+            engine.draft_stance(ClaimRef::Draft(comment_draft), Position::Consent),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            engine.draft_relation(
+                ClaimRef::Draft(DraftId(999)),
+                ClaimRef::Committed(ClaimId("c1".into())),
+                RelationKind::Supports,
+            ),
+            Err(EngineError::DraftNotFound(DraftId(999)))
+        );
+    }
+
+    #[test]
+    fn submit_drafts_drains_buffer_and_materializes_author() {
+        let mut engine = engine();
+        let draft_claim = engine
+            .draft_claim("A".into(), ClaimKind::Fact, None)
+            .unwrap();
+        engine
+            .draft_stance(ClaimRef::Draft(draft_claim), Position::Block)
+            .unwrap();
         let entries = engine.submit_drafts();
         assert_eq!(entries.len(), 2);
         assert!(engine.show_drafts().is_empty());
+        assert!(matches!(
+            &entries[0],
+            Entry::Claim { claim_id, author, body, .. }
+                if claim_id == &ClaimId("draft-0".into()) && author == "assistant" && body == "A"
+        ));
+        assert!(matches!(
+            &entries[1],
+            Entry::Stance { target_id, author, position }
+                if target_id == &ClaimId("draft-0".into())
+                    && author == "assistant"
+                    && *position == Position::Block
+        ));
     }
 
     #[test]
     fn submit_empty_returns_empty() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         assert!(engine.submit_drafts().is_empty());
     }
 
     #[test]
     fn clear_drafts_empties_buffer() {
-        let mut engine = ConsensusEngine::new();
-        engine.draft_claim("a".into(), "A".into(), ClaimKind::Fact, None);
-        engine.draft_claim("b".into(), "B".into(), ClaimKind::Fact, None);
+        let mut engine = engine();
+        engine
+            .draft_claim("A".into(), ClaimKind::Fact, None)
+            .unwrap();
+        engine
+            .draft_claim("B".into(), ClaimKind::Fact, None)
+            .unwrap();
         engine.clear_drafts();
         assert!(engine.show_drafts().is_empty());
     }
 
     #[test]
     fn preview_includes_drafts() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -705,7 +938,9 @@ mod tests {
             claim_kind: ClaimKind::Fact,
             parent_id: None,
         });
-        engine.draft_claim("bob".into(), "Drafted".into(), ClaimKind::Proposal, None);
+        engine
+            .draft_claim("Drafted".into(), ClaimKind::Proposal, None)
+            .unwrap();
 
         let committed = engine.overview();
         let preview = engine.preview_overview();
@@ -716,7 +951,7 @@ mod tests {
 
     #[test]
     fn drafts_do_not_leak_into_committed() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -724,7 +959,9 @@ mod tests {
             claim_kind: ClaimKind::Fact,
             parent_id: None,
         });
-        engine.draft_claim("bob".into(), "Ghost".into(), ClaimKind::Fact, None);
+        engine
+            .draft_claim("Ghost".into(), ClaimKind::Fact, None)
+            .unwrap();
 
         let committed = engine.overview();
         assert_eq!(committed.total_claims, 1);
@@ -732,7 +969,7 @@ mod tests {
 
     #[test]
     fn preview_claim_detail_shows_draft_relations() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -740,34 +977,26 @@ mod tests {
             claim_kind: ClaimKind::Fact,
             parent_id: None,
         });
-        let attacker_id =
-            engine.draft_claim("bob".into(), "Attacker".into(), ClaimKind::Fact, None);
-        // Get the provisional claim id
-        let attacker_claim_id = if let Entry::Claim { ref claim_id, .. } = engine
-            .show_drafts()
-            .iter()
-            .find(|d| d.id == attacker_id)
-            .unwrap()
-            .entry
-        {
-            claim_id.clone()
-        } else {
-            panic!("expected claim");
-        };
-        engine.draft_relation(
-            attacker_claim_id,
-            ClaimId("c1".into()),
-            RelationKind::Attacks,
-            "bob".into(),
-        );
+        let attacker_id = engine
+            .draft_claim("Attacker".into(), ClaimKind::Fact, None)
+            .unwrap();
+        engine
+            .draft_relation(
+                ClaimRef::Draft(attacker_id),
+                ClaimRef::Committed(ClaimId("c1".into())),
+                RelationKind::Attacks,
+            )
+            .unwrap();
 
-        let detail = engine.preview_claim_detail(&ClaimId("c1".into())).unwrap();
+        let detail = engine
+            .preview_claim_detail(&ClaimRef::Committed(ClaimId("c1".into())))
+            .unwrap();
         assert_eq!(detail.attacked_by.len(), 1);
     }
 
     #[test]
     fn impact_analysis_reports_new_claims_and_status_changes() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("c1".into()),
             author: "alice".into(),
@@ -783,22 +1012,21 @@ mod tests {
             parent_id: None,
         });
 
-        let draft_id = engine.draft_claim("carol".into(), "New fact".into(), ClaimKind::Fact, None);
-        let draft_claim_id = match &engine.show_drafts()[0].entry {
-            Entry::Claim { claim_id, .. } => claim_id.clone(),
-            other => panic!("expected claim draft, got {other:?}"),
-        };
+        let draft_id = engine
+            .draft_claim("New fact".into(), ClaimKind::Fact, None)
+            .unwrap();
         assert_eq!(draft_id, DraftId(0));
-        engine.draft_relation(
-            ClaimId("c2".into()),
-            ClaimId("c1".into()),
-            RelationKind::Attacks,
-            "bob".into(),
-        );
+        engine
+            .draft_relation(
+                ClaimRef::Committed(ClaimId("c2".into())),
+                ClaimRef::Committed(ClaimId("c1".into())),
+                RelationKind::Attacks,
+            )
+            .unwrap();
 
         let impact = engine.impact_analysis();
         assert_eq!(impact.new_claims.len(), 1);
-        assert_eq!(impact.new_claims[0].claim_id, draft_claim_id);
+        assert_eq!(impact.new_claims[0].draft_id, draft_id);
         assert_eq!(impact.status_changes.len(), 1);
         assert_eq!(impact.status_changes[0].claim_id, ClaimId("c1".into()));
         assert_eq!(
@@ -812,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn submission_bundle_rewrites_provisional_ids_consistently() {
-        let mut engine = ConsensusEngine::new();
+    fn submission_bundle_rewrites_draft_refs_consistently() {
+        let mut engine = engine();
         engine.append(Entry::Claim {
             claim_id: ClaimId("item1".into()),
             author: "alice".into(),
@@ -821,34 +1049,25 @@ mod tests {
             claim_kind: ClaimKind::Item,
             parent_id: None,
         });
-        let draft_claim_id = engine.draft_claim(
-            "bob".into(),
-            "Use JWT".into(),
-            ClaimKind::Proposal,
-            Some(ClaimId("item1".into())),
-        );
-        let provisional = match engine
-            .show_drafts()
-            .iter()
-            .find(|draft| draft.id == draft_claim_id)
-            .map(|draft| &draft.entry)
-            .unwrap()
-        {
-            Entry::Claim { claim_id, .. } => claim_id.clone(),
-            other => panic!("expected claim draft, got {other:?}"),
-        };
-        engine.draft_stance(provisional.clone(), "carol".into(), Position::Consent);
-        engine.draft_comment(
-            "dave".into(),
-            "Looks good".into(),
-            Some(provisional.clone()),
-        );
+        let draft_claim_id = engine
+            .draft_claim(
+                "Use JWT".into(),
+                ClaimKind::Proposal,
+                Some(ClaimRef::Committed(ClaimId("item1".into()))),
+            )
+            .unwrap();
+        engine
+            .draft_stance(ClaimRef::Draft(draft_claim_id), Position::Consent)
+            .unwrap();
+        engine
+            .draft_comment("Looks good".into(), Some(ClaimRef::Draft(draft_claim_id)))
+            .unwrap();
 
         let mut ids = vec!["final-1", "final-2"].into_iter();
         let bundle = engine.submission_bundle(|| ClaimId(ids.next().unwrap().into()));
 
         assert_eq!(bundle.claim_id_map.len(), 1);
-        assert_eq!(bundle.claim_id_map[0].provisional, provisional);
+        assert_eq!(bundle.claim_id_map[0].draft_id, draft_claim_id);
         assert_eq!(bundle.claim_id_map[0].final_id, ClaimId("final-1".into()));
         assert_eq!(bundle.entries.len(), 3);
         assert!(matches!(
@@ -872,7 +1091,7 @@ mod tests {
 
     #[test]
     fn integration_full_deliberation() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = engine();
 
         // Item
         engine.append(Entry::Claim {

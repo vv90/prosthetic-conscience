@@ -13,6 +13,7 @@ Relevant code paths:
 
 - `src/consensus_cli/llm.rs`: production `pc-consensus` turn loop, now with traced round-by-round execution
 - `src/consensus/tools.rs`: authoritative tool schema and dispatch behavior
+- `src/consensus/engine.rs`: draft-local `DraftContent`, `ClaimRef`, preview materialization, and submission rewriting
 - `src/consensus/fixtures.rs`: deterministic session-log fixture used to define checkpoint states
 - `fixtures/tool-call-eval/authentication-tool-reliability.json`: checked-in benchmark suite
 - `src/consensus/eval.rs`: suite loader, synthetic context seeding, scoring, and aggregation
@@ -31,12 +32,19 @@ The runner assumes a controlled environment with one known chat worker/model beh
 
 For each run, the harness:
 
-1. Replays the fixture log up to the requested checkpoint into a fresh `ConsensusEngine`.
+1. Replays the fixture log up to the requested checkpoint into a fresh `ConsensusEngine` initialized with the case participant as the draft author.
 2. Seeds deterministic prior conversation history with read-only `overview` tool turns.
 3. Appends the measured user message.
 4. Runs the real `ConsensusLlm` turn loop against the suite's configured request model.
 5. Captures every round, assistant tool call, parse outcome, and tool result.
 6. Scores the run against the suite rubric.
+
+Important draft-model details:
+
+- Drafts are evaluated as draft-local `DraftContent`, not as committed log entries.
+- Draft authorship is deterministic engine state, not part of the LLM-visible draft tool schema.
+- References in tool arguments can point either to committed claims (`{"claim_id":"..."}`) or to locally drafted claims (`{"draft_id": 7}`).
+- Preview and submission materialize those local drafts back into committed `Entry` values only when needed.
 
 ## Metrics
 
@@ -54,6 +62,8 @@ This lets us answer questions like:
 - “Did the model call anything at all?”
 - “Did it call the right tool but with bad arguments?”
 - “Did it call the right tool and still fail to leave the draft buffer in the expected state?”
+
+Argument matching is semantic rather than purely literal for draft references. For example, a suite may expect a relation to target `prop-hybrid`, and the scorer will match that against the parsed claim-ref object inside the tool arguments.
 
 ## Deterministic first, judged second
 
@@ -82,6 +92,9 @@ This avoids paying a judge-model tax on cases we can already score exactly.
 - Treat `history_turns` and `max_history` as separate knobs:
   - `history_turns` measures reliability as visible prior context grows
   - `max_history` measures how much truncation hurts tool-use stability
+- Keep suite expectations aligned with the live tool schema:
+  - draft tools no longer take `author`
+  - draft-local references should be expressed as claim-ref objects rather than flat `source_id` / `target_id` / `claim_id` fields
 - Add new suites in JSON rather than hardcoding new checkpoints in Rust.
 - When a live backend returns malformed SSE payloads, keep those runs in the report instead of dropping them; they matter operationally even if the tool logic never started.
 

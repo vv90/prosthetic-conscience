@@ -10,7 +10,7 @@ use super::format::format_overview;
 
 /// Caller-supplied configuration for the system prompt.
 pub struct PromptConfig {
-    /// The LLM's participant name in the deliberation (used as `author` in drafts).
+    /// The LLM's participant name in the deliberation (used as the local draft author).
     pub participant_name: String,
     /// High-level role description, e.g. "You are an AI facilitator helping a team reach consensus."
     pub role_description: String,
@@ -51,23 +51,23 @@ pub fn build_system_prompt(engine: &ConsensusEngine, config: &PromptConfig) -> S
     );
     let _ = writeln!(
         prompt,
-        "- draft_claim(author, body, kind, parent_id?): Propose a new claim"
+        "- draft_claim(body, kind, parent?): Propose a new claim"
     );
     let _ = writeln!(
         prompt,
-        "- draft_relation(source_id, target_id, kind, author): Add attack/support relation"
+        "- draft_relation(source, target, kind): Add attack/support relation"
     );
     let _ = writeln!(
         prompt,
-        "- draft_stance(target_id, author, position): Take a position on a claim"
+        "- draft_stance(target, position): Take a position on a claim"
     );
     let _ = writeln!(
         prompt,
-        "- draft_resolve(claim_id, author, outcome): Propose resolution"
+        "- draft_resolve(claim, outcome): Propose resolution"
     );
     let _ = writeln!(
         prompt,
-        "- draft_comment(author, body, claim_id?): Draft a freeform comment"
+        "- draft_comment(body, claim?): Draft a freeform comment"
     );
     let _ = writeln!(prompt, "- show_drafts: See your pending drafts");
     let _ = writeln!(prompt, "- remove_draft(draft_id): Remove a draft");
@@ -82,7 +82,7 @@ pub fn build_system_prompt(engine: &ConsensusEngine, config: &PromptConfig) -> S
     );
     let _ = writeln!(
         prompt,
-        "- preview_claim_detail(claim_id): Preview a claim with drafts applied"
+        "- preview_claim_detail(claim): Preview a claim with drafts applied"
     );
     let _ = writeln!(
         prompt,
@@ -107,8 +107,12 @@ pub fn build_system_prompt(engine: &ConsensusEngine, config: &PromptConfig) -> S
     );
     let _ = writeln!(
         prompt,
-        "- When drafting claims, use \"{}\" as the author",
+        "- The active participant is \"{}\"; draft authorship is injected automatically",
         config.participant_name
+    );
+    let _ = writeln!(
+        prompt,
+        "- Draft-local claim references use draft IDs; committed claim references use claim IDs"
     );
     let _ = writeln!(
         prompt,
@@ -139,7 +143,7 @@ mod tests {
 
     #[test]
     fn includes_role_and_participant() {
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let prompt = build_system_prompt(&engine, &test_config());
         assert!(prompt.contains("AI facilitator"));
         assert!(prompt.contains("\"assistant\""));
@@ -147,7 +151,7 @@ mod tests {
 
     #[test]
     fn includes_deliberation_state() {
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let prompt = build_system_prompt(&engine, &test_config());
         assert!(prompt.contains("Current deliberation state"));
         assert!(prompt.contains("0 claims"));
@@ -155,7 +159,7 @@ mod tests {
 
     #[test]
     fn includes_tool_listing() {
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let prompt = build_system_prompt(&engine, &test_config());
         assert!(prompt.contains("Available tools"));
         assert!(prompt.contains("draft_claim"));
@@ -165,7 +169,7 @@ mod tests {
 
     #[test]
     fn includes_custom_instructions() {
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let config = PromptConfig {
             custom_instructions: "Focus on security concerns.".into(),
             ..test_config()
@@ -176,7 +180,7 @@ mod tests {
 
     #[test]
     fn omits_custom_section_when_empty() {
-        let engine = ConsensusEngine::new();
+        let engine = ConsensusEngine::new(String::from("assistant"));
         let prompt = build_system_prompt(&engine, &test_config());
         // The prompt should end with the guidelines, no trailing custom section
         assert!(!prompt.contains("Focus on"));
@@ -184,7 +188,7 @@ mod tests {
 
     #[test]
     fn populated_engine_shows_counts() {
-        let mut engine = ConsensusEngine::new();
+        let mut engine = ConsensusEngine::new(String::from("assistant"));
         engine.append(Entry::Claim {
             claim_id: ClaimId("p1".into()),
             author: "alice".into(),
