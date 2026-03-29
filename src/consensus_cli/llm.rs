@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::chat_gateway::gateway_client::{ClientError, GatewayClient};
@@ -9,6 +10,7 @@ use crate::consensus::format::{format_drafts, format_impact_analysis, format_ove
 use crate::consensus::tools;
 
 const MAX_TOOL_ROUNDS: usize = 8;
+const MAX_COMPLETION_TOKENS: u64 = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -18,6 +20,40 @@ pub enum LlmError {
     Assembler(#[from] AssemblerError),
     #[error("max tool rounds ({max}) exceeded")]
     MaxRoundsExceeded { max: usize },
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LlmTurnTrace {
+    pub rounds: Vec<LlmRoundTrace>,
+    pub final_message: Option<CompletedMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmRoundTrace {
+    pub round: usize,
+    pub request_history_messages: usize,
+    pub request_messages: usize,
+    pub response_chunks: usize,
+    pub assistant_message: Option<CompletedMessage>,
+    pub tool_results: Vec<ToolExecutionTrace>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolExecutionTrace {
+    pub call_id: String,
+    pub function_name: String,
+    pub arguments_json: String,
+    pub parsed_arguments: Option<Value>,
+    pub argument_parse_error: Option<String>,
+    pub tool_result_content: String,
+    pub dispatch_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct LlmTurnTraceError {
+    pub error: LlmError,
+    pub trace: LlmTurnTrace,
 }
 
 pub struct ConsensusLlm {
@@ -48,59 +84,186 @@ impl ConsensusLlm {
         engine: &mut ConsensusEngine,
         history: &mut Vec<Value>,
     ) -> Result<CompletedMessage, LlmError> {
+        self.run_turn_with_trace(engine, history)
+            .await
+            .map(|trace| {
+                trace
+                    .final_message
+                    .expect("successful trace has final message")
+            })
+            .map_err(|error| error.error)
+    }
+
+    pub async fn run_turn_with_trace(
+        &self,
+        engine: &mut ConsensusEngine,
+        history: &mut Vec<Value>,
+    ) -> Result<LlmTurnTrace, LlmTurnTraceError> {
         let tool_defs = tool_definitions_json();
+        let mut trace = LlmTurnTrace::default();
 
         for round in 0.. {
             truncate_history(history, self.max_history);
-            let mut request_messages = Vec::with_capacity(history.len() + 1);
-            request_messages.push(json!({
-                "role": "system",
-                "content": self.build_system_prompt(engine),
-            }));
-            request_messages.extend(history.iter().cloned());
+            let payload = self.build_request_payload(engine, history, &tool_defs);
 
-            let mut payload = json!({
-                "model": self.model,
-                "messages": request_messages,
-            });
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("tools".to_owned(), json!(tool_defs));
-            }
+            let mut round_trace = LlmRoundTrace {
+                round,
+                request_history_messages: history.len(),
+                request_messages: history.len() + 1,
+                response_chunks: 0,
+                assistant_message: None,
+                tool_results: Vec::new(),
+                error: None,
+            };
 
-            let chunks = self.client.chat(payload).await?;
-            let msg = response_assembler::assemble(&chunks)?;
+            let chunks = match self.client.chat(payload).await {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    round_trace.error = Some(error.to_string());
+                    trace.rounds.push(round_trace);
+                    return Err(LlmTurnTraceError {
+                        error: error.into(),
+                        trace,
+                    });
+                }
+            };
+            round_trace.response_chunks = chunks.len();
+
+            let msg = match response_assembler::assemble(&chunks) {
+                Ok(msg) => msg,
+                Err(error) => {
+                    round_trace.error = Some(error.to_string());
+                    trace.rounds.push(round_trace);
+                    return Err(LlmTurnTraceError {
+                        error: error.into(),
+                        trace,
+                    });
+                }
+            };
+            round_trace.assistant_message = Some(msg.clone());
             history.push(assistant_message_value(&msg));
 
             if msg.tool_calls.is_empty() {
-                return Ok(msg);
+                trace.final_message = Some(msg);
+                trace.rounds.push(round_trace);
+                return Ok(trace);
             }
 
             if round >= MAX_TOOL_ROUNDS {
-                return Err(LlmError::MaxRoundsExceeded {
-                    max: MAX_TOOL_ROUNDS,
+                round_trace.error = Some(format!("max tool rounds ({MAX_TOOL_ROUNDS}) exceeded"));
+                trace.rounds.push(round_trace);
+                return Err(LlmTurnTraceError {
+                    error: LlmError::MaxRoundsExceeded {
+                        max: MAX_TOOL_ROUNDS,
+                    },
+                    trace,
                 });
             }
 
             for tool_call in &msg.tool_calls {
-                let content = match serde_json::from_str::<Value>(&tool_call.arguments_json) {
-                    Ok(arguments) => {
+                let (parsed_arguments, argument_parse_error) =
+                    match serde_json::from_str::<Value>(&tool_call.arguments_json) {
+                        Ok(arguments) => (Some(arguments), None),
+                        Err(error) => (None, Some(error.to_string())),
+                    };
+
+                if tool_call.function_name == "no_structured_action" {
+                    let text = parsed_arguments
+                        .as_ref()
+                        .and_then(|value| {
+                            value
+                                .get("raw_text_fallback")
+                                .and_then(Value::as_str)
+                                .map(String::from)
+                        })
+                        .unwrap_or_default();
+                    round_trace.tool_results.push(ToolExecutionTrace {
+                        call_id: tool_call.id.clone(),
+                        function_name: tool_call.function_name.clone(),
+                        arguments_json: tool_call.arguments_json.clone(),
+                        parsed_arguments,
+                        argument_parse_error,
+                        tool_result_content: text.clone(),
+                        dispatch_error: None,
+                    });
+                    trace.final_message = Some(CompletedMessage {
+                        role: "assistant".into(),
+                        content: Some(text),
+                        tool_calls: vec![],
+                        finish_reason: msg.finish_reason.clone(),
+                    });
+                    trace.rounds.push(round_trace);
+                    return Ok(trace);
+                }
+
+                let (content, dispatch_error) = match parsed_arguments.clone() {
+                    Some(arguments) => {
                         match tools::dispatch(engine, &tool_call.function_name, arguments) {
-                            Ok(value) => {
+                            Ok(value) => (
                                 serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
                                     String::from("{\"error\":\"failed to serialize tool result\"}")
-                                })
-                            }
-                            Err(e) => format!("{{\"error\":\"{e}\"}}"),
+                                }),
+                                None,
+                            ),
+                            Err(error) => (
+                                format!("{{\"error\":\"{error}\"}}"),
+                                Some(error.to_string()),
+                            ),
                         }
                     }
-                    Err(e) => format!("{{\"error\":\"invalid tool call arguments: {e}\"}}"),
+                    None => {
+                        let error = argument_parse_error
+                            .clone()
+                            .unwrap_or_else(|| String::from("unknown parse error"));
+                        (
+                            format!("{{\"error\":\"invalid tool call arguments: {error}\"}}"),
+                            Some(format!("invalid tool call arguments: {error}")),
+                        )
+                    }
                 };
+
+                round_trace.tool_results.push(ToolExecutionTrace {
+                    call_id: tool_call.id.clone(),
+                    function_name: tool_call.function_name.clone(),
+                    arguments_json: tool_call.arguments_json.clone(),
+                    parsed_arguments,
+                    argument_parse_error,
+                    tool_result_content: content.clone(),
+                    dispatch_error,
+                });
                 history.push(tool_result_message(&tool_call.id, &content));
             }
+
+            trace.rounds.push(round_trace);
         }
 
-        Err(LlmError::MaxRoundsExceeded {
-            max: MAX_TOOL_ROUNDS,
+        Err(LlmTurnTraceError {
+            error: LlmError::MaxRoundsExceeded {
+                max: MAX_TOOL_ROUNDS,
+            },
+            trace,
+        })
+    }
+
+    fn build_request_payload(
+        &self,
+        engine: &ConsensusEngine,
+        history: &[Value],
+        tool_defs: &[Value],
+    ) -> Value {
+        let mut request_messages = Vec::with_capacity(history.len() + 1);
+        request_messages.push(json!({
+            "role": "system",
+            "content": self.build_system_prompt(engine),
+        }));
+        request_messages.extend(history.iter().cloned());
+
+        json!({
+            "model": self.model,
+            "messages": request_messages,
+            "tools": tool_defs,
+            "tool_choice": "required",
+            "max_tokens": MAX_COMPLETION_TOKENS,
         })
     }
 
@@ -119,9 +282,21 @@ impl ConsensusLlm {
              You are participating as \"{participant}\".\n\
              The shared log is authoritative. You may inspect committed state and manipulate only local drafts.\n\
              Never claim a draft is committed. Only the human can commit drafts by typing /submit.\n\
-             Prefer structured entries over freeform text when the user's intent is clear.\n\
-             Use comments only when the contribution does not cleanly fit claim, relation, stance, or resolve.\n\
-             Explain what you are doing in natural language, but use tools whenever you need exact state.\n\n\
+             You must use a tool on every turn.\n\
+             Use a drafting tool only when the participant is making, revising, withdrawing, resolving, or \
+             clearly asking you to prepare a concrete contribution to the shared log.\n\
+             When the participant clearly expresses their own position, preference, objection, proposal, \
+             relation, or resolution — even informally — draft it using the appropriate tool.\n\
+             If the participant asks for a summary, explanation, comparison, process guidance, or strategy, \
+             use no_structured_action unless they also ask you to draft something.\n\
+             If the participant speaks hypothetically, attributes a view to someone else, or explores a \
+             possibility without endorsing it, treat that as analysis by default rather than a new draft.\n\
+             If the participant links existing claims by saying one supports, attacks, answers, or \
+             resolves another concern, prefer draft_relation over draft_stance.\n\
+             When the participant expresses their own stance toward an existing claim, use draft_stance.\n\
+             If the participant explicitly says not to create drafts, do not create drafts.\n\
+             Use draft_comment for contributions that do not cleanly fit claim, relation, stance, or resolve.\n\
+             Use no_structured_action whenever no draft is appropriate, and put the user-facing reply in raw_text_fallback.\n\n\
              ## Current deliberation state\n\
              {overview}\n\
              ## Pending drafts\n\
@@ -216,10 +391,37 @@ mod tests {
 
         let prompt = llm.build_system_prompt(&engine);
         assert!(prompt.contains("Only the human can commit drafts"));
+        assert!(prompt.contains("You must use a tool on every turn"));
+        assert!(prompt.contains("If the participant explicitly says not to create drafts"));
+        assert!(prompt.contains("prefer draft_relation over draft_stance"));
+        assert!(prompt.contains("no_structured_action"));
         assert!(prompt.contains("impact_analysis"));
         assert!(prompt.contains("draft_comment"));
         assert!(!prompt.contains("submit_drafts"));
         assert!(!prompt.contains("clear_drafts"));
+    }
+
+    #[test]
+    fn request_payload_uses_required_tool_choice_and_completion_cap() {
+        let llm = ConsensusLlm::new(
+            String::from("http://127.0.0.1:3000"),
+            None,
+            String::from("default"),
+            String::from("assistant"),
+            100,
+        );
+
+        let engine = ConsensusEngine::new();
+        let history = vec![json!({"role": "user", "content": "Summarize the current state."})];
+        let payload = llm.build_request_payload(&engine, &history, &tool_definitions_json());
+
+        assert_eq!(payload["tool_choice"], "required");
+        assert_eq!(payload["max_tokens"], MAX_COMPLETION_TOKENS);
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(
+            payload["messages"][1]["content"],
+            "Summarize the current state."
+        );
     }
 
     #[test]

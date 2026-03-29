@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod eval;
 pub mod fixtures;
 pub mod format;
 pub mod prompt;

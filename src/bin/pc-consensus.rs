@@ -26,6 +26,10 @@ struct Args {
     #[arg(long, default_value = "100")]
     max_history: usize,
 
+    /// Print compact per-round tool traces for each LLM turn.
+    #[arg(long, default_value_t = false)]
+    debug_tool_trace: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -50,6 +54,7 @@ async fn main() {
         model: args.model,
         participant: args.participant,
         max_history: args.max_history,
+        debug_tool_trace: args.debug_tool_trace,
     };
 
     let app = match args.command {

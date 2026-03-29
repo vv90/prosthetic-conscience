@@ -4,9 +4,10 @@
 //! Handles both fragmented deltas (OpenAI style, where tool call arguments
 //! arrive across many chunks) and single-chunk tool calls (llama-server style).
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedMessage {
     pub role: String,
     pub content: Option<String>,
@@ -14,7 +15,7 @@ pub struct CompletedMessage {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedToolCall {
     pub id: String,
     pub call_type: String,

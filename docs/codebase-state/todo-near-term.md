@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-03-25
+Snapshot date: 2026-03-29
 
 ## Consensus protocol implementation
 
@@ -55,10 +55,31 @@ Shared infrastructure extracted during Phase 5:
 - `src/chat_gateway/` module: `GatewayClient` (HTTP/SSE) and `response_assembler` (delta chunk assembly) extracted from `src/client/`. Shared by both `pc-client` and `pc-consensus`. `assistant_message_value` and `tool_result_message` helpers live here.
 - `src/client/gateway_client.rs` and `src/client/response_assembler.rs` are now re-export shims (`pub use crate::chat_gateway::*`) for backward compatibility with `pc-client` and existing tests.
 
+Additional features added during Phase 5 (continued):
+
+- `tool_choice: "required"` on every LLM turn — model must always select a tool.
+- `no_structured_action` fallback tool — deliberately unappealing escape hatch (bureaucratic name, listed last, required `reason` enum, `raw_text_fallback` parameter) for turns where no structured entry applies. Handled as a short-circuit in the tool loop — extracts text as conversational content, ends the turn.
+- Hardened system prompt: removed soft guidance ("Prefer structured entries", "use tools whenever you need exact state"), replaced with mandatory rules ("You MUST invoke a tool on every turn", explicit guidance on when to use each tool type vs `no_structured_action`).
+- `LlmTurnTrace` round-by-round tracing: each LLM round captures request sizes, response chunk counts, assistant message, tool execution traces (arguments, parse results, dispatch results). Used by both `--debug-tool-trace` in `pc-consensus` and the eval harness.
+- `--debug-tool-trace` CLI flag on `pc-consensus`: prints compact per-round tool traces for each LLM turn.
+- `MAX_COMPLETION_TOKENS` constant (512) added to LLM requests.
+- `CompletedMessage` and `CompletedToolCall` now derive `Serialize` (needed for trace serialization).
+
+Eval harness (new):
+
+- `src/consensus/eval.rs`: suite loader, synthetic context seeding, checkpoint-based scoring, aggregation. Runs the real `ConsensusLlm` turn loop against fixture checkpoints with varying history lengths and truncation budgets.
+- `src/bin/pc-consensus-eval.rs`: CLI entrypoint for tool-calling reliability evaluation. Produces JSON reports and markdown summary tables.
+- `fixtures/tool-call-eval/authentication-tool-reliability.json`: checked-in benchmark suite with deterministic rubrics.
+- `docs/tool-calling-eval-methodology.md`: scoring methodology, metrics definitions, and recommended judge-model follow-up for ambiguous cases.
+- Metrics per run: `tool_call_made`, `structured_tool_call_made`, `expected_tool_match`, `expected_argument_match`, `expected_outcome_match`, `turn_success`.
+
 Outstanding issues:
 
 - **WS heartbeat**: `session.rs` `connected_loop` has no ping/pong or application-level heartbeat tick. Dead TCP connections (NAT timeout, network partition) won't be detected until the next send fails. Server-side auto-heartbeat keeps the kernel subscriber alive while the TCP connection is healthy, but silent failures can leave the client thinking it's connected for an extended period.
-- **Conversation history truncation**: LLM `history` grows without bound across turns. Needs configurable max context size with older messages dropped (system prompt is rebuilt fresh each turn so it's always current).
+- ~~**Conversation history truncation**: LLM `history` grows without bound across turns.~~ Resolved: `truncate_history()` with configurable `max_history` preserves tool-call/result pairs.
+- **History contamination from prose-only turns**: prior assistant messages that narrated tool calls in prose (no actual `tool_calls` in the message) pollute the conversation history, teaching the model by example to narrate rather than call tools. Detected in 2026-03-28 trial via llama-server logs showing prior history with `draft_claim\n{...}` as plain text content.
+- **Model uses wrong `author` field**: model passes `"author": "system"` instead of the participant name. The system prompt identifies the participant but the model doesn't consistently use it for tool arguments.
+- **Duplicate draft creation**: model sometimes creates identical drafts across consecutive tool rounds without deduplication.
 
 ### Phase 6: Crate extraction and WASM target
 

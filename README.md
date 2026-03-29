@@ -22,7 +22,7 @@ Requires Rust 2024 edition (1.85+).
 cargo build --release
 ```
 
-This produces four primary binaries: `prosthetic-conscience` (gateway), `pc-worker` (worker agent), `pc-client` (interactive client), and `pc-consensus` (consensus terminal client). It also includes `pc-consensus-sim`, a deterministic log generator for offline consensus experiments, and `pc-consensus-seed`, a session seeder for importing fixture logs into the gateway.
+This produces four primary binaries: `prosthetic-conscience` (gateway), `pc-worker` (worker agent), `pc-client` (interactive client), and `pc-consensus` (consensus terminal client). It also includes `pc-consensus-sim`, a deterministic log generator for offline consensus experiments, `pc-consensus-seed`, a session seeder for importing fixture logs into the gateway, and `pc-consensus-eval`, a checkpoint-based tool-calling reliability runner for a known consensus worker/model.
 
 ## Running
 
@@ -304,6 +304,21 @@ cargo run --bin pc-consensus -- \
   --model default \
   join <session-id>
 ```
+
+### Consensus Tool-Calling Eval
+
+Run the checked-in benchmark suite for a named test run against the currently pinned worker/model, across fixture checkpoints, prior-context lengths, and `max_history` budgets:
+
+```bash
+cargo run --bin pc-consensus-eval -- \
+  --gateway-url http://127.0.0.1:3000 \
+  --run-name qwen-tool-reliability \
+  --repeats 10 \
+  --output trial-logs/tool-eval/report.json \
+  --markdown-output trial-logs/tool-eval/report.md
+```
+
+The default suite lives at `fixtures/tool-call-eval/authentication-tool-reliability.json`, includes the request `model` string for the known worker/backend, and reuses the real `pc-consensus` turn loop. See `docs/tool-calling-eval-methodology.md` for scoring details and suggested judge-model follow-up for ambiguous cases.
 
 ## Project structure
 

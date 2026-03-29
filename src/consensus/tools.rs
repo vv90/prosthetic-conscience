@@ -226,6 +226,12 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
 
         "impact_analysis" => Ok(to_json(&engine.impact_analysis())),
 
+        "no_structured_action" => {
+            let reason = require_str(&args, "reason")?;
+            let text = require_str(&args, "raw_text_fallback")?;
+            Ok(json!({ "reason": reason, "response": text }))
+        }
+
         _ => Err(ToolError::UnknownTool(tool.to_owned())),
     }
 }
@@ -368,6 +374,35 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             name: "impact_analysis",
             description: "Compare the current committed state with the state produced by applying all current drafts.",
             parameters: empty_params(),
+        },
+        ToolDef {
+            name: "no_structured_action",
+            description: "Use when the participant is asking for a summary, explanation, analysis, \
+                process help, hypothetical discussion, or otherwise is not making a concrete \
+                contribution to the shared log. Only draft when the participant is clearly \
+                expressing or requesting a contribution.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "enum": [
+                            "user_asked_question",
+                            "need_clarification",
+                            "summary_or_analysis",
+                            "hypothetical_or_meta",
+                            "no_actionable_content",
+                            "off_topic"
+                        ],
+                        "description": "Why no structured entry is appropriate"
+                    },
+                    "raw_text_fallback": {
+                        "type": "string",
+                        "description": "Plain text response when no structured action applies"
+                    }
+                },
+                "required": ["reason", "raw_text_fallback"]
+            }),
         },
     ]
 }
@@ -612,7 +647,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 14);
+        assert_eq!(defs.len(), 15);
         // All have non-empty names and descriptions
         for def in &defs {
             assert!(!def.name.is_empty());
@@ -629,6 +664,36 @@ mod tests {
         assert!(!names.contains(&"clear_drafts"));
         assert!(names.contains(&"draft_comment"));
         assert!(names.contains(&"remove_draft"));
+        assert!(names.contains(&"no_structured_action"));
+        assert_eq!(
+            names.last().copied(),
+            Some("no_structured_action"),
+            "no_structured_action must be listed last"
+        );
+    }
+
+    #[test]
+    fn dispatch_no_structured_action_valid() {
+        let mut engine = ConsensusEngine::new();
+        let result = dispatch(
+            &mut engine,
+            "no_structured_action",
+            json!({"reason": "user_asked_question", "raw_text_fallback": "The session is about X."}),
+        )
+        .unwrap();
+        assert_eq!(result["reason"], "user_asked_question");
+        assert_eq!(result["response"], "The session is about X.");
+    }
+
+    #[test]
+    fn dispatch_no_structured_action_missing_reason() {
+        let mut engine = ConsensusEngine::new();
+        let result = dispatch(
+            &mut engine,
+            "no_structured_action",
+            json!({"raw_text_fallback": "hello"}),
+        );
+        assert!(matches!(result, Err(ToolError::MissingArgument("reason"))));
     }
 
     #[test]

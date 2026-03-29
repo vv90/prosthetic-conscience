@@ -1,0 +1,148 @@
+{
+  "suite_id": "authentication-tool-reliability-v1",
+  "description": "Deterministic checkpoint-based tool-calling benchmark for the authentication deliberation fixture.",
+  "scenario_id": "authentication-deliberation",
+  "request_model": "default",
+  "history_turns": [0, 4, 12],
+  "max_history_values": [12, 100],
+  "cases": [
+    {
+      "id": "opening_item_claim",
+      "description": "The model should turn the opening topic into an item claim from an empty session.",
+      "checkpoint_entries": 0,
+      "participant": "carol",
+      "user_message": "We need to decide the authentication approach for the public API and the admin dashboard before beta. Draft that as the opening deliberation item.",
+      "expected": [
+        {
+          "tool": "draft_claim",
+          "author": "carol",
+          "kind": "item",
+          "body_contains": ["authentication approach", "before beta"]
+        }
+      ]
+    },
+    {
+      "id": "proposal_oidc",
+      "description": "Early-state proposal drafting should create a proposal under the main item.",
+      "checkpoint_entries": 6,
+      "participant": "carol",
+      "user_message": "Draft a proposal to use a third-party OIDC provider for all authentication.",
+      "expected": [
+        {
+          "tool": "draft_claim",
+          "author": "carol",
+          "kind": "proposal",
+          "parent_id": "item-auth",
+          "body_contains": ["oidc"]
+        }
+      ]
+    },
+    {
+      "id": "support_relation_api_clients_jwt",
+      "description": "Explicit relation requests should call the relation tool with exact source and target ids.",
+      "checkpoint_entries": 9,
+      "participant": "bob",
+      "user_message": "Draft a support relation from fact-public-api-clients to prop-jwt.",
+      "expected": [
+        {
+          "tool": "draft_relation",
+          "author": "bob",
+          "source_id": "fact-public-api-clients",
+          "target_id": "prop-jwt",
+          "kind": "supports"
+        }
+      ]
+    },
+    {
+      "id": "block_stance_jwt",
+      "description": "A natural-language block should at least materialize the stance draft.",
+      "checkpoint_entries": 18,
+      "participant": "alice",
+      "user_message": "I block prop-jwt because revocation is too hard. Draft my stance.",
+      "expected": [
+        {
+          "tool": "draft_stance",
+          "author": "alice",
+          "target_id": "prop-jwt",
+          "position": "block"
+        }
+      ]
+    },
+    {
+      "id": "process_question_submit",
+      "description": "Pure process questions should use the no_structured_action escape hatch.",
+      "checkpoint_entries": 18,
+      "participant": "alice",
+      "user_message": "What does /submit do after drafts are ready?",
+      "expected": [
+        {
+          "tool": "no_structured_action",
+          "reasons": ["user_asked_question"],
+          "raw_text_contains": ["/submit", "draft"]
+        }
+      ]
+    },
+    {
+      "id": "withdraw_oidc",
+      "description": "The model should resolve the superseded OIDC proposal as withdrawn when explicitly asked.",
+      "checkpoint_entries": 30,
+      "participant": "carol",
+      "user_message": "Withdraw prop-oidc. We want to split workforce auth from public API auth instead of forcing one mechanism everywhere.",
+      "expected": [
+        {
+          "tool": "draft_resolve",
+          "author": "carol",
+          "claim_id": "prop-oidc",
+          "outcome": "withdrawn"
+        }
+      ]
+    },
+    {
+      "id": "hybrid_proposal",
+      "description": "After withdrawing the old proposal, the model should draft the replacement hybrid proposal.",
+      "checkpoint_entries": 31,
+      "participant": "carol",
+      "user_message": "Draft a new hybrid proposal: use OIDC for workforce and admin auth, provider-backed JWTs for the public API, and a thin adapter layer so we can swap vendors later.",
+      "expected": [
+        {
+          "tool": "draft_claim",
+          "author": "carol",
+          "kind": "proposal",
+          "parent_id": "item-auth",
+          "body_contains": ["oidc", "jwt", "adapter"]
+        }
+      ]
+    },
+    {
+      "id": "consent_hybrid",
+      "description": "Direct consent language should become a stance on the hybrid proposal.",
+      "checkpoint_entries": 37,
+      "participant": "bob",
+      "user_message": "I consent to prop-hybrid.",
+      "expected": [
+        {
+          "tool": "draft_stance",
+          "author": "bob",
+          "target_id": "prop-hybrid",
+          "position": "consent"
+        }
+      ]
+    },
+    {
+      "id": "attack_relation_break_glass",
+      "description": "Later-stage relation drafting should remain reliable under richer fixture state.",
+      "checkpoint_entries": 44,
+      "participant": "alice",
+      "user_message": "Draft an attack relation from cond-break-glass to fact-provider-outage-risk.",
+      "expected": [
+        {
+          "tool": "draft_relation",
+          "author": "alice",
+          "source_id": "cond-break-glass",
+          "target_id": "fact-provider-outage-risk",
+          "kind": "attacks"
+        }
+      ]
+    }
+  ]
+}

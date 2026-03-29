@@ -12,7 +12,7 @@ use crate::consensus::format::{
 use crate::consensus::render::OverviewData;
 use crate::consensus::types::{ClaimId, Entry};
 
-use super::llm::{ConsensusLlm, LlmError};
+use super::llm::{ConsensusLlm, LlmError, LlmTurnTrace};
 use super::session::{SessionClient, SessionError, SessionEvent};
 
 const ENTRY_PAGE_LIMIT: usize = 1000;
@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub model: String,
     pub participant: String,
     pub max_history: usize,
+    pub debug_tool_trace: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +64,7 @@ pub struct ConsensusApp {
     connected: bool,
     confirmation: Option<ConfirmationAction>,
     pending_submission: Option<PendingSubmission>,
+    debug_tool_trace: bool,
 }
 
 impl ConsensusApp {
@@ -85,6 +87,7 @@ impl ConsensusApp {
             connected: true,
             confirmation: None,
             pending_submission: None,
+            debug_tool_trace: config.debug_tool_trace,
         };
         app.catch_up().await?;
         Ok(app)
@@ -110,6 +113,7 @@ impl ConsensusApp {
             connected: true,
             confirmation: None,
             pending_submission: None,
+            debug_tool_trace: config.debug_tool_trace,
         };
         app.catch_up().await?;
         Ok(app)
@@ -189,18 +193,44 @@ impl ConsensusApp {
         }
 
         self.history.push(json!({"role": "user", "content": line}));
-        match self.llm.run_turn(&mut self.engine, &mut self.history).await {
-            Ok(message) => {
-                if let Some(content) = &message.content
-                    && !content.trim().is_empty()
-                {
-                    println!("{content}");
+        if self.debug_tool_trace {
+            match self
+                .llm
+                .run_turn_with_trace(&mut self.engine, &mut self.history)
+                .await
+            {
+                Ok(trace) => {
+                    self.print_tool_trace(&trace);
+                    let message = trace
+                        .final_message
+                        .expect("successful trace has final message");
+                    if let Some(content) = &message.content
+                        && !content.trim().is_empty()
+                    {
+                        println!("{content}");
+                    }
+                    self.print_draft_review();
                 }
-                self.print_draft_review();
+                Err(error) => {
+                    self.print_tool_trace(&error.trace);
+                    eprintln!("LLM turn failed: {}", error.error);
+                    self.history.pop();
+                }
             }
-            Err(error) => {
-                eprintln!("LLM turn failed: {error}");
-                self.history.pop();
+        } else {
+            match self.llm.run_turn(&mut self.engine, &mut self.history).await {
+                Ok(message) => {
+                    if let Some(content) = &message.content
+                        && !content.trim().is_empty()
+                    {
+                        println!("{content}");
+                    }
+                    self.print_draft_review();
+                }
+                Err(error) => {
+                    eprintln!("LLM turn failed: {error}");
+                    self.history.pop();
+                }
             }
         }
 
@@ -531,6 +561,53 @@ impl ConsensusApp {
         println!("{}", format_drafts(self.engine.show_drafts()));
         println!("{}", format_impact_analysis(&self.engine.impact_analysis()));
     }
+
+    fn print_tool_trace(&self, trace: &LlmTurnTrace) {
+        for line in format_tool_trace(trace) {
+            println!("{line}");
+        }
+    }
+}
+
+fn format_tool_trace(trace: &LlmTurnTrace) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for round in &trace.rounds {
+        if round.tool_results.is_empty() {
+            lines.push(format!("[trace] round {} no tool calls", round.round));
+            continue;
+        }
+
+        for execution in &round.tool_results {
+            lines.push(format!(
+                "[trace] round {} tool {} {}",
+                round.round,
+                execution.function_name,
+                compact_debug_text(&execution.arguments_json, 160)
+            ));
+
+            if let Some(error) = &execution.dispatch_error {
+                lines.push(format!(
+                    "[trace] round {} error {}",
+                    round.round,
+                    compact_debug_text(error, 160)
+                ));
+            }
+        }
+    }
+
+    lines
+}
+
+fn compact_debug_text(text: &str, max_chars: usize) -> String {
+    let mut compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    compact = compact.chars().take(max_chars).collect();
+    compact.push_str("...");
+    compact
 }
 
 #[cfg(test)]
@@ -560,6 +637,7 @@ mod tests {
                 payloads: vec![json!({"type":"comment","author":"alice","body":"hello"})],
                 next_entry: 0,
             }),
+            debug_tool_trace: false,
         };
 
         app.note_submission_payload(&json!({"type":"comment","author":"alice","body":"hello"}));
@@ -586,6 +664,7 @@ mod tests {
             connected: true,
             confirmation: None,
             pending_submission: None,
+            debug_tool_trace: false,
         };
 
         app.apply_or_buffer_entry(1, json!({"type":"comment","author":"alice","body":"later"}))
@@ -597,5 +676,37 @@ mod tests {
             .unwrap();
         assert_eq!(app.next_index, 2);
         assert!(app.buffered_entries.is_empty());
+    }
+
+    #[test]
+    fn format_tool_trace_lists_each_tool_round() {
+        let trace = LlmTurnTrace {
+            rounds: vec![crate::consensus_cli::llm::LlmRoundTrace {
+                round: 0,
+                request_history_messages: 0,
+                request_messages: 1,
+                response_chunks: 2,
+                assistant_message: None,
+                tool_results: vec![crate::consensus_cli::llm::ToolExecutionTrace {
+                    call_id: String::from("call_1"),
+                    function_name: String::from("draft_stance"),
+                    arguments_json: String::from(
+                        "{\"target_id\":\"prop-hybrid\",\"position\":\"consent\"}",
+                    ),
+                    parsed_arguments: None,
+                    argument_parse_error: None,
+                    tool_result_content: String::new(),
+                    dispatch_error: None,
+                }],
+                error: None,
+            }],
+            final_message: None,
+        };
+
+        let lines = format_tool_trace(&trace);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("round 0"));
+        assert!(lines[0].contains("draft_stance"));
+        assert!(lines[0].contains("prop-hybrid"));
     }
 }

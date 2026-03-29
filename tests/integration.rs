@@ -333,6 +333,7 @@ async fn consensus_app_join_bootstraps_from_existing_session() {
             model: "test".into(),
             participant: "assistant".into(),
             max_history: 100,
+            debug_tool_trace: false,
         };
         let app = ConsensusApp::join(config, session_id).await.unwrap();
         let overview = app.overview();

@@ -1,6 +1,6 @@
 # Testing Coverage and Methodology
 
-Snapshot date: 2026-03-16
+Snapshot date: 2026-03-29
 
 ## Overview
 
@@ -132,26 +132,72 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 
 Location: `tests/integration.rs` with helpers in `tests/support/`.
 
-| Test                                                | What it proves                                                                                                                                                                                                                                        |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `happy_path_streams_chunks_and_done`                | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                                                                  |
-| `no_workers_returns_sse_error`                      | No workers connected → kernel rejects with `SendClientError` + `SendClientDone` → client sees error event + `[DONE]`                                                                                                                                  |
-| `worker_error_sends_error_and_done`                 | Worker sends chunk then `{"type":"error"}` → relay sends error directly + handler calls `assignment_failed` → client sees chunk + 2 errors + `[DONE]`                                                                                                 |
-| `worker_re_registration_handles_second_job`         | Worker completes first job, re-registers with fresh ID, receives and completes second job on same WS connection                                                                                                                                       |
-| `concurrent_streams_no_cross_contamination`         | 10 workers, 10 clients, 20 chunks each — all spawned concurrently. Each chunk tagged with `client_stream_id:index`. Asserts: no cross-contamination, chunk ordering preserved, all 10 stream IDs distinct                                             |
-| `completed_streams_drain_from_state`                | 3 jobs (success, error, timeout) then assert all state drains: active_streams=0, stream_registry=0, available_workers=0, worker_registry=0                                                                                                            |
-| `stream_timeout_sends_error_and_done`               | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                                                                             |
-| `long_running_stream_survives_with_heartbeats`      | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work                                                 |
-| `worker_disconnect_mid_stream_sends_error_and_done` | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                                                                    |
-| `gateway_client_collects_chunks_and_assembles`      | `GatewayClient` sends request, collects 4 SSE chunks, `response_assembler::assemble()` produces correct `CompletedMessage` with content "Hello there" and finish_reason "stop"                                                                        |
-| `gateway_client_returns_error_on_no_workers`        | `GatewayClient.chat()` does not panic when gateway returns SSE error (no workers available). Returns Ok with error chunks.                                                                                                                            |
-| `tool_loop_executes_tool_and_re_requests`           | Two-round tool loop: MockWorker returns `tool_calls` for `get_current_time` → tool executes → re-request includes tool result message → MockWorker returns final text. Verifies tools in payload, tool result format, conversation history structure. |
+| Test                                                                 | What it proves                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `happy_path_streams_chunks_and_done`                                 | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                                                                  |
+| `no_workers_returns_sse_error`                                       | No workers connected → kernel rejects with `SendClientError` + `SendClientDone` → client sees error event + `[DONE]`                                                                                                                                  |
+| `worker_error_sends_error_and_done`                                  | Worker sends chunk then `{"type":"error"}` → relay sends error directly + handler calls `assignment_failed` → client sees chunk + 2 errors + `[DONE]`                                                                                                 |
+| `worker_re_registration_handles_second_job`                          | Worker completes first job, re-registers with fresh ID, receives and completes second job on same WS connection                                                                                                                                       |
+| `concurrent_streams_no_cross_contamination`                          | 10 workers, 10 clients, 20 chunks each — all spawned concurrently. Each chunk tagged with `client_stream_id:index`. Asserts: no cross-contamination, chunk ordering preserved, all 10 stream IDs distinct                                             |
+| `completed_streams_drain_from_state`                                 | 3 jobs (success, error, timeout) then assert all state drains: active_streams=0, stream_registry=0, available_workers=0, worker_registry=0                                                                                                            |
+| `stream_timeout_sends_error_and_done`                                | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                                                                             |
+| `long_running_stream_survives_with_heartbeats`                       | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work                                                 |
+| `worker_disconnect_mid_stream_sends_error_and_done`                  | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                                                                    |
+| `gateway_client_collects_chunks_and_assembles`                       | `GatewayClient` sends request, collects 4 SSE chunks, `response_assembler::assemble()` produces correct `CompletedMessage` with content "Hello there" and finish_reason "stop"                                                                        |
+| `gateway_client_returns_error_on_no_workers`                         | `GatewayClient.chat()` does not panic when gateway returns SSE error (no workers available). Returns Ok with error chunks.                                                                                                                            |
+| `tool_loop_executes_tool_and_re_requests`                            | Two-round tool loop: MockWorker returns `tool_calls` for `get_current_time` → tool executes → re-request includes tool result message → MockWorker returns final text. Verifies tools in payload, tool result format, conversation history structure. |
+| `consensus_llm_drafts_claim_via_tool_loop`                           | Consensus LLM turn loop with MockWorker returning `draft_claim` tool call → engine creates draft → verifies draft buffer populated correctly.                                                                                                         |
+| `consensus_seed_fails_for_unknown_session_id`                        | `pc-consensus-seed` rejects unknown session IDs.                                                                                                                                                                                                      |
+| `consensus_seed_joins_existing_session_and_persists_fixture_entries` | Seed binary creates session, appends fixture entries, verifies they persist.                                                                                                                                                                          |
+| `consensus_app_join_bootstraps_from_existing_session`                | `ConsensusApp::join()` connects to existing session and bootstraps engine from committed entries.                                                                                                                                                     |
 
 Test harness components:
 
 - `TestGateway` (`tests/support/gateway.rs`): starts real Axum server on random port with isolated state.
 - `MockWorker` (`tests/support/worker.rs`): tokio-tungstenite WS client with `recv_job()`, `send_chunk()`, `send_end()`, `send_error()`, `disconnect()`.
 - `SseClient` (`tests/support/client.rs`): reqwest HTTP client with manual SSE parsing, `next_event()`, `collect_all()`.
+
+### Consensus tool dispatch tests (22 tests)
+
+Location: `src/consensus/tools.rs` (inline `#[cfg(test)]` module).
+
+| Area                   | Count | What is tested                                                                                                                                                                                        |
+| ---------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool dispatch          | 12    | `overview`, `claim_detail`, `draft_claim`, `draft_relation`, `draft_stance`, `draft_resolve`, `draft_comment`, `show_drafts`, `remove_draft`, `submit_drafts`, `clear_drafts`, `no_structured_action` |
+| Error paths            | 4     | Unknown tool, missing required arguments (`claim_detail`, `draft_claim`, `no_structured_action`)                                                                                                      |
+| Tool definitions       | 2     | Total count (15), LLM-filtered set excludes `submit_drafts`/`clear_drafts`, includes `no_structured_action` last                                                                                      |
+| Integration            | 2     | Round-trip draft→show→submit, preview includes uncommitted drafts                                                                                                                                     |
+| Impact analysis        | 1     | Reports status changes from draft relations                                                                                                                                                           |
+| `no_structured_action` | 1     | Returns reason + response JSON without engine mutation                                                                                                                                                |
+
+### Consensus LLM tests (7 tests)
+
+Location: `src/consensus_cli/llm.rs` (inline `#[cfg(test)]` module).
+
+| Area               | Count | What is tested                                                                                                                   |
+| ------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| System prompt      | 1     | Contains review boundary, `MUST invoke a tool`, `no_structured_action`, safe tool names, excludes `submit_drafts`/`clear_drafts` |
+| Request payload    | 1     | Includes `tool_choice: "required"` and `max_completion_tokens`                                                                   |
+| History truncation | 5     | Under limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut               |
+
+### Consensus app tests (3 tests)
+
+Location: `src/consensus_cli/app.rs` (inline `#[cfg(test)]` module).
+
+| Area                  | Count | What is tested                                            |
+| --------------------- | ----- | --------------------------------------------------------- |
+| Submission tracking   | 1     | `note_submission_payload` advances only on matching entry |
+| Entry buffering       | 1     | Out-of-order entries buffered until gap is closed         |
+| Tool trace formatting | 1     | `format_tool_trace` lists each tool round                 |
+
+### Consensus eval tests (3 tests)
+
+Location: `src/consensus/eval.rs` (inline `#[cfg(test)]` module).
+
+| Area            | Count | What is tested                                                                                     |
+| --------------- | ----- | -------------------------------------------------------------------------------------------------- |
+| Scoring         | 2     | Stance draft matches argument and draft buffer, `no_structured_action` requires empty draft buffer |
+| Context seeding | 1     | Synthetic history contains properly paired tool call/result messages                               |
 
 ### What is NOT tested
 
@@ -306,7 +352,11 @@ Testing-level invariants (properties the test suite itself must maintain):
 - GetCurrentTime tool: adequate coverage (4 tests).
 - ShellTool: adequate coverage (8 tests, 4 non-Docker + 4 Docker-gated `#[ignore]`).
 - Protocol: strong coverage (14 serde tests).
-- Integration: 12 tests passing (happy path, no-workers error, worker error, re-registration, concurrent streams, leak detection, stream timeout, heartbeat survival, worker disconnect, gateway client chunk collection, gateway client error handling, tool loop round-trip). Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
+- Consensus tool dispatch: strong coverage (22 tests).
+- Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
+- Consensus app: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
+- Consensus eval: adequate coverage (3 tests — scoring and context seeding).
+- Integration: 28 tests passing. Includes consensus-specific tests: `consensus_llm_drafts_claim_via_tool_loop`, `consensus_seed_*` (2), `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
 ## Load into context when
 
@@ -320,8 +370,13 @@ Testing-level invariants (properties the test suite itself must maintain):
 - `src/gateway/kernel.rs` (unit + property tests)
 - `src/gateway/channel_registry.rs` (registry tests)
 - `src/client/response_assembler.rs` (assembler unit + property tests)
+- `src/consensus/tools.rs` (tool dispatch tests)
+- `src/consensus/eval.rs` (eval scoring tests)
+- `src/consensus_cli/llm.rs` (LLM turn loop tests)
+- `src/consensus_cli/app.rs` (app tests)
 - `src/protocol.rs` (serde round-trip tests)
 - `tests/integration.rs` (integration tests)
 - `tests/support/` (test harness: `gateway.rs`, `worker.rs`, `client.rs`)
+- `fixtures/tool-call-eval/` (eval benchmark suites)
 - `proptest-regressions/gateway/kernel.txt` (regression cases)
 - `Cargo.toml` (test dependencies: `proptest`, `reqwest`, `tokio-tungstenite`)
