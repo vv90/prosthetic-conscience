@@ -66,6 +66,8 @@ Additional features added during Phase 5 (continued):
 - State-based LLM turn policy: fresh ambiguous turns start in clarify/inspect mode with read-only tools plus `no_structured_action`; mutation tools open only after a clarification handoff or when a local draft buffer already exists.
 - Internal clarification marker: `no_structured_action` turns with `reason=need_clarification` leave a hidden history marker so the next user reply can unlock mutation tools without brittle word matching.
 - Deterministic post-mutation confirmation: after a successful draft mutation, the harness now renders a short local-draft confirmation from the actual tool result instead of asking the model to narrate what happened.
+- Clarification marker protected from history truncation: `truncate_history` treats a user message immediately following a clarification marker as an unsafe cut point, preventing the marker from being silently dropped under aggressive truncation budgets.
+- Consolidated claim ref parsing: `ClaimRef::from_json_value` in `engine.rs` is the single canonical parser for JSON → `ClaimRef`. Both `tools.rs` (tool dispatch) and `llm.rs` (mutation confirmation rendering) delegate to it. Accepts `draft:<n>`, `#<n>`, `claim:<id>`, bare strings, and `{"claim_id":…}` / `{"draft_id":…}` objects.
 - `LlmTurnTrace` round-by-round tracing: each LLM round captures request sizes, response chunk counts, assistant message, tool execution traces (arguments, parse results, dispatch results). Used by both `--debug-tool-trace` in `pc-consensus` and the eval harness.
 - `--debug-tool-trace` CLI flag on `pc-consensus`: prints compact per-round tool traces for each LLM turn.
 - `MAX_COMPLETION_TOKENS` constant (512) added to LLM requests.

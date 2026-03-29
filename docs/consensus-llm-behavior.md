@@ -85,7 +85,7 @@ LLM-visible claim references are flat strings:
 - committed claim: `claim:<id>`
 - local draft claim: `draft:<id>`
 
-Internally, the engine still uses strong `ClaimRef` types.
+Parsing is consolidated in `ClaimRef::from_json_value` (`src/consensus/engine.rs`). Both tool dispatch (`tools.rs`) and the deterministic mutation confirmation renderer (`llm.rs`) delegate to it. It also accepts the `#<n>` legacy format and `{"claim_id":…}` / `{"draft_id":…}` object forms for backwards compatibility with older tool-call patterns.
 
 ## Observed Model Behavior
 
@@ -107,6 +107,7 @@ These observations come from repeated live REPL runs against session `1b81098818
 - Backend/template incompatibility caused by nested claim-ref schemas was fixed by flattening LLM-visible references to `claim:<id>` / `draft:<id>`.
 - Multi-turn contamination from prose-only turns was reduced by replacing `no_structured_action` tool-call stubs in history with the plain assistant reply the user actually saw.
 - Runaway "draft something, then show drafts, then mutate more, then narrate badly" loops were reduced by ending mutation turns with deterministic follow-up text.
+- Clarification marker loss under history truncation was fixed by teaching `truncate_history` to skip user messages that immediately follow a clarification marker, so the marker-confirmation pair is never split.
 
 ### Remaining Weaknesses
 
