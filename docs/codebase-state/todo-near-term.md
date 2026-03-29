@@ -61,8 +61,11 @@ Shared infrastructure extracted during Phase 5:
 Additional features added during Phase 5 (continued):
 
 - `tool_choice: "required"` on every LLM turn — model must always select a tool.
-- `no_structured_action` fallback tool — deliberately unappealing escape hatch (bureaucratic name, listed last, required `reason` enum, `raw_text_fallback` parameter) for turns where no structured entry applies. Handled as a short-circuit in the tool loop — extracts text as conversational content, ends the turn.
-- Hardened system prompt: removed soft guidance ("Prefer structured entries", "use tools whenever you need exact state"), replaced with mandatory rules ("You MUST invoke a tool on every turn", explicit guidance on when to use each tool type vs `no_structured_action`).
+- `no_structured_action` is now the natural-language conversation path for summaries, explanations, strategy, and clarification turns. Handled as a short-circuit in the tool loop — extracts text as conversational content, ends the turn, and writes the plain assistant reply back into history.
+- Hardened system prompt: hides protocol jargon from the participant-facing conversation, requires clarification before ambiguous recording, instructs relation-vs-stance disambiguation, and keeps submission explicitly human-controlled.
+- State-based LLM turn policy: fresh ambiguous turns start in clarify/inspect mode with read-only tools plus `no_structured_action`; mutation tools open only after a clarification handoff or when a local draft buffer already exists.
+- Internal clarification marker: `no_structured_action` turns with `reason=need_clarification` leave a hidden history marker so the next user reply can unlock mutation tools without brittle word matching.
+- Deterministic post-mutation confirmation: after a successful draft mutation, the harness now renders a short local-draft confirmation from the actual tool result instead of asking the model to narrate what happened.
 - `LlmTurnTrace` round-by-round tracing: each LLM round captures request sizes, response chunk counts, assistant message, tool execution traces (arguments, parse results, dispatch results). Used by both `--debug-tool-trace` in `pc-consensus` and the eval harness.
 - `--debug-tool-trace` CLI flag on `pc-consensus`: prints compact per-round tool traces for each LLM turn.
 - `MAX_COMPLETION_TOKENS` constant (512) added to LLM requests.
@@ -81,8 +84,9 @@ Outstanding issues:
 
 - **WS heartbeat**: `session.rs` `connected_loop` has no ping/pong or application-level heartbeat tick. Dead TCP connections (NAT timeout, network partition) won't be detected until the next send fails. Server-side auto-heartbeat keeps the kernel subscriber alive while the TCP connection is healthy, but silent failures can leave the client thinking it's connected for an extended period.
 - ~~**Conversation history truncation**: LLM `history` grows without bound across turns.~~ Resolved: `truncate_history()` with configurable `max_history` preserves tool-call/result pairs.
-- **History contamination from prose-only turns**: prior assistant messages that narrated tool calls in prose (no actual `tool_calls` in the message) pollute the conversation history, teaching the model by example to narrate rather than call tools. Detected in 2026-03-28 trial via llama-server logs showing prior history with `draft_claim\n{...}` as plain text content.
+- ~~**History contamination from prose-only turns**~~ Resolved: `no_structured_action` replies now replace the assistant tool-call stub in history with the actual plain assistant reply the participant saw.
 - **Duplicate draft creation**: model sometimes creates identical drafts across consecutive tool rounds without deduplication.
+- **Clarification quality is still model-limited**: the harness now reliably separates clarification from mutation, but the model's actual follow-up questions can still be generic, verbose, or semantically weaker than desired.
 
 ### Phase 6: Crate extraction and WASM target
 

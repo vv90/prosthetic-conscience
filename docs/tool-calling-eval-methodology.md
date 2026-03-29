@@ -63,7 +63,7 @@ This lets us answer questions like:
 - “Did it call the right tool but with bad arguments?”
 - “Did it call the right tool and still fail to leave the draft buffer in the expected state?”
 
-Argument matching is semantic rather than purely literal for draft references. For example, a suite may expect a relation to target `prop-hybrid`, and the scorer will match that against the parsed claim-ref object inside the tool arguments.
+Argument matching is semantic rather than purely literal for draft references. For example, a suite may expect a relation to target `prop-hybrid`, and the scorer will match that against either the parsed string ref (`claim:prop-hybrid`) or its internal parsed representation.
 
 ## Deterministic first, judged second
 
@@ -92,9 +92,12 @@ This avoids paying a judge-model tax on cases we can already score exactly.
 - Treat `history_turns` and `max_history` as separate knobs:
   - `history_turns` measures reliability as visible prior context grows
   - `max_history` measures how much truncation hurts tool-use stability
+- Remember that the live `ConsensusLlm` is now clarification-first on fresh ambiguous turns:
+  - explicit single-turn drafting prompts are still suitable for the deterministic suite
+  - naturalistic "thinking out loud" prompts are better evaluated in multi-turn suites
 - Keep suite expectations aligned with the live tool schema:
   - draft tools no longer take `author`
-  - draft-local references should be expressed as claim-ref objects rather than flat `source_id` / `target_id` / `claim_id` fields
+  - draft/local references should be expressed as `claim:<id>` / `draft:<id>` strings rather than old flat `source_id` / `target_id` / `claim_id` fields
 - Add new suites in JSON rather than hardcoding new checkpoints in Rust.
 - When a live backend returns malformed SSE payloads, keep those runs in the report instead of dropping them; they matter operationally even if the tool logic never started.
 

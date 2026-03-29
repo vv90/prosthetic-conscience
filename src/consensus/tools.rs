@@ -51,46 +51,12 @@ fn require_u64(args: &Value, field: &'static str) -> Result<u64, ToolError> {
 }
 
 fn parse_claim_ref(value: &Value, field: &'static str) -> Result<ClaimRef, ToolError> {
-    if let Some(raw) = value.as_str() {
-        if let Some(rest) = raw.strip_prefix("draft:") {
-            let draft_id = rest.parse::<u64>().map_err(|_| {
-                ToolError::InvalidArgument(format!(
-                    "{field}: invalid draft reference '{raw}', expected draft:<number>"
-                ))
-            })?;
-            return Ok(ClaimRef::Draft(DraftId(draft_id)));
-        }
-        if let Some(rest) = raw.strip_prefix('#') {
-            let draft_id = rest.parse::<u64>().map_err(|_| {
-                ToolError::InvalidArgument(format!(
-                    "{field}: invalid draft reference '{raw}', expected #<number>"
-                ))
-            })?;
-            return Ok(ClaimRef::Draft(DraftId(draft_id)));
-        }
-        if let Some(rest) = raw.strip_prefix("claim:") {
-            return Ok(ClaimRef::Committed(ClaimId(rest.to_owned())));
-        }
-        return Ok(ClaimRef::Committed(ClaimId(raw.to_owned())));
-    }
-
-    let object = value.as_object().ok_or_else(|| {
+    ClaimRef::from_json_value(value).ok_or_else(|| {
         ToolError::InvalidArgument(format!(
-            "{field}: expected a string claim reference or an object containing exactly one of claim_id or draft_id"
+            "{field}: expected a claim reference string (claim:<id>, draft:<n>, #<n>) \
+             or an object with exactly one of claim_id or draft_id"
         ))
-    })?;
-    let claim_id = object.get("claim_id").and_then(Value::as_str);
-    let draft_id = object.get("draft_id").and_then(Value::as_u64);
-    match (claim_id, draft_id) {
-        (Some(claim_id), None) => Ok(ClaimRef::Committed(ClaimId(claim_id.to_owned()))),
-        (None, Some(draft_id)) => Ok(ClaimRef::Draft(DraftId(draft_id))),
-        (Some(_), Some(_)) => Err(ToolError::InvalidArgument(format!(
-            "{field}: provide exactly one of claim_id or draft_id"
-        ))),
-        (None, None) => Err(ToolError::InvalidArgument(format!(
-            "{field}: expected either claim_id or draft_id"
-        ))),
-    }
+    })
 }
 
 fn require_claim_ref(args: &Value, field: &'static str) -> Result<ClaimRef, ToolError> {
@@ -296,12 +262,12 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "claim_detail",
-            description: "Get detailed information about a specific committed claim including its relations, stances, and epistemic status. Prefer this for exact factual questions about a claim.",
+            description: "Get detailed information about a specific committed claim including its relations, stances, and epistemic status. Prefer this for exact factual questions, then answer in plain language rather than log jargon.",
             parameters: claim_id_param(),
         },
         ToolDef {
             name: "draft_claim",
-            description: "Draft a new claim (item, proposal, fact, etc.) for later submission on behalf of the current participant. The author is derived from the active participant automatically.",
+            description: "Record a new idea for later human review and submission on behalf of the current participant. The author is derived from the active participant automatically. In your follow-up, describe the idea naturally rather than naming internal log types unless the participant already used them.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -314,7 +280,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "draft_relation",
-            description: "Draft a relation (attack or support) between two claims on behalf of the current participant. References may target either committed claims or locally drafted claims.",
+            description: "Record that one idea supports or attacks another on behalf of the current participant. References may target either committed claims or locally drafted claims. In conversation, explain the connection naturally rather than talking about graph edges or relation objects. If the participant refers to a concern or risk indirectly, inspect or clarify before choosing source and target.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -327,7 +293,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "draft_stance",
-            description: "Draft a stance (position) on a claim. Use the weakest matching stance: consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership.",
+            description: "Record the participant's own degree of agreement or disagreement with an idea, but only when they clearly want that view noted down now rather than merely thinking out loud. Use the weakest matching stance: consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership. In conversation, phrase this naturally, for example as noting agreement or objection.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -339,7 +305,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "draft_resolve",
-            description: "Draft a resolution for a proposal (accepted, rejected, tabled, or withdrawn) on behalf of the current participant.",
+            description: "Record a proposed resolution for an idea on behalf of the current participant. In conversation, describe the decision plainly rather than using internal workflow jargon unless the participant asks for it.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -351,7 +317,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "draft_comment",
-            description: "Draft a concrete freeform comment for the shared log on behalf of the current participant, optionally attached to a specific claim. Do not use this for advice, hypotheticals, or as a placeholder when the user is still exploring what they mean.",
+            description: "Record a concrete freeform note for the shared log on behalf of the current participant, optionally attached to a specific claim. Do not use this for advice, hypotheticals, or as a placeholder when the user is still exploring what they mean.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -414,7 +380,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 process help, option comparison, hypothetical discussion, or is expressing only a \
                 tentative leaning. Also use this when you need one focused clarification before \
                 drafting. Only draft when the participant is clearly expressing or requesting a \
-                contribution that is specific enough to record.",
+                contribution that is specific enough to record. If you are asking the participant to confirm whether something should be recorded, set reason=need_clarification. Keep the reply in natural language and avoid exposing internal concepts like claim, stance, relation, draft, or claim IDs unless the participant already used them.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -432,7 +398,7 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     },
                     "raw_text_fallback": {
                         "type": "string",
-                        "description": "Plain text response when no structured action applies"
+                        "description": "Plain natural-language response when no structured action applies. Use plain conversation, assumption checks, and clarifying questions instead of internal consensus-log jargon, tool names, or claim IDs."
                     }
                 },
                 "required": ["reason", "raw_text_fallback"]

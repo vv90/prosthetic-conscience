@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use serde_json::Value;
 
 use super::reducer::{replay, to_graph};
 use super::render::{self, ClaimDetail, OverviewData};
@@ -41,6 +42,42 @@ impl Serialize for ClaimRef {
             ClaimRef::Draft(draft_id) => map.serialize_entry("draft_id", draft_id)?,
         }
         map.end()
+    }
+}
+
+impl ClaimRef {
+    /// Parse a `ClaimRef` from a JSON value.
+    ///
+    /// Accepted formats:
+    /// - `"draft:<n>"` or `"#<n>"` → `ClaimRef::Draft`
+    /// - `"claim:<id>"` or bare `"<id>"` → `ClaimRef::Committed`
+    /// - `{"claim_id": "<id>"}` → `ClaimRef::Committed`
+    /// - `{"draft_id": <n>}` → `ClaimRef::Draft`
+    ///
+    /// Returns `None` when the value does not match any recognized format or
+    /// when an object contains both or neither of `claim_id`/`draft_id`.
+    pub fn from_json_value(value: &Value) -> Option<Self> {
+        if let Some(raw) = value.as_str() {
+            if let Some(rest) = raw.strip_prefix("draft:") {
+                return rest.parse::<u64>().ok().map(DraftId).map(ClaimRef::Draft);
+            }
+            if let Some(rest) = raw.strip_prefix('#') {
+                return rest.parse::<u64>().ok().map(DraftId).map(ClaimRef::Draft);
+            }
+            if let Some(rest) = raw.strip_prefix("claim:") {
+                return Some(ClaimRef::Committed(ClaimId(rest.to_owned())));
+            }
+            return Some(ClaimRef::Committed(ClaimId(raw.to_owned())));
+        }
+
+        let object = value.as_object()?;
+        let claim_id = object.get("claim_id").and_then(Value::as_str);
+        let draft_id = object.get("draft_id").and_then(Value::as_u64);
+        match (claim_id, draft_id) {
+            (Some(id), None) => Some(ClaimRef::Committed(ClaimId(id.to_owned()))),
+            (None, Some(id)) => Some(ClaimRef::Draft(DraftId(id))),
+            _ => None,
+        }
     }
 }
 

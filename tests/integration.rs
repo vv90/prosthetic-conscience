@@ -644,7 +644,7 @@ async fn tool_loop_executes_tool_and_re_requests() {
 }
 
 #[tokio::test]
-async fn consensus_llm_drafts_claim_via_tool_loop() {
+async fn consensus_llm_drafts_claim_after_clarification_turn() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let gw = TestGateway::start().await;
         let mut worker = MockWorker::connect(gw.addr).await;
@@ -662,8 +662,18 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
             let mut engine = ConsensusEngine::new(String::from("assistant"));
             let mut history =
                 vec![json!({"role": "user", "content": "Draft a proposal to use JWT"})];
-            let msg = llm.run_turn(&mut engine, &mut history).await.unwrap();
-            (msg, history, engine.show_drafts().to_vec())
+            let clarification = llm.run_turn(&mut engine, &mut history).await.unwrap();
+            history.push(json!({
+                "role": "user",
+                "content": "Yes, please prepare that proposal."
+            }));
+            let draft_reply = llm.run_turn(&mut engine, &mut history).await.unwrap();
+            (
+                clarification,
+                draft_reply,
+                history,
+                engine.show_drafts().to_vec(),
+            )
         });
 
         let job1 = worker.recv_job().await;
@@ -674,12 +684,49 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
                     .iter()
                     .filter_map(|tool| tool["function"]["name"].as_str())
                     .collect();
+                assert!(!tool_names.contains(&"draft_claim"));
+                assert!(!tool_names.contains(&"draft_comment"));
+                assert!(tool_names.contains(&"impact_analysis"));
+                assert!(tool_names.contains(&"show_drafts"));
+                assert!(tool_names.contains(&"no_structured_action"));
+                assert!(!tool_names.contains(&"submit_drafts"));
+                assert!(!tool_names.contains(&"clear_drafts"));
+            }
+        }
+
+        worker
+            .send_chunk(json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_clarify",
+                            "type": "function",
+                            "function": {
+                                "name": "no_structured_action",
+                                "arguments": "{\"reason\":\"need_clarification\",\"raw_text_fallback\":\"It sounds like you want me to prepare a proposal to use JWT. Should I go ahead and draft that?\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }))
+            .await;
+        worker.send_end().await;
+
+        let job2 = worker.recv_job().await;
+        match &job2 {
+            GatewayToWorker::Job { payload, .. } => {
+                let tools = payload["tools"].as_array().unwrap();
+                let tool_names: Vec<&str> = tools
+                    .iter()
+                    .filter_map(|tool| tool["function"]["name"].as_str())
+                    .collect();
                 assert!(tool_names.contains(&"draft_claim"));
                 assert!(tool_names.contains(&"draft_comment"));
                 assert!(tool_names.contains(&"impact_analysis"));
-                assert!(tool_names.contains(&"show_drafts"));
-                assert!(!tool_names.contains(&"submit_drafts"));
-                assert!(!tool_names.contains(&"clear_drafts"));
             }
         }
 
@@ -705,36 +752,14 @@ async fn consensus_llm_drafts_claim_via_tool_loop() {
             .await;
         worker.send_end().await;
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let job2 = worker.recv_job().await;
-        match &job2 {
-            GatewayToWorker::Job { payload, .. } => {
-                let messages = payload["messages"].as_array().unwrap();
-                let tool_msg = messages.last().unwrap();
-                assert_eq!(tool_msg["role"], "tool");
-                assert_eq!(tool_msg["tool_call_id"], "call_draft");
-            }
-        }
-
-        worker
-            .send_chunk(json!({
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": "I drafted a proposal for review."
-                    },
-                    "finish_reason": "stop"
-                }]
-            }))
-            .await;
-        worker.send_end().await;
-
-        let (msg, _history, drafts) = loop_handle.await.unwrap();
+        let (clarification, draft_reply, _history, drafts) = loop_handle.await.unwrap();
         assert_eq!(
-            msg.content,
-            Some("I drafted a proposal for review.".to_owned())
+            clarification.content,
+            Some("It sounds like you want me to prepare a proposal to use JWT. Should I go ahead and draft that?".to_owned())
+        );
+        assert_eq!(
+            draft_reply.content,
+            Some("I've prepared a draft for \"Use JWT\". It's still only a local draft, so we can adjust the wording before you submit it.".to_owned())
         );
         assert_eq!(drafts.len(), 1);
         assert!(matches!(

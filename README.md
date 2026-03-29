@@ -185,6 +185,9 @@ Notes:
 - Draft authorship is derived from `--participant`; the LLM does not supply draft `author` fields directly.
 - Pending draft claims are identified locally by `#<draft_id>` in `/drafts`.
 - When a tool or trace refers to a committed claim it uses `claim:<id>`; when it refers to a local draft claim it uses `draft:<id>`.
+- The assistant is configured to clarify or inspect first on ambiguous fresh turns, then prepare a local draft after confirmation when needed.
+- Successful draft mutations are followed by a deterministic local-draft confirmation rather than another free-form model-generated narration.
+- Design notes and behavior observations live in [docs/consensus-llm-behavior.md](/Users/vladimir/devshells/prosthetic-conscience/docs/consensus-llm-behavior.md).
 
 Example prompts to try:
 
