@@ -84,11 +84,9 @@ pub enum ExpectedToolUse {
         #[serde(default)]
         body_contains: Vec<String>,
     },
-    NoStructuredAction {
+    PlainTextResponse {
         #[serde(default)]
-        reasons: Vec<String>,
-        #[serde(default)]
-        raw_text_contains: Vec<String>,
+        text_contains: Vec<String>,
     },
     AnyStructuredTool,
     AnyTool {
@@ -414,16 +412,38 @@ fn evaluate_case(
             .as_ref()
             .is_some_and(|message| !message.tool_calls.is_empty())
     });
-    let structured_tool_call_made = tool_results
-        .iter()
-        .any(|execution| execution.function_name != "no_structured_action");
+    let structured_tool_call_made = !tool_results.is_empty();
 
     let mut expected_tool_match = false;
     let mut expected_argument_match = false;
     let mut expected_outcome_match = false;
     let mut matched_variant_index = None;
 
+    let final_content = trace
+        .final_message
+        .as_ref()
+        .and_then(|msg| msg.content.as_deref())
+        .unwrap_or("");
+
     for (index, expected) in case.expected.iter().enumerate() {
+        // PlainTextResponse is special: it matches when the model replied
+        // with plain text (no tool calls) and the content passes filters.
+        if let ExpectedToolUse::PlainTextResponse { text_contains } = expected {
+            let text_match = !tool_call_made
+                && (text_contains.is_empty()
+                    || text_contains
+                        .iter()
+                        .all(|needle| final_content.contains(needle.as_str())));
+            if text_match && final_drafts.is_empty() {
+                expected_tool_match = true;
+                expected_argument_match = true;
+                expected_outcome_match = true;
+                matched_variant_index = Some(index);
+                break;
+            }
+            continue;
+        }
+
         let tool_name_match = tool_results
             .iter()
             .any(|execution| matches_expected_tool_name(expected, &execution.function_name));
@@ -435,7 +455,7 @@ fn evaluate_case(
         expected_argument_match |= argument_match;
 
         let outcome_match = match expected {
-            ExpectedToolUse::NoStructuredAction { .. } => argument_match && final_drafts.is_empty(),
+            ExpectedToolUse::PlainTextResponse { .. } => unreachable!(),
             ExpectedToolUse::AnyStructuredTool => !final_drafts.is_empty(),
             ExpectedToolUse::AnyTool { .. } => argument_match,
             _ => final_drafts
@@ -494,8 +514,8 @@ fn matches_expected_tool_name(expected: &ExpectedToolUse, actual_name: &str) -> 
         ExpectedToolUse::DraftStance { .. } => actual_name == "draft_stance",
         ExpectedToolUse::DraftResolve { .. } => actual_name == "draft_resolve",
         ExpectedToolUse::DraftComment { .. } => actual_name == "draft_comment",
-        ExpectedToolUse::NoStructuredAction { .. } => actual_name == "no_structured_action",
-        ExpectedToolUse::AnyStructuredTool => actual_name != "no_structured_action",
+        ExpectedToolUse::PlainTextResponse { .. } => false,
+        ExpectedToolUse::AnyStructuredTool => true,
         ExpectedToolUse::AnyTool { names } => names.iter().any(|name| name == actual_name),
     }
 }
@@ -568,19 +588,8 @@ fn matches_expected_tool_call(
                 optional_claim_ref_matches(arguments, "claim", claim_id.as_deref())
                     && required_body_matches(arguments, "body", body_contains)
             }),
-        ExpectedToolUse::NoStructuredAction {
-            reasons,
-            raw_text_contains,
-        } => execution
-            .parsed_arguments
-            .as_ref()
-            .is_some_and(|arguments| {
-                (reasons.is_empty()
-                    || str_field(arguments, "reason")
-                        .is_some_and(|reason| reasons.iter().any(|expected| expected == reason)))
-                    && required_body_matches(arguments, "raw_text_fallback", raw_text_contains)
-            }),
-        ExpectedToolUse::AnyStructuredTool => execution.function_name != "no_structured_action",
+        ExpectedToolUse::PlainTextResponse { .. } => false,
+        ExpectedToolUse::AnyStructuredTool => true,
         ExpectedToolUse::AnyTool { names } => {
             names.iter().any(|name| name == &execution.function_name)
         }
@@ -874,16 +883,15 @@ mod tests {
     }
 
     #[test]
-    fn no_structured_action_requires_empty_draft_buffer() {
+    fn plain_text_response_requires_empty_draft_buffer() {
         let case = ToolCallCase {
             id: String::from("process"),
             description: String::from("Process question"),
             checkpoint_entries: 0,
             participant: String::from("alice"),
             user_message: String::from("What does /submit do?"),
-            expected: vec![ExpectedToolUse::NoStructuredAction {
-                reasons: vec![String::from("user_asked_question")],
-                raw_text_contains: vec![String::from("/submit")],
+            expected: vec![ExpectedToolUse::PlainTextResponse {
+                text_contains: vec![String::from("/submit")],
             }],
         };
         let trace = LlmTurnTrace {
@@ -894,36 +902,18 @@ mod tests {
                 response_chunks: 1,
                 assistant_message: Some(CompletedMessage {
                     role: String::from("assistant"),
-                    content: None,
-                    tool_calls: vec![CompletedToolCall {
-                        id: String::from("call_1"),
-                        call_type: String::from("function"),
-                        function_name: String::from("no_structured_action"),
-                        arguments_json: String::from(
-                            "{\"reason\":\"user_asked_question\",\"raw_text_fallback\":\"Use /submit to commit pending drafts.\"}",
-                        ),
-                    }],
-                    finish_reason: Some(String::from("tool_calls")),
+                    content: Some(String::from("Use /submit to commit pending drafts.")),
+                    tool_calls: vec![],
+                    finish_reason: Some(String::from("stop")),
                 }),
-                tool_results: vec![ToolExecutionTrace {
-                    call_id: String::from("call_1"),
-                    function_name: String::from("no_structured_action"),
-                    arguments_json: String::new(),
-                    parsed_arguments: Some(json!({
-                        "reason": "user_asked_question",
-                        "raw_text_fallback": "Use /submit to commit pending drafts.",
-                    })),
-                    argument_parse_error: None,
-                    tool_result_content: String::from("Use /submit to commit pending drafts."),
-                    dispatch_error: None,
-                }],
+                tool_results: vec![],
                 error: None,
             }],
             final_message: Some(CompletedMessage {
                 role: String::from("assistant"),
                 content: Some(String::from("Use /submit to commit pending drafts.")),
                 tool_calls: vec![],
-                finish_reason: Some(String::from("tool_calls")),
+                finish_reason: Some(String::from("stop")),
             }),
         };
 

@@ -215,12 +215,6 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
 
         "impact_analysis" => Ok(to_json(&engine.impact_analysis())),
 
-        "no_structured_action" => {
-            let reason = require_str(&args, "reason")?;
-            let text = require_str(&args, "raw_text_fallback")?;
-            Ok(json!({ "reason": reason, "response": text }))
-        }
-
         _ => Err(ToolError::UnknownTool(tool.to_owned())),
     }
 }
@@ -373,36 +367,6 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             name: "impact_analysis",
             description: "Compare the current committed state with the state produced by applying all current drafts. Prefer this before answering \"what would change if\" questions about current drafts.",
             parameters: empty_params(),
-        },
-        ToolDef {
-            name: "no_structured_action",
-            description: "Use when the participant is asking for a summary, explanation, analysis, \
-                process help, option comparison, hypothetical discussion, or is expressing only a \
-                tentative leaning. Also use this when you need one focused clarification before \
-                drafting. Only draft when the participant is clearly expressing or requesting a \
-                contribution that is specific enough to record. If you are asking the participant to confirm whether something should be recorded, set reason=need_clarification. Keep the reply in natural language and avoid exposing internal concepts like claim, stance, relation, draft, or claim IDs unless the participant already used them.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "enum": [
-                            "user_asked_question",
-                            "need_clarification",
-                            "summary_or_analysis",
-                            "hypothetical_or_meta",
-                            "no_actionable_content",
-                            "off_topic"
-                        ],
-                        "description": "Why no structured entry is appropriate"
-                    },
-                    "raw_text_fallback": {
-                        "type": "string",
-                        "description": "Plain natural-language response when no structured action applies. Use plain conversation, assumption checks, and clarifying questions instead of internal consensus-log jargon, tool names, or claim IDs."
-                    }
-                },
-                "required": ["reason", "raw_text_fallback"]
-            }),
         },
     ]
 }
@@ -666,7 +630,7 @@ mod tests {
     #[test]
     fn tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 15);
+        assert_eq!(defs.len(), 14);
         // All have non-empty names and descriptions
         for def in &defs {
             assert!(!def.name.is_empty());
@@ -683,36 +647,7 @@ mod tests {
         assert!(!names.contains(&"clear_drafts"));
         assert!(names.contains(&"draft_comment"));
         assert!(names.contains(&"remove_draft"));
-        assert!(names.contains(&"no_structured_action"));
-        assert_eq!(
-            names.last().copied(),
-            Some("no_structured_action"),
-            "no_structured_action must be listed last"
-        );
-    }
-
-    #[test]
-    fn dispatch_no_structured_action_valid() {
-        let mut engine = engine();
-        let result = dispatch(
-            &mut engine,
-            "no_structured_action",
-            json!({"reason": "user_asked_question", "raw_text_fallback": "The session is about X."}),
-        )
-        .unwrap();
-        assert_eq!(result["reason"], "user_asked_question");
-        assert_eq!(result["response"], "The session is about X.");
-    }
-
-    #[test]
-    fn dispatch_no_structured_action_missing_reason() {
-        let mut engine = engine();
-        let result = dispatch(
-            &mut engine,
-            "no_structured_action",
-            json!({"raw_text_fallback": "hello"}),
-        );
-        assert!(matches!(result, Err(ToolError::MissingArgument("reason"))));
+        assert!(!names.contains(&"no_structured_action"));
     }
 
     #[test]

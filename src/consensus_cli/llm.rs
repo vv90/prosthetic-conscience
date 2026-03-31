@@ -11,7 +11,6 @@ use crate::consensus::tools;
 
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_COMPLETION_TOKENS: u64 = 512;
-const CLARIFICATION_MARKER_PREFIX: &str = "[internal clarification pending]";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -64,12 +63,6 @@ pub struct ConsensusLlm {
     max_history: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolPolicyPhase {
-    ClarifyOrInspect,
-    MutationAllowed,
-}
-
 impl ConsensusLlm {
     pub fn new(
         gateway_url: String,
@@ -106,13 +99,12 @@ impl ConsensusLlm {
         engine: &mut ConsensusEngine,
         history: &mut Vec<Value>,
     ) -> Result<LlmTurnTrace, LlmTurnTraceError> {
-        let phase = phase_for_turn(engine, history);
         let mut trace = LlmTurnTrace::default();
 
         for round in 0.. {
             truncate_history(history, self.max_history);
-            let tool_defs = tool_definitions_json(phase);
-            let payload = self.build_request_payload(engine, history, &tool_defs, phase);
+            let tool_defs = tool_definitions_json();
+            let payload = self.build_request_payload(engine, history, &tool_defs);
 
             let mut round_trace = LlmRoundTrace {
                 round,
@@ -175,50 +167,6 @@ impl ConsensusLlm {
                         Ok(arguments) => (Some(arguments), None),
                         Err(error) => (None, Some(error.to_string())),
                     };
-
-                if tool_call.function_name == "no_structured_action" {
-                    let text = parsed_arguments
-                        .as_ref()
-                        .and_then(|value| {
-                            value
-                                .get("raw_text_fallback")
-                                .and_then(Value::as_str)
-                                .map(String::from)
-                        })
-                        .unwrap_or_default();
-                    let needs_clarification_marker = parsed_arguments
-                        .as_ref()
-                        .and_then(|value| value.get("reason"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|reason| reason == "need_clarification");
-                    round_trace.tool_results.push(ToolExecutionTrace {
-                        call_id: tool_call.id.clone(),
-                        function_name: tool_call.function_name.clone(),
-                        arguments_json: tool_call.arguments_json.clone(),
-                        parsed_arguments,
-                        argument_parse_error,
-                        tool_result_content: text.clone(),
-                        dispatch_error: None,
-                    });
-                    // Replace the assistant tool-call message in history with the
-                    // plain assistant reply the human actually saw so the next
-                    // turn continues from natural conversation, not a dangling
-                    // tool-call stub.
-                    history.pop();
-                    let final_message = CompletedMessage {
-                        role: "assistant".into(),
-                        content: Some(text),
-                        tool_calls: vec![],
-                        finish_reason: msg.finish_reason.clone(),
-                    };
-                    history.push(assistant_message_value(&final_message));
-                    if needs_clarification_marker {
-                        history.push(clarification_marker_message());
-                    }
-                    trace.final_message = Some(final_message);
-                    trace.rounds.push(round_trace);
-                    return Ok(trace);
-                }
 
                 let (content, dispatch_error) = match parsed_arguments.clone() {
                     Some(arguments) => {
@@ -287,12 +235,11 @@ impl ConsensusLlm {
         engine: &ConsensusEngine,
         history: &[Value],
         tool_defs: &[Value],
-        phase: ToolPolicyPhase,
     ) -> Value {
         let mut request_messages = Vec::with_capacity(history.len() + 1);
         request_messages.push(json!({
             "role": "system",
-            "content": self.build_system_prompt(engine, phase),
+            "content": self.build_system_prompt(engine),
         }));
         request_messages.extend(history.iter().cloned());
 
@@ -300,46 +247,37 @@ impl ConsensusLlm {
             "model": self.model,
             "messages": request_messages,
             "tools": tool_defs,
-            "tool_choice": "required",
+            "tool_choice": "auto",
             "max_tokens": MAX_COMPLETION_TOKENS,
         })
     }
 
-    fn build_system_prompt(&self, engine: &ConsensusEngine, phase: ToolPolicyPhase) -> String {
+    fn build_system_prompt(&self, engine: &ConsensusEngine) -> String {
         let overview = format_overview(&engine.overview());
         let drafts = format_drafts(engine.show_drafts());
         let impact = format_impact_analysis(&engine.impact_analysis());
-        let tool_list = llm_tool_definitions_for_phase(phase)
+        let tool_list = tools::llm_tool_definitions()
             .into_iter()
             .map(|tool| format!("- {}: {}", tool.name, tool.description))
             .collect::<Vec<_>>()
             .join("\n");
-        let phase_policy = match phase {
-            ToolPolicyPhase::ClarifyOrInspect => {
-                "This is a clarify-or-inspect turn. Do not create, revise, or remove drafts on this turn. Use read-only tools and no_structured_action to answer, inspect, or ask one focused clarification in natural language."
-            }
-            ToolPolicyPhase::MutationAllowed => {
-                "This turn may create or revise at most one concrete draft because either there is already a pending draft buffer or the participant is responding to a previous clarification. If intent is still ambiguous, ask one more clarification instead of drafting."
-            }
-        };
 
         format!(
             "You are an AI drafting assistant helping a human participant contribute to a shared consensus log.\n\
              You are participating as \"{participant}\".\n\
              The shared log is authoritative. You may inspect committed state and manipulate only local drafts.\n\
              Never claim a draft is committed. Only the human can commit drafts by typing /submit.\n\
-             You must use a tool on every turn.\n\
              All drafts are on behalf of the current participant, \"{participant}\". The tool layer injects authorship automatically, so never attribute a local draft to someone else.\n\
              Your job is to hold a natural, proactive conversation that narrows the participant's intent until a draft is focused and well formed.\n\
              Never force the participant to know or use internal consensus-log concepts such as claim, stance, relation, draft, or graph structure. Infer those privately.\n\
              In user-facing text, speak naturally. Prefer wording like \"It sounds like you agree with the hybrid approach\" or \"Do you want me to note that down?\" over internal jargon like \"I drafted a stance.\"\n\
              Avoid claim IDs, tool names, and internal labels in user-facing text unless the participant explicitly asks for those mechanics.\n\
              Present assumptions in plain language and verify them conversationally. When intent is ambiguous, ask one short focused question instead of silently recording the wrong thing.\n\
-             When you ask the participant to confirm whether something should be recorded, or to choose between plausible interpretations before recording, use no_structured_action with reason=need_clarification.\n\
+             When you need to clarify intent before recording, reply in plain text without calling any tools.\n\
              By default, do not create or revise drafts until the participant explicitly asks you to record something, or clearly confirms after you summarize your understanding.\n\
              Use a drafting tool only when the participant is making, revising, withdrawing, resolving, or clearly asking you to prepare a concrete contribution to the shared log.\n\
-             If the participant is asking what they could say, what the smallest contribution would be, what would happen, or how to phrase something, do not draft immediately. Use no_structured_action to discuss options and, if needed, ask one focused follow-up.\n\
-             If the participant asks for a summary, explanation, comparison, process guidance, or strategy, use no_structured_action unless they also ask you to record something.\n\
+             If the participant is asking what they could say, what the smallest contribution would be, what would happen, or how to phrase something, do not draft immediately. Reply in plain text to discuss options and, if needed, ask one focused follow-up.\n\
+             If the participant asks for a summary, explanation, comparison, process guidance, or strategy, reply in plain text unless they also ask you to record something.\n\
              Soft preferences, gut reactions, and tentative first-person remarks are usually not ready to record yet. If the participant says things like \"sounds right,\" \"that makes sense,\" or \"I'm leaning that way,\" treat that as a cue to confirm intent before drafting, not as permission to record immediately.\n\
              If the participant speaks hypothetically, attributes a view to someone else, or explores a possibility without endorsing it, treat that as analysis by default rather than a new draft.\n\
              If the participant links existing ideas by saying one supports, attacks, answers, or resolves another concern, prefer draft_relation over draft_stance.\n\
@@ -350,11 +288,9 @@ impl ConsensusLlm {
              When referring to committed claims inside tool arguments, use references like claim:prop-hybrid. When referring to locally drafted claims, use draft:3.\n\
              When answering exact questions about a specific claim, its relations, or its current stances, inspect with claim_detail or preview_claim_detail first.\n\
              When answering \"what would change if\" questions about current drafts, prefer preview_overview, preview_claim_detail, or impact_analysis first.\n\
-             When you use no_structured_action, do not merely echo the participant's words. Add a concrete next step, clarification, or grounded explanation.\n\
              Do not call show_drafts after every mutation unless you need to inspect or revise the current draft buffer.\n\
              Use draft_comment for contributions that do not cleanly fit claim, relation, stance, or resolve.\n\
-             {phase_policy}\n\
-             Use no_structured_action whenever no draft is appropriate, and put the user-facing reply in raw_text_fallback.\n\n\
+             Reply in plain text whenever no draft or inspection is appropriate.\n\n\
              ## Current deliberation state\n\
              {overview}\n\
              ## Pending drafts\n\
@@ -364,7 +300,6 @@ impl ConsensusLlm {
              ## Available tools\n\
              {tool_list}\n",
             participant = self.participant,
-            phase_policy = phase_policy,
         )
     }
 }
@@ -397,18 +332,7 @@ fn truncate_history(history: &mut Vec<Value>, max: usize) {
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty());
 
-        // A user message right after a clarification marker is not a safe
-        // cut point — cutting here would orphan the marker.  Skip it so
-        // the marker + confirmation pair stays together.
-        let follows_clarification_marker = cut > 0
-            && history[cut - 1]
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|c| c.starts_with(CLARIFICATION_MARKER_PREFIX));
-
-        if (role == "user" && !follows_clarification_marker)
-            || (role == "assistant" && !has_tool_calls)
-        {
+        if role == "user" || (role == "assistant" && !has_tool_calls) {
             break;
         }
         cut += 1;
@@ -419,29 +343,8 @@ fn truncate_history(history: &mut Vec<Value>, max: usize) {
     }
 }
 
-fn llm_tool_definitions_for_phase(phase: ToolPolicyPhase) -> Vec<tools::ToolDef> {
-    match phase {
-        ToolPolicyPhase::ClarifyOrInspect => tools::llm_tool_definitions()
-            .into_iter()
-            .filter(|tool| {
-                matches!(
-                    tool.name,
-                    "overview"
-                        | "claim_detail"
-                        | "show_drafts"
-                        | "preview_overview"
-                        | "preview_claim_detail"
-                        | "impact_analysis"
-                        | "no_structured_action"
-                )
-            })
-            .collect(),
-        ToolPolicyPhase::MutationAllowed => tools::llm_tool_definitions(),
-    }
-}
-
-fn tool_definitions_json(phase: ToolPolicyPhase) -> Vec<Value> {
-    llm_tool_definitions_for_phase(phase)
+fn tool_definitions_json() -> Vec<Value> {
+    tools::llm_tool_definitions()
         .into_iter()
         .map(|tool| {
             json!({
@@ -466,49 +369,6 @@ fn is_draft_mutation_tool(function_name: &str) -> bool {
             | "draft_comment"
             | "remove_draft"
     )
-}
-
-fn clarification_marker_message() -> Value {
-    json!({
-        "role": "system",
-        "content": format!(
-            "{CLARIFICATION_MARKER_PREFIX} The assistant asked a focused clarification on the previous turn. If the user's latest reply clearly confirms that interpretation, you may now prepare one matching draft. If the user corrects, declines, or stays ambiguous, do not draft yet."
-        ),
-    })
-}
-
-fn has_pending_clarification(history: &[Value]) -> bool {
-    if history
-        .last()
-        .and_then(|message| message.get("role"))
-        .and_then(Value::as_str)
-        != Some("user")
-    {
-        return false;
-    }
-
-    history
-        .iter()
-        .rev()
-        .nth(1)
-        .and_then(|message| message.get("role"))
-        .and_then(Value::as_str)
-        .is_some_and(|role| role == "system")
-        && history
-            .iter()
-            .rev()
-            .nth(1)
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_str)
-            .is_some_and(|content| content.starts_with(CLARIFICATION_MARKER_PREFIX))
-}
-
-fn phase_for_turn(engine: &ConsensusEngine, history: &[Value]) -> ToolPolicyPhase {
-    if has_pending_clarification(history) || !engine.show_drafts().is_empty() {
-        ToolPolicyPhase::MutationAllowed
-    } else {
-        ToolPolicyPhase::ClarifyOrInspect
-    }
 }
 
 fn synthesize_mutation_follow_up(
@@ -661,9 +521,8 @@ mod tests {
             100,
         );
 
-        let prompt = llm.build_system_prompt(&engine, ToolPolicyPhase::ClarifyOrInspect);
+        let prompt = llm.build_system_prompt(&engine);
         assert!(prompt.contains("Only the human can commit drafts"));
-        assert!(prompt.contains("You must use a tool on every turn"));
         assert!(prompt.contains("The tool layer injects authorship automatically"));
         assert!(prompt.contains(
             "Never force the participant to know or use internal consensus-log concepts"
@@ -677,16 +536,16 @@ mod tests {
         assert!(prompt.contains("inspect with claim_detail or preview_claim_detail first"));
         assert!(prompt.contains("If the participant explicitly says not to create drafts"));
         assert!(prompt.contains("prefer draft_relation over draft_stance"));
-        assert!(prompt.contains("no_structured_action"));
         assert!(prompt.contains("impact_analysis"));
         assert!(prompt.contains("draft_comment"));
-        assert!(prompt.contains("This is a clarify-or-inspect turn"));
+        assert!(prompt.contains("Reply in plain text whenever no draft or inspection"));
         assert!(!prompt.contains("submit_drafts"));
         assert!(!prompt.contains("clear_drafts"));
+        assert!(!prompt.contains("no_structured_action"));
     }
 
     #[test]
-    fn request_payload_uses_required_tool_choice_and_completion_cap() {
+    fn request_payload_uses_auto_tool_choice_and_completion_cap() {
         let llm = ConsensusLlm::new(
             String::from("http://127.0.0.1:3000"),
             None,
@@ -697,50 +556,14 @@ mod tests {
 
         let engine = ConsensusEngine::new(String::from("assistant"));
         let history = vec![json!({"role": "user", "content": "Summarize the current state."})];
-        let payload = llm.build_request_payload(
-            &engine,
-            &history,
-            &tool_definitions_json(ToolPolicyPhase::ClarifyOrInspect),
-            ToolPolicyPhase::ClarifyOrInspect,
-        );
+        let payload = llm.build_request_payload(&engine, &history, &tool_definitions_json());
 
-        assert_eq!(payload["tool_choice"], "required");
+        assert_eq!(payload["tool_choice"], "auto");
         assert_eq!(payload["max_tokens"], MAX_COMPLETION_TOKENS);
         assert_eq!(payload["messages"][0]["role"], "system");
         assert_eq!(
             payload["messages"][1]["content"],
             "Summarize the current state."
-        );
-    }
-
-    #[test]
-    fn clarify_phase_exposes_only_read_and_conversation_tools() {
-        let defs = llm_tool_definitions_for_phase(ToolPolicyPhase::ClarifyOrInspect);
-        let names = defs.into_iter().map(|def| def.name).collect::<Vec<_>>();
-        assert!(names.contains(&"overview"));
-        assert!(names.contains(&"claim_detail"));
-        assert!(names.contains(&"show_drafts"));
-        assert!(names.contains(&"preview_overview"));
-        assert!(names.contains(&"preview_claim_detail"));
-        assert!(names.contains(&"impact_analysis"));
-        assert!(names.contains(&"no_structured_action"));
-        assert!(!names.contains(&"draft_stance"));
-        assert!(!names.contains(&"draft_relation"));
-        assert!(!names.contains(&"draft_claim"));
-    }
-
-    #[test]
-    fn phase_for_turn_allows_mutation_after_clarification_marker() {
-        let engine = ConsensusEngine::new(String::from("assistant"));
-        let history = vec![
-            json!({"role": "assistant", "content": "It sounds like you agree. Want me to note that down?"}),
-            clarification_marker_message(),
-            json!({"role": "user", "content": "Yes, please."}),
-        ];
-
-        assert_eq!(
-            phase_for_turn(&engine, &history),
-            ToolPolicyPhase::MutationAllowed
         );
     }
 
@@ -823,47 +646,5 @@ mod tests {
         truncate_history(&mut history, 1);
         // No safe cut point found — history unchanged
         assert_eq!(history.len(), 3);
-    }
-
-    #[test]
-    fn truncation_does_not_lose_clarification_marker() {
-        // The clarification tail is: assistant, system(marker), user.
-        // truncate_history considers "user" a safe cut point.  If the
-        // excess index lands on the system marker (not a safe cut point),
-        // the scanner advances to the final user message and drains
-        // everything before it — including the marker.
-        //
-        // To hit that path we need:  excess = len - max  to land exactly
-        // on the system marker (index len-2).  With the trio at the tail
-        // that means max = 2 triggers: excess = len-2, scanner starts at
-        // the system marker, skips to the user message, and drains the
-        // marker away.
-        let engine = ConsensusEngine::new(String::from("assistant"));
-        let mut history: Vec<Value> = (0..4)
-            .flat_map(|i| {
-                vec![
-                    json!({"role": "user", "content": format!("old msg {i}")}),
-                    json!({"role": "assistant", "content": format!("old reply {i}")}),
-                ]
-            })
-            .collect();
-        // 8 old messages (indices 0..7), then the clarification trio
-        history.push(json!({"role": "assistant", "content": "Want me to note that down?"}));
-        history.push(clarification_marker_message());
-        history.push(json!({"role": "user", "content": "Yes, go ahead."}));
-        // total = 11, marker at index 9, user at index 10
-
-        // max=2 → excess=9, scanner starts at index 9 (the system marker).
-        // System is not user/bare-assistant, so scanner advances to
-        // index 10 (user) and drains [0..10], leaving only the final user
-        // message.  The marker is gone.
-        truncate_history(&mut history, 2);
-
-        assert_eq!(
-            phase_for_turn(&engine, &history),
-            ToolPolicyPhase::MutationAllowed,
-            "clarification marker must survive truncation so the user's \
-             confirmation unlocks mutation tools"
-        );
     }
 }

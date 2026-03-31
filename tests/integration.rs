@@ -676,6 +676,7 @@ async fn consensus_llm_drafts_claim_after_clarification_turn() {
             )
         });
 
+        // Turn 1: model replies with plain text clarification (no tool calls).
         let job1 = worker.recv_job().await;
         match &job1 {
             GatewayToWorker::Job { payload, .. } => {
@@ -684,38 +685,33 @@ async fn consensus_llm_drafts_claim_after_clarification_turn() {
                     .iter()
                     .filter_map(|tool| tool["function"]["name"].as_str())
                     .collect();
-                assert!(!tool_names.contains(&"draft_claim"));
-                assert!(!tool_names.contains(&"draft_comment"));
+                // All tools available on every turn now.
+                assert!(tool_names.contains(&"draft_claim"));
                 assert!(tool_names.contains(&"impact_analysis"));
                 assert!(tool_names.contains(&"show_drafts"));
-                assert!(tool_names.contains(&"no_structured_action"));
                 assert!(!tool_names.contains(&"submit_drafts"));
                 assert!(!tool_names.contains(&"clear_drafts"));
+                assert!(!tool_names.contains(&"no_structured_action"));
+                assert_eq!(payload["tool_choice"], "auto");
             }
         }
 
+        // Model responds with plain text (no tool calls).
         worker
             .send_chunk(json!({
                 "choices": [{
                     "index": 0,
                     "delta": {
                         "role": "assistant",
-                        "tool_calls": [{
-                            "index": 0,
-                            "id": "call_clarify",
-                            "type": "function",
-                            "function": {
-                                "name": "no_structured_action",
-                                "arguments": "{\"reason\":\"need_clarification\",\"raw_text_fallback\":\"It sounds like you want me to prepare a proposal to use JWT. Should I go ahead and draft that?\"}"
-                            }
-                        }]
+                        "content": "It sounds like you want me to prepare a proposal to use JWT. Should I go ahead and draft that?"
                     },
-                    "finish_reason": "tool_calls"
+                    "finish_reason": "stop"
                 }]
             }))
             .await;
         worker.send_end().await;
 
+        // Turn 2: after user confirms, model calls draft_claim.
         let job2 = worker.recv_job().await;
         match &job2 {
             GatewayToWorker::Job { payload, .. } => {
@@ -757,6 +753,7 @@ async fn consensus_llm_drafts_claim_after_clarification_turn() {
             clarification.content,
             Some("It sounds like you want me to prepare a proposal to use JWT. Should I go ahead and draft that?".to_owned())
         );
+        assert!(clarification.tool_calls.is_empty());
         assert_eq!(
             draft_reply.content,
             Some("I've prepared a draft for \"Use JWT\". It's still only a local draft, so we can adjust the wording before you submit it.".to_owned())
