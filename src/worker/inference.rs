@@ -6,8 +6,8 @@ use serde_json::Value;
 pub enum InferenceError {
     #[error("inference server request failed: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("inference server returned status {0}")]
-    Status(u16),
+    #[error("inference server returned status {status}: {body}")]
+    Status { status: u16, body: String },
     #[error("malformed SSE data: {0}")]
     Parse(String),
 }
@@ -15,13 +15,37 @@ pub enum InferenceError {
 pub struct InferenceClient {
     http: reqwest::Client,
     base_url: String,
+    api_key: Option<String>,
+    model_override: Option<String>,
+}
+
+/// Replace the `model` field in an outgoing request payload with the override value.
+fn apply_model_override(payload: &mut Value, model: &str) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("model".to_owned(), Value::String(model.to_owned()));
+    }
+}
+
+/// Replace the `model` field in a response chunk with `"mystery_model"` to
+/// prevent leaking the real model name back to the client.
+fn scrub_model_from_chunk(chunk: &mut Value) {
+    if let Some(obj) = chunk.as_object_mut()
+        && obj.contains_key("model")
+    {
+        obj.insert(
+            "model".to_owned(),
+            Value::String("mystery_model".to_owned()),
+        );
+    }
 }
 
 impl InferenceClient {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, api_key: Option<String>, model_override: Option<String>) -> Self {
         Self {
             http: reqwest::Client::new(),
             base_url,
+            api_key,
+            model_override,
         }
     }
 
@@ -39,18 +63,37 @@ impl InferenceClient {
             obj.insert("stream".to_owned(), Value::Bool(true));
         }
 
+        // Override model in the outgoing request if configured.
+        if let Some(model) = &self.model_override {
+            apply_model_override(&mut payload, model);
+        }
+
+        let scrub = self.model_override.is_some();
+
         try_stream! {
             let url = format!("{}/v1/chat/completions", self.base_url);
-            let response = self.http.post(&url).json(&payload).send().await?;
+            let mut request = self.http.post(&url).json(&payload);
+            if let Some(key) = &self.api_key {
+                request = request.bearer_auth(key);
+            }
+            let response = request.send().await?;
 
             let status = response.status().as_u16();
-            if status != 200 {
-                Err(InferenceError::Status(status))?;
-            }
+            let mut body = if status != 200 {
+                let error_body = response.text().await.unwrap_or_default();
+                // Truncate to avoid flooding logs with huge error pages.
+                let error_body = if error_body.len() > 512 {
+                    format!("{}…", &error_body[..error_body.floor_char_boundary(512)])
+                } else {
+                    error_body
+                };
+                Err(InferenceError::Status { status, body: error_body })?
+            } else {
+                response
+            };
 
             // Buffer-based SSE parsing, same approach as tests/support/client.rs.
             let mut buffer = String::new();
-            let mut body = response;
 
             loop {
                 // Try to extract a complete line from the buffer.
@@ -73,7 +116,12 @@ impl InferenceClient {
                             return;
                         }
                         match serde_json::from_str::<Value>(data) {
-                            Ok(value) => yield value,
+                            Ok(mut value) => {
+                                if scrub {
+                                    scrub_model_from_chunk(&mut value);
+                                }
+                                yield value;
+                            }
                             Err(e) => {
                                 Err(InferenceError::Parse(format!(
                                     "invalid JSON in SSE data: {e}"
@@ -105,5 +153,60 @@ impl InferenceClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -- apply_model_override ------------------------------------------------
+
+    #[test]
+    fn model_override_replaces_existing_model() {
+        let mut payload = json!({"model": "client-choice", "messages": []});
+        apply_model_override(&mut payload, "Meta-Llama-3.3-70B-Instruct");
+        assert_eq!(payload["model"], "Meta-Llama-3.3-70B-Instruct");
+        assert_eq!(payload["messages"], json!([]));
+    }
+
+    #[test]
+    fn model_override_inserts_when_absent() {
+        let mut payload = json!({"messages": []});
+        apply_model_override(&mut payload, "Meta-Llama-3.3-70B-Instruct");
+        assert_eq!(payload["model"], "Meta-Llama-3.3-70B-Instruct");
+    }
+
+    #[test]
+    fn model_override_is_noop_for_non_object() {
+        let mut payload = json!("not an object");
+        apply_model_override(&mut payload, "anything");
+        assert_eq!(payload, json!("not an object"));
+    }
+
+    // -- scrub_model_from_chunk ----------------------------------------------
+
+    #[test]
+    fn scrub_replaces_model_with_mystery() {
+        let mut chunk = json!({"model": "Meta-Llama-3.3-70B-Instruct", "choices": []});
+        scrub_model_from_chunk(&mut chunk);
+        assert_eq!(chunk["model"], "mystery_model");
+        assert_eq!(chunk["choices"], json!([]));
+    }
+
+    #[test]
+    fn scrub_leaves_chunk_without_model_untouched() {
+        let mut chunk = json!({"choices": [{"delta": {"content": "hi"}}]});
+        let original = chunk.clone();
+        scrub_model_from_chunk(&mut chunk);
+        assert_eq!(chunk, original);
+    }
+
+    #[test]
+    fn scrub_is_noop_for_non_object() {
+        let mut chunk = json!(42);
+        scrub_model_from_chunk(&mut chunk);
+        assert_eq!(chunk, json!(42));
     }
 }

@@ -29,6 +29,16 @@ struct Args {
     /// Auth token for gateway connection.
     #[arg(long)]
     auth_token: Option<String>,
+
+    /// API key (Bearer token) for authenticated inference backends (e.g. SambaNova).
+    #[arg(long)]
+    inference_api_key: Option<String>,
+
+    /// Model name to send to the inference backend, overriding whatever the
+    /// client requested.  When set, the real model name is also scrubbed from
+    /// response chunks (replaced with "mystery_model").
+    #[arg(long)]
+    inference_model: Option<String>,
 }
 
 #[tokio::main]
@@ -59,11 +69,14 @@ async fn main() {
         gateway_url = %args.gateway_url,
         inference_url = %inference_url,
         whisper_url = args.whisper_url.as_deref().unwrap_or("none"),
+        inference_api_key_set = args.inference_api_key.is_some(),
+        inference_model = args.inference_model.as_deref().unwrap_or("(passthrough)"),
         ?capabilities,
         "starting pc-worker"
     );
 
-    let inference = InferenceClient::new(inference_url);
+    let inference =
+        InferenceClient::new(inference_url, args.inference_api_key, args.inference_model);
     let whisper = args.whisper_url.map(WhisperClient::new);
     let client = WorkerClient::new(
         args.gateway_url,

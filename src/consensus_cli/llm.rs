@@ -334,7 +334,6 @@ impl ConsensusLlm {
              Never force the participant to know or use internal consensus-log concepts such as claim, stance, relation, draft, or graph structure. Infer those privately.\n\
              In user-facing text, speak naturally. Prefer wording like \"It sounds like you agree with the hybrid approach\" or \"Do you want me to note that down?\" over internal jargon like \"I drafted a stance.\"\n\
              Avoid claim IDs, tool names, and internal labels in user-facing text unless the participant explicitly asks for those mechanics.\n\
-             Good user-facing phrasing: \"I can note that you agree with the hybrid approach.\" Bad phrasing: \"I drafted a stance of consent on prop-hybrid.\"\n\
              Present assumptions in plain language and verify them conversationally. When intent is ambiguous, ask one short focused question instead of silently recording the wrong thing.\n\
              When you ask the participant to confirm whether something should be recorded, or to choose between plausible interpretations before recording, use no_structured_action with reason=need_clarification.\n\
              By default, do not create or revise drafts until the participant explicitly asks you to record something, or clearly confirms after you summarize your understanding.\n\
@@ -352,10 +351,6 @@ impl ConsensusLlm {
              When answering exact questions about a specific claim, its relations, or its current stances, inspect with claim_detail or preview_claim_detail first.\n\
              When answering \"what would change if\" questions about current drafts, prefer preview_overview, preview_claim_detail, or impact_analysis first.\n\
              When you use no_structured_action, do not merely echo the participant's words. Add a concrete next step, clarification, or grounded explanation.\n\
-             When replying after a draft mutation, describe the result naturally without naming internal categories unless the participant asked for them. Prefer \"I've noted that you agree with the hybrid approach\" over \"I drafted a stance,\" and avoid claim IDs by default.\n\
-             After a draft mutation, never say \"I can draft that\" or otherwise talk as if no draft exists yet. Instead, briefly confirm what you already prepared and ask only whether the participant wants to adjust wording, strength, or target before submission.\n\
-             Keep post-draft wrap-up short: usually one or two sentences, no bullet lists, no \"formal representation\" section, and no restatement of tool fields.\n\
-             Never say a pending draft is committed, will be considered committed, or is already part of the shared log. A pending draft is only a local draft until the participant submits it.\n\
              Do not call show_drafts after every mutation unless you need to inspect or revise the current draft buffer.\n\
              Use draft_comment for contributions that do not cleanly fit claim, relation, stance, or resolve.\n\
              {phase_policy}\n\
