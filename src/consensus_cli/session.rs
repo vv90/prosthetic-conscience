@@ -194,22 +194,6 @@ impl SessionClient {
     }
 }
 
-#[cfg(test)]
-impl SessionClient {
-    pub(crate) fn stub(session_id: &str) -> Self {
-        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::channel(1);
-        Self {
-            http: reqwest::Client::new(),
-            base_url: String::from("http://127.0.0.1:3000"),
-            auth_token: None,
-            session_id: session_id.to_owned(),
-            cmd_tx,
-            event_rx,
-        }
-    }
-}
-
 async fn run_session_task(
     initial_ws: WsStream,
     ws_url: String,

@@ -1,18 +1,20 @@
-use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use uuid::Uuid;
 
-use crate::consensus::engine::{ConsensusEngine, DraftId, EngineError};
+use crate::consensus::engine::EngineError;
+use crate::consensus::entry_buffer::{
+    ApplyResult, EntryBuffer, EntryBufferError, format_tool_trace,
+};
 use crate::consensus::format::{
     format_claim_detail, format_drafts, format_impact_analysis, format_overview,
 };
+use crate::consensus::llm_turn::LlmTurnTrace;
 use crate::consensus::render::OverviewData;
-use crate::consensus::types::{ClaimId, Entry};
+use crate::consensus::types::ClaimId;
 
-use super::llm::{ConsensusLlm, LlmError, LlmTurnTrace};
+use super::llm::{ConsensusLlm, LlmError};
 use super::session::{SessionClient, SessionError, SessionEvent};
 
 const ENTRY_PAGE_LIMIT: usize = 1000;
@@ -35,8 +37,8 @@ pub enum AppError {
     Llm(#[from] LlmError),
     #[error("engine error: {0}")]
     Engine(#[from] EngineError),
-    #[error("failed to serialize submission payload: {0}")]
-    Serialize(#[from] serde_json::Error),
+    #[error("entry buffer error: {0}")]
+    EntryBuffer(#[from] EntryBufferError),
     #[error("stdin read failed: {0}")]
     Stdin(#[from] io::Error),
 }
@@ -47,23 +49,13 @@ enum ConfirmationAction {
     ClearDrafts,
 }
 
-#[derive(Debug, Clone)]
-struct PendingSubmission {
-    draft_ids: Vec<DraftId>,
-    payloads: Vec<Value>,
-    next_entry: usize,
-}
-
 pub struct ConsensusApp {
     llm: ConsensusLlm,
     session: SessionClient,
-    engine: ConsensusEngine,
+    buffer: EntryBuffer,
     history: Vec<Value>,
-    next_index: usize,
-    buffered_entries: BTreeMap<usize, Value>,
     connected: bool,
     confirmation: Option<ConfirmationAction>,
-    pending_submission: Option<PendingSubmission>,
     debug_tool_trace: bool,
 }
 
@@ -80,13 +72,10 @@ impl ConsensusApp {
         let mut app = Self {
             llm,
             session,
-            engine: ConsensusEngine::new(config.participant),
+            buffer: EntryBuffer::new(config.participant),
             history: Vec::new(),
-            next_index: 0,
-            buffered_entries: BTreeMap::new(),
             connected: true,
             confirmation: None,
-            pending_submission: None,
             debug_tool_trace: config.debug_tool_trace,
         };
         app.catch_up().await?;
@@ -106,13 +95,10 @@ impl ConsensusApp {
         let mut app = Self {
             llm,
             session,
-            engine: ConsensusEngine::new(config.participant),
+            buffer: EntryBuffer::new(config.participant),
             history: Vec::new(),
-            next_index: 0,
-            buffered_entries: BTreeMap::new(),
             connected: true,
             confirmation: None,
-            pending_submission: None,
             debug_tool_trace: config.debug_tool_trace,
         };
         app.catch_up().await?;
@@ -124,12 +110,12 @@ impl ConsensusApp {
     }
 
     pub fn overview(&self) -> OverviewData {
-        self.engine.overview()
+        self.buffer.engine().overview()
     }
 
     pub async fn run(&mut self) -> Result<(), AppError> {
         println!("Session: {}", self.session.session_id());
-        println!("{}", format_overview(&self.engine.overview()));
+        println!("{}", format_overview(&self.buffer.engine().overview()));
 
         let stdin = tokio::io::stdin();
         let mut lines = BufReader::new(stdin).lines();
@@ -171,7 +157,7 @@ impl ConsensusApp {
             return Ok(true);
         }
 
-        if let Some(pending) = &self.pending_submission
+        if let Some(pending) = self.buffer.pending_submission()
             && !matches!(line, "/overview" | "/drafts" | "/help" | "/quit")
             && !line.starts_with("/claim ")
         {
@@ -196,7 +182,7 @@ impl ConsensusApp {
         if self.debug_tool_trace {
             match self
                 .llm
-                .run_turn_with_trace(&mut self.engine, &mut self.history)
+                .run_turn_with_trace(self.buffer.engine_mut(), &mut self.history)
                 .await
             {
                 Ok(trace) => {
@@ -218,7 +204,11 @@ impl ConsensusApp {
                 }
             }
         } else {
-            match self.llm.run_turn(&mut self.engine, &mut self.history).await {
+            match self
+                .llm
+                .run_turn(self.buffer.engine_mut(), &mut self.history)
+                .await
+            {
                 Ok(message) => {
                     if let Some(content) = &message.content
                         && !content.trim().is_empty()
@@ -244,12 +234,14 @@ impl ConsensusApp {
 
         match name {
             "overview" => {
-                println!("{}", format_overview(&self.engine.overview()));
+                println!("{}", format_overview(&self.buffer.engine().overview()));
             }
             "claim" => {
                 if arg.is_empty() {
                     println!("Usage: /claim <claim_id>");
-                } else if let Some(detail) = self.engine.claim_detail(&ClaimId(arg.to_owned())) {
+                } else if let Some(detail) =
+                    self.buffer.engine().claim_detail(&ClaimId(arg.to_owned()))
+                {
                     println!("{}", format_claim_detail(&detail));
                 } else {
                     println!("Claim not found: {arg}");
@@ -259,7 +251,7 @@ impl ConsensusApp {
                 self.print_draft_review();
             }
             "submit" => {
-                if self.engine.show_drafts().is_empty() {
+                if self.buffer.engine().show_drafts().is_empty() {
                     println!("No pending drafts to submit.");
                 } else if !self.connected {
                     println!("Session is disconnected. Wait for reconnect before submitting.");
@@ -270,10 +262,10 @@ impl ConsensusApp {
                 }
             }
             "clear" => {
-                if self.engine.show_drafts().is_empty() {
+                if self.buffer.engine().show_drafts().is_empty() {
                     println!("No pending drafts to clear.");
                 } else {
-                    println!("{}", format_drafts(self.engine.show_drafts()));
+                    println!("{}", format_drafts(self.buffer.engine().show_drafts()));
                     println!("Discard all pending drafts? [y/N]");
                     self.confirmation = Some(ConfirmationAction::ClearDrafts);
                 }
@@ -302,8 +294,8 @@ impl ConsensusApp {
         match action {
             ConfirmationAction::Submit => self.begin_submission().await?,
             ConfirmationAction::ClearDrafts => {
-                let count = self.engine.show_drafts().len();
-                self.engine.clear_drafts();
+                let count = self.buffer.engine().show_drafts().len();
+                self.buffer.engine_mut().clear_drafts();
                 println!("Cleared {count} drafts.");
             }
         }
@@ -312,40 +304,26 @@ impl ConsensusApp {
     }
 
     async fn begin_submission(&mut self) -> Result<(), AppError> {
-        let bundle = self
-            .engine
-            .submission_bundle(|| ClaimId(Uuid::new_v4().to_string()));
-
-        if bundle.entries.is_empty() {
+        let Some(pending) = self.buffer.begin_submission()? else {
             println!("No pending drafts to submit.");
             return Ok(());
-        }
+        };
 
-        let payloads: Vec<Value> = bundle
-            .entries
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<_, _>>()?;
-
-        println!("Submitting {} entries...", payloads.len());
-        self.pending_submission = Some(PendingSubmission {
-            draft_ids: bundle.draft_ids,
-            payloads,
-            next_entry: 0,
-        });
-
+        println!("Submitting {} entries...", pending.payloads.len());
         self.resume_pending_submission().await?;
         Ok(())
     }
 
     async fn resume_pending_submission(&mut self) -> Result<(), AppError> {
         loop {
-            let Some(pending) = &self.pending_submission else {
+            let Some(pending) = self.buffer.pending_submission() else {
                 return Ok(());
             };
 
             if pending.next_entry >= pending.payloads.len() {
-                self.finish_submission()?;
+                if self.buffer.finish_submission()? {
+                    println!("Submission complete.");
+                }
                 return Ok(());
             }
 
@@ -356,7 +334,7 @@ impl ConsensusApp {
 
             let waiting_for = pending.next_entry;
             let payload = pending.payloads[waiting_for].clone();
-            match self.session.append_json(payload.clone()).await {
+            match self.session.append_json(payload).await {
                 Ok(()) => {}
                 Err(SessionError::Disconnected(reason)) => {
                     self.connected = false;
@@ -368,9 +346,9 @@ impl ConsensusApp {
 
             loop {
                 if self
-                    .pending_submission
-                    .as_ref()
-                    .map(|pending| pending.next_entry > waiting_for)
+                    .buffer
+                    .pending_submission()
+                    .map(|p| p.next_entry > waiting_for)
                     .unwrap_or(false)
                 {
                     break;
@@ -379,14 +357,11 @@ impl ConsensusApp {
                 let event = self.session.next_event().await?;
                 match event {
                     SessionEvent::Entry { index, payload } => {
-                        self.apply_or_buffer_entry(index, payload)?;
-                        println!("\n[sync] applied session entry #{index}");
-                        if self
-                            .pending_submission
-                            .as_ref()
-                            .is_some_and(|pending| pending.next_entry >= pending.payloads.len())
+                        self.apply_and_log_entry(index, payload)?;
+                        if self.buffer.is_submission_complete()
+                            && self.buffer.finish_submission()?
                         {
-                            self.finish_submission()?;
+                            println!("Submission complete.");
                         }
                     }
                     SessionEvent::Disconnected { reason } => {
@@ -414,26 +389,21 @@ impl ConsensusApp {
         loop {
             let page = self
                 .session
-                .fetch_entries(self.next_index, ENTRY_PAGE_LIMIT)
+                .fetch_entries(self.buffer.next_index(), ENTRY_PAGE_LIMIT)
                 .await?;
             if page.entries.is_empty() {
                 break;
             }
 
             for (offset, payload) in page.entries.into_iter().enumerate() {
-                self.apply_or_buffer_entry(page.start_index + offset, payload)?;
+                self.apply_entry(page.start_index + offset, payload)?;
             }
         }
 
         self.drain_queued_session_events()?;
-        self.drain_buffered_entries()?;
 
-        if self
-            .pending_submission
-            .as_ref()
-            .is_some_and(|pending| pending.next_entry >= pending.payloads.len())
-        {
-            self.finish_submission()?;
+        if self.buffer.is_submission_complete() && self.buffer.finish_submission()? {
+            println!("Submission complete.");
         }
 
         Ok(())
@@ -443,7 +413,7 @@ impl ConsensusApp {
         while let Some(event) = self.session.try_next_event() {
             match event {
                 SessionEvent::Entry { index, payload } => {
-                    self.apply_or_buffer_entry(index, payload)?;
+                    self.apply_entry(index, payload)?;
                 }
                 SessionEvent::Disconnected { reason } => {
                     self.connected = false;
@@ -463,14 +433,9 @@ impl ConsensusApp {
     async fn handle_session_event(&mut self, event: SessionEvent) -> Result<(), AppError> {
         match event {
             SessionEvent::Entry { index, payload } => {
-                self.apply_or_buffer_entry(index, payload)?;
-                println!("\n[sync] applied session entry #{index}");
-                if self
-                    .pending_submission
-                    .as_ref()
-                    .is_some_and(|pending| pending.next_entry >= pending.payloads.len())
-                {
-                    self.finish_submission()?;
+                self.apply_and_log_entry(index, payload)?;
+                if self.buffer.is_submission_complete() && self.buffer.finish_submission()? {
+                    println!("Submission complete.");
                 }
             }
             SessionEvent::Disconnected { reason } => {
@@ -491,75 +456,39 @@ impl ConsensusApp {
         Ok(())
     }
 
-    fn apply_or_buffer_entry(&mut self, index: usize, payload: Value) -> Result<(), AppError> {
-        if index < self.next_index {
-            return Ok(());
-        }
-
-        if index > self.next_index {
-            self.buffered_entries.insert(index, payload);
-            return Ok(());
-        }
-
-        self.apply_payload(payload)?;
-        self.next_index += 1;
-        self.drain_buffered_entries()?;
-        Ok(())
-    }
-
-    fn drain_buffered_entries(&mut self) -> Result<(), AppError> {
-        while let Some(payload) = self.buffered_entries.remove(&self.next_index) {
-            self.apply_payload(payload)?;
-            self.next_index += 1;
-        }
-        Ok(())
-    }
-
-    fn apply_payload(&mut self, payload: Value) -> Result<(), AppError> {
-        self.note_submission_payload(&payload);
-
-        match serde_json::from_value::<Entry>(payload.clone()) {
-            Ok(entry) => {
-                self.engine.append(entry);
+    /// Apply an entry and print a sync notification for each applied entry.
+    fn apply_and_log_entry(&mut self, index: usize, payload: Value) -> Result<(), AppError> {
+        let results = self.buffer.apply_or_buffer_entry(index, payload)?;
+        for (idx, result) in &results {
+            match result {
+                ApplyResult::Applied(_) => {
+                    println!("\n[sync] applied session entry #{idx}");
+                }
+                ApplyResult::Skipped { error } => {
+                    eprintln!("Skipping non-consensus session payload: {error}");
+                }
             }
-            Err(error) => {
+        }
+        Ok(())
+    }
+
+    /// Apply an entry silently (for catch-up).
+    fn apply_entry(&mut self, index: usize, payload: Value) -> Result<(), AppError> {
+        let results = self.buffer.apply_or_buffer_entry(index, payload)?;
+        for (_, result) in &results {
+            if let ApplyResult::Skipped { error } = result {
                 eprintln!("Skipping non-consensus session payload: {error}");
             }
         }
-
-        Ok(())
-    }
-
-    /// Advance the pending submission counter when we see our own entry echoed
-    /// back from the session log. Uses `Value` equality, which is safe here
-    /// because the gateway stores payloads as opaque JSON blobs without
-    /// transformation, and `serde_json::Value` compares structurally (key
-    /// order does not affect equality).
-    fn note_submission_payload(&mut self, payload: &Value) {
-        if let Some(pending) = &mut self.pending_submission
-            && let Some(expected) = pending.payloads.get(pending.next_entry)
-            && expected == payload
-        {
-            pending.next_entry += 1;
-        }
-    }
-
-    fn finish_submission(&mut self) -> Result<(), AppError> {
-        let Some(pending) = self.pending_submission.take() else {
-            return Ok(());
-        };
-
-        for draft_id in pending.draft_ids {
-            self.engine.remove_draft(draft_id)?;
-        }
-
-        println!("Submission complete.");
         Ok(())
     }
 
     fn print_draft_review(&self) {
-        println!("{}", format_drafts(self.engine.show_drafts()));
-        println!("{}", format_impact_analysis(&self.engine.impact_analysis()));
+        println!("{}", format_drafts(self.buffer.engine().show_drafts()));
+        println!(
+            "{}",
+            format_impact_analysis(&self.buffer.engine().impact_analysis())
+        );
     }
 
     fn print_tool_trace(&self, trace: &LlmTurnTrace) {
@@ -569,125 +498,22 @@ impl ConsensusApp {
     }
 }
 
-fn format_tool_trace(trace: &LlmTurnTrace) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    for round in &trace.rounds {
-        if round.tool_results.is_empty() {
-            lines.push(format!("[trace] round {} no tool calls", round.round));
-            continue;
-        }
-
-        for execution in &round.tool_results {
-            lines.push(format!(
-                "[trace] round {} tool {} {}",
-                round.round,
-                execution.function_name,
-                compact_debug_text(&execution.arguments_json, 160)
-            ));
-
-            if let Some(error) = &execution.dispatch_error {
-                lines.push(format!(
-                    "[trace] round {} error {}",
-                    round.round,
-                    compact_debug_text(error, 160)
-                ));
-            }
-        }
-    }
-
-    lines
-}
-
-fn compact_debug_text(text: &str, max_chars: usize) -> String {
-    let mut compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-
-    compact = compact.chars().take(max_chars).collect();
-    compact.push_str("...");
-    compact
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::session::SessionClient;
     use super::*;
 
     #[test]
-    fn note_submission_payload_advances_only_matching_entry() {
-        let mut app = ConsensusApp {
-            llm: ConsensusLlm::new(
-                String::from("http://127.0.0.1:3000"),
-                None,
-                String::from("default"),
-                String::from("assistant"),
-                100,
-            ),
-            session: SessionClient::stub("session"),
-            engine: ConsensusEngine::new(String::from("assistant")),
-            history: Vec::new(),
-            next_index: 0,
-            buffered_entries: BTreeMap::new(),
-            connected: true,
-            confirmation: None,
-            pending_submission: Some(PendingSubmission {
-                draft_ids: vec![DraftId(0)],
-                payloads: vec![json!({"type":"comment","author":"alice","body":"hello"})],
-                next_entry: 0,
-            }),
-            debug_tool_trace: false,
-        };
-
-        app.note_submission_payload(&json!({"type":"comment","author":"alice","body":"hello"}));
-        assert_eq!(app.pending_submission.as_ref().unwrap().next_entry, 1);
-    }
-
-    #[test]
-    fn apply_or_buffer_entry_holds_future_entries_until_gap_is_closed() {
-        let llm = ConsensusLlm::new(
-            String::from("http://127.0.0.1:3000"),
-            None,
-            String::from("default"),
-            String::from("assistant"),
-            100,
-        );
-        let session = SessionClient::stub("session");
-        let mut app = ConsensusApp {
-            llm,
-            session,
-            engine: ConsensusEngine::new(String::from("assistant")),
-            history: Vec::new(),
-            next_index: 0,
-            buffered_entries: BTreeMap::new(),
-            connected: true,
-            confirmation: None,
-            pending_submission: None,
-            debug_tool_trace: false,
-        };
-
-        app.apply_or_buffer_entry(1, json!({"type":"comment","author":"alice","body":"later"}))
-            .unwrap();
-        assert_eq!(app.next_index, 0);
-        assert!(app.buffered_entries.contains_key(&1));
-
-        app.apply_or_buffer_entry(0, json!({"type":"comment","author":"alice","body":"now"}))
-            .unwrap();
-        assert_eq!(app.next_index, 2);
-        assert!(app.buffered_entries.is_empty());
-    }
-
-    #[test]
     fn format_tool_trace_lists_each_tool_round() {
+        use crate::consensus::llm_turn::{LlmRoundTrace, ToolExecutionTrace};
+
         let trace = LlmTurnTrace {
-            rounds: vec![crate::consensus_cli::llm::LlmRoundTrace {
+            rounds: vec![LlmRoundTrace {
                 round: 0,
                 request_history_messages: 0,
                 request_messages: 1,
                 response_chunks: 2,
                 assistant_message: None,
-                tool_results: vec![crate::consensus_cli::llm::ToolExecutionTrace {
+                tool_results: vec![ToolExecutionTrace {
                     call_id: String::from("call_1"),
                     function_name: String::from("draft_stance"),
                     arguments_json: String::from(

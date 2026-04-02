@@ -1,10 +1,14 @@
 pub mod engine;
+pub mod entry_buffer;
 pub mod eval;
 pub mod fixtures;
 pub mod format;
+pub mod llm_turn;
 pub mod prompt;
 pub mod reducer;
 pub mod render;
+pub mod response;
+pub mod seed;
 pub mod solver;
 pub mod status;
 pub mod tools;

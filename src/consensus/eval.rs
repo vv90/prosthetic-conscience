@@ -12,9 +12,10 @@ use crate::chat_gateway::response_assembler::{
 };
 use crate::consensus::engine::{ClaimRef, ConsensusEngine, DraftContent, DraftEntry};
 use crate::consensus::fixtures::{FixtureScenario, scenario_log};
+use crate::consensus::llm_turn::{LlmTurnTrace, ToolExecutionTrace};
 use crate::consensus::render::OverviewData;
 use crate::consensus::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
-use crate::consensus_cli::llm::{ConsensusLlm, LlmTurnTrace};
+use crate::consensus_cli::llm::ConsensusLlm;
 
 fn default_history_turns() -> Vec<usize> {
     vec![0, 4, 12]
@@ -520,10 +521,7 @@ fn matches_expected_tool_name(expected: &ExpectedToolUse, actual_name: &str) -> 
     }
 }
 
-fn matches_expected_tool_call(
-    expected: &ExpectedToolUse,
-    execution: &crate::consensus_cli::llm::ToolExecutionTrace,
-) -> bool {
+fn matches_expected_tool_call(expected: &ExpectedToolUse, execution: &ToolExecutionTrace) -> bool {
     if !matches_expected_tool_name(expected, &execution.function_name) {
         return false;
     }
@@ -846,8 +844,8 @@ fn outcome_name(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::llm_turn::ToolExecutionTrace;
     use crate::consensus::types::ClaimId;
-    use crate::consensus_cli::llm::ToolExecutionTrace;
 
     #[test]
     fn draft_stance_matches_argument_and_draft() {
@@ -895,7 +893,7 @@ mod tests {
             }],
         };
         let trace = LlmTurnTrace {
-            rounds: vec![crate::consensus_cli::llm::LlmRoundTrace {
+            rounds: vec![crate::consensus::llm_turn::LlmRoundTrace {
                 round: 0,
                 request_history_messages: 1,
                 request_messages: 2,
