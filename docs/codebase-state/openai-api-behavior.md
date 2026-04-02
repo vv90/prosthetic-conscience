@@ -63,14 +63,14 @@ Snapshot date: 2026-03-19
 
 ## Relevant files
 
-- `src/router/chat_completions.rs`
-- `src/router/audio_transcriptions.rs`
-- `src/router/ui.rs`
-- `src/router/mod.rs`
+- `crates/prosthetic-conscience/src/router/chat_completions.rs`
+- `crates/prosthetic-conscience/src/router/audio_transcriptions.rs`
+- `crates/prosthetic-conscience/src/router/ui.rs`
+- `crates/prosthetic-conscience/src/router/mod.rs`
 - `static/transcribe.html`
-- `src/router/state.rs`
-- `src/gateway/runtime.rs` (`HttpChatRequested` command, `register_stream`)
-- `src/gateway/relay.rs` (`StreamFrame`)
+- `crates/prosthetic-conscience/src/router/state.rs`
+- `crates/prosthetic-conscience/src/gateway/runtime.rs` (`HttpChatRequested` command, `register_stream`)
+- `crates/prosthetic-conscience/src/gateway/relay.rs` (`StreamFrame`)
 
 ## TODO (near-term)
 

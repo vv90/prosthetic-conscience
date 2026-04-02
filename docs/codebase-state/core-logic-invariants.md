@@ -47,9 +47,9 @@ This is a non-negotiable design constraint. All future kernel logic must follow 
 
 The core logic comprises three layers:
 
-1. **Kernel** (`src/gateway/kernel.rs`) -- pure reducer: `reduce(state, event) -> {state, effects}`. All dispatch, lifecycle, and error-classification decisions live here. No I/O, no channels, no async. Generic over ID types.
-2. **Runtime** (`src/gateway/runtime.rs`) -- single-threaded message loop that owns kernel state and channel registry. Translates between kernel abstractions (opaque IDs, abstract effects) and concrete handles (oneshot senders, mpsc senders). Serializes all state mutations through one `mpsc::Receiver`.
-3. **Channel registry** (`src/gateway/channel_registry.rs`) -- mapping between opaque IDs and communication handles. Controls ID generation (UUIDs). ID constructors are module-private -- external code cannot forge IDs.
+1. **Kernel** (`crates/prosthetic-conscience/src/gateway/kernel.rs`) -- pure reducer: `reduce(state, event) -> {state, effects}`. All dispatch, lifecycle, and error-classification decisions live here. No I/O, no channels, no async. Generic over ID types.
+2. **Runtime** (`crates/prosthetic-conscience/src/gateway/runtime.rs`) -- single-threaded message loop that owns kernel state and channel registry. Translates between kernel abstractions (opaque IDs, abstract effects) and concrete handles (oneshot senders, mpsc senders). Serializes all state mutations through one `mpsc::Receiver`.
+3. **Channel registry** (`crates/prosthetic-conscience/src/gateway/channel_registry.rs`) -- mapping between opaque IDs and communication handles. Controls ID generation (UUIDs). ID constructors are module-private -- external code cannot forge IDs.
 
 Everything outside these three modules is **adapter code**.
 
@@ -197,9 +197,9 @@ None.
 
 ## Relevant files
 
-- `src/gateway/kernel.rs`
-- `src/gateway/session/kernel.rs`
-- `src/gateway/runtime.rs`
-- `src/gateway/channel_registry.rs`
-- `src/gateway/effects/` (effect struct definitions)
-- `src/gateway/relay.rs` (defines `RelayOutcome` and `StreamFrame`)
+- `crates/prosthetic-conscience/src/gateway/kernel.rs`
+- `crates/prosthetic-conscience/src/gateway/session/kernel.rs`
+- `crates/prosthetic-conscience/src/gateway/runtime.rs`
+- `crates/prosthetic-conscience/src/gateway/channel_registry.rs`
+- `crates/prosthetic-conscience/src/gateway/effects/` (effect struct definitions)
+- `crates/prosthetic-conscience/src/gateway/relay.rs` (defines `RelayOutcome` and `StreamFrame`)

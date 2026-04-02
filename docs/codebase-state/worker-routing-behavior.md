@@ -38,14 +38,14 @@ Snapshot date: 2026-03-18
 
 ## Relevant files
 
-- `src/router/mod.rs`
-- `src/router/state.rs`
-- `src/router/worker_ws_upgrade.rs`
-- `src/gateway/runtime.rs`
-- `src/gateway/channel_registry.rs`
-- `src/gateway/kernel.rs`
-- `src/gateway/relay.rs`
-- `src/gateway/effects/dispatch_job.rs`
+- `crates/prosthetic-conscience/src/router/mod.rs`
+- `crates/prosthetic-conscience/src/router/state.rs`
+- `crates/prosthetic-conscience/src/router/worker_ws_upgrade.rs`
+- `crates/prosthetic-conscience/src/gateway/runtime.rs`
+- `crates/prosthetic-conscience/src/gateway/channel_registry.rs`
+- `crates/prosthetic-conscience/src/gateway/kernel.rs`
+- `crates/prosthetic-conscience/src/gateway/relay.rs`
+- `crates/prosthetic-conscience/src/gateway/effects/dispatch_job.rs`
 
 ## TODO (near-term)
 

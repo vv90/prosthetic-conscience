@@ -4,7 +4,7 @@ Snapshot date: 2026-03-22
 
 ## Behavior
 
-- A pure reducer `reduce(state, event) -> {state, effects}` is implemented under `src/gateway/kernel.rs`.
+- A pure reducer `reduce(state, event) -> {state, effects}` is implemented under `crates/prosthetic-conscience/src/gateway/kernel.rs`.
 - Generic over worker, stream, and subscriber ID types (`GatewayState<WId, SId, SubId>`, `Event<WId, SId, SubId>`, `Effect<WId, SId, SubId>`).
 - `SId` identifies chat stream lifecycles (HTTP/SSE request-response). `SubId` identifies session subscriber connections (long-lived push subscriptions). These are distinct identity spaces — the compiler prevents accidental mixing.
 - The `reduce` function requires `WId: Clone + Ord + Display`, `SId: Clone + Eq + Hash + Display`, and `SubId: Clone + Eq + Hash + Display`.
@@ -307,10 +307,10 @@ None.
 
 ## Relevant files
 
-- `src/gateway/kernel.rs`
-- `src/gateway/runtime.rs`
-- `src/gateway/session/kernel.rs`
-- `src/gateway/effects/` (`dispatch_job.rs`, `send_client_error.rs`, `send_client_done.rs`, `protocol_violation.rs`)
+- `crates/prosthetic-conscience/src/gateway/kernel.rs`
+- `crates/prosthetic-conscience/src/gateway/runtime.rs`
+- `crates/prosthetic-conscience/src/gateway/session/kernel.rs`
+- `crates/prosthetic-conscience/src/gateway/effects/` (`dispatch_job.rs`, `send_client_error.rs`, `send_client_done.rs`, `protocol_violation.rs`)
 
 ## TODO (near-term)
 

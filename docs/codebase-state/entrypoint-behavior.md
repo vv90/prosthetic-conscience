@@ -1,6 +1,6 @@
 # Entrypoint Behavior
 
-Snapshot date: 2026-03-29
+Snapshot date: 2026-04-02
 
 ## Binaries
 
@@ -39,8 +39,8 @@ Snapshot date: 2026-03-29
 - CLI args: `--gateway-url`, `--auth-token`, `--model`, `--participant`, `--max-history`, `--debug-tool-trace`.
 - Subcommands: `create` (new session), `join <session-id>` (existing session).
 - Connects to gateway session via WS, syncs shared log, runs LLM-assisted drafting loop.
-- LLM turn loop sends `tool_choice: "required"` — model must always select a tool.
-- `no_structured_action` fallback tool for conversational responses (deliberately unappealing: listed last, required reason enum).
+- LLM turn loop sends `tool_choice: "auto"` — the model can either call tools or reply directly in plain text.
+- The LLM-visible tool set excludes `submit_drafts`, `clear_drafts`, and `no_structured_action`.
 - REPL commands: `/overview`, `/claim <id>`, `/drafts`, `/submit`, `/clear`, `/help`, `/quit`.
 - `--debug-tool-trace` prints per-round tool execution traces for each LLM turn.
 
@@ -74,26 +74,27 @@ Snapshot date: 2026-03-29
 
 ## Relevant files
 
-- `src/main.rs` (gateway)
-- `src/worker_agent.rs` (worker)
-- `src/client_agent.rs` (client)
-- `src/bin/pc-consensus.rs` (consensus terminal client)
-- `src/bin/pc-consensus-sim.rs` (consensus sim)
-- `src/bin/pc-consensus-seed.rs` (consensus seed)
-- `src/bin/pc-consensus-eval.rs` (consensus eval)
-- `src/consensus_cli/app.rs` (consensus app logic)
-- `src/consensus_cli/llm.rs` (consensus LLM turn loop)
-- `src/consensus/tools.rs` (tool definitions and dispatch)
-- `src/consensus/eval.rs` (eval suite runner and scoring)
-- `src/router/mod.rs`
-- `src/router/ui.rs`
-- `src/router/state.rs`
+- `crates/prosthetic-conscience/src/bin/prosthetic-conscience.rs` (gateway)
+- `crates/prosthetic-conscience/src/bin/pc-worker.rs` (worker)
+- `crates/prosthetic-conscience/src/bin/pc-client.rs` (client)
+- `crates/prosthetic-conscience/src/bin/pc-consensus.rs` (consensus terminal client)
+- `crates/prosthetic-conscience/src/bin/pc-consensus-sim.rs` (consensus sim)
+- `crates/prosthetic-conscience/src/bin/pc-consensus-seed.rs` (consensus seed)
+- `crates/prosthetic-conscience/src/bin/pc-consensus-eval.rs` (consensus eval)
+- `crates/prosthetic-conscience/src/consensus_cli/app.rs` (consensus app logic)
+- `crates/prosthetic-conscience/src/consensus_cli/llm.rs` (consensus I/O wrapper)
+- `crates/consensus/src/llm_turn.rs` (pure LLM turn loop)
+- `crates/consensus/src/tools.rs` (tool definitions and dispatch)
+- `crates/prosthetic-conscience/src/consensus_support/eval.rs` (eval suite runner and scoring)
+- `crates/prosthetic-conscience/src/router/mod.rs`
+- `crates/prosthetic-conscience/src/router/ui.rs`
+- `crates/prosthetic-conscience/src/router/state.rs`
 - `static/transcribe.html`
-- `src/client/gateway_client.rs`
-- `src/client/response_assembler.rs`
-- `src/client/tool_loop.rs`
-- `src/client/tools/mod.rs`
-- `src/client/tools/current_time.rs`
-- `src/client/tools/shell.rs`
+- `crates/prosthetic-conscience/src/client/gateway_client.rs`
+- `crates/prosthetic-conscience/src/client/response_assembler.rs`
+- `crates/prosthetic-conscience/src/client/tool_loop.rs`
+- `crates/prosthetic-conscience/src/client/tools/mod.rs`
+- `crates/prosthetic-conscience/src/client/tools/current_time.rs`
+- `crates/prosthetic-conscience/src/client/tools/shell.rs`
 - `fixtures/tool-call-eval/` (eval benchmark suites)
 - `docs/tool-calling-eval-methodology.md`

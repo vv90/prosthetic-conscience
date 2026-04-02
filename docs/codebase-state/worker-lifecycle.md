@@ -169,8 +169,8 @@ None.
 
 ## Relevant files
 
-- `src/router/worker_ws_upgrade.rs` (handler)
-- `src/gateway/runtime.rs` (registration, job completion)
-- `src/gateway/channel_registry.rs` (handle storage)
-- `src/gateway/kernel.rs` (state transitions)
-- `src/gateway/relay.rs` (relay contract)
+- `crates/prosthetic-conscience/src/router/worker_ws_upgrade.rs` (handler)
+- `crates/prosthetic-conscience/src/gateway/runtime.rs` (registration, job completion)
+- `crates/prosthetic-conscience/src/gateway/channel_registry.rs` (handle storage)
+- `crates/prosthetic-conscience/src/gateway/kernel.rs` (state transitions)
+- `crates/prosthetic-conscience/src/gateway/relay.rs` (relay contract)

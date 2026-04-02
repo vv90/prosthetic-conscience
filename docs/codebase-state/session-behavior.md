@@ -8,12 +8,12 @@ Load into session context when working on: session kernel logic, session HTTP/WS
 
 ## Relevant files
 
-- `src/gateway/session/kernel.rs` — `State<SubId>`, `Event<SubId>`, `Effect<SubId>`, `reduce()`
-- `src/gateway/session/mod.rs` — module declaration
-- `src/gateway/kernel.rs` — `SessionId`, `sessions: HashMap<SessionId, session::State<SubId>>` on `GatewayState`, `Event::SessionRequested { subscriber_id: SubId }`, `Effect::SessionCreated`, `Event::SessionEvent`, `generate_session_id()`
-- `src/router/session_ws.rs` — WS upgrade handler and connection handler for `/v1/sessions`
-- `src/protocol.rs` — `SessionClientMessage`, `SessionGatewayMessage` wire types
-- `src/gateway/channel_registry.rs` — `SubscriberHandle` type alias
+- `crates/prosthetic-conscience/src/gateway/session/kernel.rs` — `State<SubId>`, `Event<SubId>`, `Effect<SubId>`, `reduce()`
+- `crates/prosthetic-conscience/src/gateway/session/mod.rs` — module declaration
+- `crates/prosthetic-conscience/src/gateway/kernel.rs` — `SessionId`, `sessions: HashMap<SessionId, session::State<SubId>>` on `GatewayState`, `Event::SessionRequested { subscriber_id: SubId }`, `Effect::SessionCreated`, `Event::SessionEvent`, `generate_session_id()`
+- `crates/prosthetic-conscience/src/router/session_ws.rs` — WS upgrade handler and connection handler for `/v1/sessions`
+- `crates/prosthetic-conscience/src/protocol.rs` — `SessionClientMessage`, `SessionGatewayMessage` wire types
+- `crates/prosthetic-conscience/src/gateway/channel_registry.rs` — `SubscriberHandle` type alias
 - `docs/codebase-state/todo-near-term.md` — session feature intent and implementation process
 
 ## Architecture
@@ -157,7 +157,7 @@ A similar (less severe) issue exists for chat streams: if `register_stream` succ
 
 ## Client-side session consumer
 
-`src/consensus_cli/session.rs` implements a WS session client (`SessionClient`) used by the `pc-consensus` binary. It connects to `/v1/sessions`, performs the Create/Subscribe handshake, and exposes an async `SessionEvent` stream (Entry, Disconnected, Reconnected, Warning). Uses `tokio_tungstenite` for WS transport.
+`crates/prosthetic-conscience/src/consensus_cli/session.rs` implements a WS session client (`SessionClient`) used by the `pc-consensus` binary. It connects to `/v1/sessions`, performs the Create/Subscribe handshake, and exposes an async `SessionEvent` stream (Entry, Disconnected, Reconnected, Warning). Uses `tokio_tungstenite` for WS transport.
 
 Key behaviors:
 

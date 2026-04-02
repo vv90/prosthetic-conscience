@@ -332,41 +332,80 @@ The default suite lives at `fixtures/tool-call-eval/authentication-tool-reliabil
 ## Project structure
 
 ```
-src/
-  main.rs              Gateway binary
-  worker_agent.rs      Worker binary
-  client_agent.rs      Client binary (interactive REPL)
-  lib.rs
-  protocol.rs          Shared wire types (WorkerMessage, GatewayToWorker, ChatRequest)
-  gateway/
-    kernel.rs          Pure state machine: reduce(state, event) -> (state, effects)
-    runtime.rs         Async message loop, effect execution, tick driver
-    relay.rs           Job relay: worker WS <-> client SSE channel
-    channel_registry.rs  Worker/stream handle storage
-  router/
-    mod.rs             Axum router setup
-    chat_completions.rs  POST /v1/chat/completions handler
-    audio_transcriptions.rs  POST /v1/audio/transcriptions handler
-    worker_ws_upgrade.rs  WS /ws/worker upgrade handler
-    ui.rs              Serves embedded transcription test UI
-  worker/
-    client.rs          Gateway WS client with reconnection
-    inference.rs       HTTP SSE proxy to inference server
-  client/
-    gateway_client.rs  HTTP + SSE client for gateway communication
-    response_assembler.rs  Assembles streamed delta chunks into complete messages
-    tool_loop.rs       Request-execute-request cycle for tool calling
-    tools/
-      mod.rs           Tool trait, ToolRegistry, ToolError
-      current_time.rs  Trivial tool (UTC timestamp) for testing the loop
-      shell.rs         Docker container shell execution tool
+Cargo.toml             Workspace manifest
+crates/
+  consensus/
+    Cargo.toml         Standalone consensus core (`rlib` + raw wasm `cdylib`)
+    src/
+      lib.rs           Module exports for the pure consensus runtime
+      engine.rs        Stateful consensus engine and draft handling
+      entry_buffer.rs  Session entry buffering and submission tracking
+      format.rs        Text rendering for terminal/LLM output
+      llm_turn.rs      Pure request/response/tool-loop logic
+      reducer.rs       Log replay into materialized state
+      render.rs        Structured overview/claim/attention views
+      response.rs      SSE chunk assembly and message helpers
+      solver.rs        Grounded semantics fixpoint solver
+      status.rs        Epistemic status derivation
+      tools.rs         Tool schema and dispatch
+      types.rs         Core entry and graph types
+  prosthetic-conscience/
+    Cargo.toml         Main app package (gateway, workers, clients, tests)
+    src/
+      lib.rs
+      protocol.rs      Shared wire types (WorkerMessage, GatewayToWorker, ChatRequest)
+      bin/
+        prosthetic-conscience.rs  Gateway binary
+        pc-worker.rs    Worker binary
+        pc-client.rs    Client binary (interactive REPL)
+        pc-consensus.rs Consensus terminal client
+        pc-consensus-sim.rs   Deterministic consensus log generator
+        pc-consensus-seed.rs  Session seeder for fixture logs
+        pc-consensus-eval.rs  Tool-calling reliability runner
+      gateway/
+        kernel.rs       Pure state machine: reduce(state, event) -> (state, effects)
+        runtime.rs      Async message loop, effect execution, tick driver
+        relay.rs        Job relay: worker WS <-> client SSE channel
+        channel_registry.rs  Worker/stream/subscriber handle storage
+      router/
+        mod.rs          Axum router setup
+        chat_completions.rs  POST /v1/chat/completions handler
+        audio_transcriptions.rs  POST /v1/audio/transcriptions handler
+        session_ws.rs   WS /v1/sessions handler
+        worker_ws_upgrade.rs  WS /ws/worker upgrade handler
+        ui.rs           Serves embedded transcription test UI
+      worker/
+        client.rs       Gateway WS client with reconnection
+        inference.rs    HTTP SSE proxy to inference server
+        whisper.rs      HTTP multipart proxy to whisper-compatible backend
+      client/
+        gateway_client.rs  HTTP + SSE client for gateway communication
+        response_assembler.rs  Assembles streamed delta chunks into complete messages
+        tool_loop.rs    Request-execute-request cycle for tool calling
+        tools/
+          mod.rs        Tool trait, ToolRegistry, ToolError
+          current_time.rs  Trivial tool (UTC timestamp) for testing the loop
+          shell.rs      Docker container shell execution tool
+      chat_gateway/
+        gateway_client.rs  Shared gateway SSE client used by app-side CLIs
+      consensus_cli/
+        app.rs          Consensus terminal app orchestration
+        llm.rs          I/O wrapper around `consensus::llm_turn`
+        session.rs      Session WS client
+      consensus_support/
+        eval.rs         Eval harness and scoring
+        fixtures.rs     Deterministic consensus scenarios
+        seed.rs         Fixture seeding helpers
+    tests/
+      integration.rs    End-to-end integration tests
+      support/          Test harness (TestGateway, MockWorker, SseClient)
 static/
   transcribe.html      Self-contained transcription test UI (embedded at compile time)
-tests/
-  integration.rs       End-to-end tests
-  support/             Test harness (TestGateway, MockWorker, SseClient)
+fixtures/
+  tool-call-eval/      Checked-in consensus tool-call eval suites
+trial-logs/            Local output for experiments and eval runs
 docs/
-  gateway-specification.md
-  implementation-plan.md
+  consensus-llm-behavior.md
+  tool-calling-eval-methodology.md
   codebase-state/      Living documentation of current behavior
 ```

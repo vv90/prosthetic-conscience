@@ -11,13 +11,14 @@ Those are different problems, so the eval runner measures them separately.
 
 Relevant code paths:
 
-- `src/consensus_cli/llm.rs`: production `pc-consensus` turn loop, now with traced round-by-round execution
-- `src/consensus/tools.rs`: authoritative tool schema and dispatch behavior
-- `src/consensus/engine.rs`: draft-local `DraftContent`, `ClaimRef`, preview materialization, and submission rewriting
-- `src/consensus/fixtures.rs`: deterministic session-log fixture used to define checkpoint states
+- `crates/prosthetic-conscience/src/consensus_cli/llm.rs`: production `pc-consensus` wrapper around the pure turn loop
+- `crates/consensus/src/llm_turn.rs`: request construction, response processing, trace capture, and deterministic post-mutation follow-up
+- `crates/consensus/src/tools.rs`: authoritative tool schema and dispatch behavior
+- `crates/consensus/src/engine.rs`: draft-local `DraftContent`, `ClaimRef`, preview materialization, and submission rewriting
+- `crates/prosthetic-conscience/src/consensus_support/fixtures.rs`: deterministic session-log fixtures used to define checkpoint states
 - `fixtures/tool-call-eval/authentication-tool-reliability.json`: checked-in benchmark suite
-- `src/consensus/eval.rs`: suite loader, synthetic context seeding, scoring, and aggregation
-- `src/bin/pc-consensus-eval.rs`: CLI entrypoint
+- `crates/prosthetic-conscience/src/consensus_support/eval.rs`: suite loader, synthetic context seeding, scoring, and aggregation
+- `crates/prosthetic-conscience/src/bin/pc-consensus-eval.rs`: CLI entrypoint
 
 ## Core design
 
@@ -51,11 +52,13 @@ Important draft-model details:
 Each run records these booleans:
 
 - `tool_call_made`: any actual tool call appeared
-- `structured_tool_call_made`: any tool other than `no_structured_action` appeared
+- `structured_tool_call_made`: any actual tool call appeared
 - `expected_tool_match`: an allowed tool family was called
 - `expected_argument_match`: the expected tool was called with matching arguments
 - `expected_outcome_match`: the final draft buffer matches the expected structured result
 - `turn_success`: no transport/assembly/runtime error and `expected_outcome_match=true`
+
+Because plain-text replies now use the normal assistant-message path instead of a fallback tool, `structured_tool_call_made` is currently equivalent to "at least one tool call happened at all."
 
 This lets us answer questions like:
 
@@ -72,7 +75,7 @@ The current suite is intentionally biased toward deterministic cases:
 - direct stance drafting
 - direct relation drafting
 - direct resolve drafting
-- process questions that should use `no_structured_action`
+- process questions that should stay plain-text without any tool call
 
 That keeps the primary score stable and cheap.
 
@@ -97,7 +100,7 @@ This avoids paying a judge-model tax on cases we can already score exactly.
   - naturalistic "thinking out loud" prompts are better evaluated in multi-turn suites
 - Keep suite expectations aligned with the live tool schema:
   - draft tools no longer take `author`
-  - draft/local references should be expressed as `claim:<id>` / `draft:<id>` strings rather than old flat `source_id` / `target_id` / `claim_id` fields
+  - draft/local references should be expressed as `claim:<id>` / `draft:<id>` strings or the equivalent `{"claim_id": ...}` / `{"draft_id": ...}` object forms
 - Add new suites in JSON rather than hardcoding new checkpoints in Rust.
 - When a live backend returns malformed SSE payloads, keep those runs in the report instead of dropping them; they matter operationally even if the tool logic never started.
 

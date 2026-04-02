@@ -22,13 +22,17 @@ rather than exposing protocol jargon directly.
 
 ## Current Configuration
 
-The current harness in [`src/consensus_cli/llm.rs`](/Users/vladimir/devshells/prosthetic-conscience/src/consensus_cli/llm.rs) is configured around that goal.
+The live harness is split across:
+
+- [`llm.rs`](/Users/vladimir/devshells/prosthetic-conscience/crates/prosthetic-conscience/src/consensus_cli/llm.rs), which owns gateway I/O for `pc-consensus`
+- [`llm_turn.rs`](/Users/vladimir/devshells/prosthetic-conscience/crates/consensus/src/llm_turn.rs), which owns the pure request construction, response processing, history management, and deterministic follow-up logic
 
 ### Tool Loop
 
-- `tool_choice` remains `"required"` for backend compatibility with the current `llama-server` + Functionary setup.
-- The model must therefore always choose a tool.
-- `no_structured_action` is the natural-language conversation path, not an error path.
+- `tool_choice` is now `"auto"`.
+- The model can answer directly in plain text when no inspection or draft mutation is needed.
+- The LLM-visible tool set excludes `submit_drafts`, `clear_drafts`, and `no_structured_action`.
+- Plain-text replies therefore travel through the normal assistant-message path instead of through a fallback tool.
 
 ### Hidden Semantics, Natural Replies
 
@@ -36,30 +40,11 @@ The current harness in [`src/consensus_cli/llm.rs`](/Users/vladimir/devshells/pr
 - Tool descriptions reinforce that replies should stay in natural language.
 - Draft `author` is deterministic engine state from `--participant`, not an LLM-supplied field.
 
-### Clarify-First Turn Policy
+### Clarify-First Drafting Policy
 
-The harness now uses a small state-based policy rather than lexical routing:
-
-- `ClarifyOrInspect`
-  - enabled on fresh turns with no pending clarification and no pending draft buffer
-  - exposes read tools plus `no_structured_action`
-  - blocks draft mutation tools
-- `MutationAllowed`
-  - enabled when the user is responding to a previous clarification, or when a pending draft buffer already exists
-  - exposes the full LLM-safe tool set
-
-This policy is driven by conversation state and draft state, not by hard-coded word matching.
-
-### Clarification Handoff
-
-- When the model asks whether something should be recorded, it is supposed to use `no_structured_action` with `reason=need_clarification`.
-- The harness records an internal clarification marker in history.
-- On the next user reply, that marker unlocks mutation tools for one follow-up turn.
-
-This creates a simple two-step conversational pattern:
-
-1. natural clarification
-2. confirmed structured action
+- The current implementation exposes the same LLM-safe tool set on every request.
+- Clarify-first behavior is therefore prompt-driven rather than enforced by turn-specific tool gating.
+- The prompt explicitly tells the model to ask one short focused question when intent is ambiguous and to avoid drafting until the participant clearly asks or confirms that something should be recorded.
 
 ### Deterministic Post-Mutation Follow-Up
 
@@ -85,7 +70,7 @@ LLM-visible claim references are flat strings:
 - committed claim: `claim:<id>`
 - local draft claim: `draft:<id>`
 
-Parsing is consolidated in `ClaimRef::from_json_value` (`src/consensus/engine.rs`). Both tool dispatch (`tools.rs`) and the deterministic mutation confirmation renderer (`llm.rs`) delegate to it. It also accepts the `#<n>` legacy format and `{"claim_id":…}` / `{"draft_id":…}` object forms for backwards compatibility with older tool-call patterns.
+Parsing is consolidated in `ClaimRef::from_json_value` in [`engine.rs`](/Users/vladimir/devshells/prosthetic-conscience/crates/consensus/src/engine.rs). Both tool dispatch in [`tools.rs`](/Users/vladimir/devshells/prosthetic-conscience/crates/consensus/src/tools.rs) and the deterministic mutation confirmation renderer in [`llm_turn.rs`](/Users/vladimir/devshells/prosthetic-conscience/crates/consensus/src/llm_turn.rs) delegate to it. It also accepts the `#<n>` legacy format and `{"claim_id":…}` / `{"draft_id":…}` object forms for backwards compatibility with older tool-call patterns.
 
 ## Observed Model Behavior
 
@@ -93,7 +78,7 @@ These observations come from repeated live REPL runs against session `1b81098818
 
 ### What Improved
 
-- Summary requests reliably stayed conversational via `no_structured_action`.
+- Summary requests reliably stayed conversational without needing tool calls.
 - Exact factual questions often triggered inspection first through `claim_detail` or `preview_claim_detail`.
 - Soft preference statements no longer consistently turned into immediate drafts.
 - Relation-like remarks improved from being misread as stances to either:
@@ -105,18 +90,18 @@ These observations come from repeated live REPL runs against session `1b81098818
 ### What Was Previously Fixed by Harness Changes
 
 - Backend/template incompatibility caused by nested claim-ref schemas was fixed by flattening LLM-visible references to `claim:<id>` / `draft:<id>`.
-- Multi-turn contamination from prose-only turns was reduced by replacing `no_structured_action` tool-call stubs in history with the plain assistant reply the user actually saw.
+- Plain-text turns now stay plain assistant messages in history rather than being modeled as fallback tool calls.
 - Runaway "draft something, then show drafts, then mutate more, then narrate badly" loops were reduced by ending mutation turns with deterministic follow-up text.
-- Clarification marker loss under history truncation was fixed by teaching `truncate_history` to skip user messages that immediately follow a clarification marker, so the marker-confirmation pair is never split.
+- History truncation is safer because `truncate_history()` preserves tool-call/result pairs and only cuts at conversational boundaries.
 
 ### Remaining Weaknesses
 
 The remaining issues now look mostly model-limited rather than basic harness bugs:
 
 - Clarification questions can still be generic or overly explanatory.
-- The model does not always use `reason=need_clarification` unless prompted carefully.
 - On ambiguous fresh turns it may still ask a broad follow-up instead of the sharpest possible disambiguating question.
 - Grounding from paraphrased concerns to the exact best graph target is improved but still not consistently excellent.
+- Duplicate draft suppression is still incomplete.
 - The model is safer now, but not always concise.
 
 In other words:
@@ -205,6 +190,6 @@ It now gives the model a much better behavioral frame:
 - clarification-first interaction
 - deterministic authorship
 - deterministic post-mutation confirmation
-- state-based tool availability
+- a simpler plain-text-or-tool-call loop
 
 The main remaining limitation is the conversational and semantic quality of the current model.

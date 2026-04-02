@@ -1,16 +1,16 @@
 # Testing Coverage and Methodology
 
-Snapshot date: 2026-03-29
+Snapshot date: 2026-04-02
 
 ## Overview
 
-Testing is concentrated in the pure kernel layer, which has strong unit and property-based coverage. Integration testing has begun — the test harness is implemented and the happy path test passes. This document catalogs what is tested, what is not, and the planned approach for closing the remaining gaps.
+Testing is concentrated in the pure kernel layer, which has strong unit and property-based coverage. Integration coverage is now established across chat, transcription, sessions, and the consensus CLI flows. This document catalogs what is tested, what is not, and the planned approach for closing the remaining gaps.
 
 ## Current Coverage
 
 ### Kernel unit tests (44 tests)
 
-Location: `src/gateway/kernel.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/gateway/kernel.rs` (inline `#[cfg(test)]` module).
 
 All transition rules from `gateway-state-machine.md` are covered:
 
@@ -26,7 +26,7 @@ All transition rules from `gateway-state-machine.md` are covered:
 
 ### Kernel property tests (6 tests)
 
-Location: `src/gateway/kernel.rs` (inline, using `proptest`).
+Location: `crates/prosthetic-conscience/src/gateway/kernel.rs` (inline, using `proptest`).
 
 All use arbitrary sequences of up to 100 events drawn from a small ID pool (3 worker IDs, 3 stream IDs) to encourage collisions.
 
@@ -43,7 +43,7 @@ Regression file: `proptest-regressions/gateway/kernel.txt` captures the minimal 
 
 ### Channel registry tests (6 tests)
 
-Location: `src/gateway/channel_registry.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/gateway/channel_registry.rs` (inline `#[cfg(test)]` module).
 
 | Test                       | What is tested                     |
 | -------------------------- | ---------------------------------- |
@@ -55,7 +55,7 @@ Location: `src/gateway/channel_registry.rs` (inline `#[cfg(test)]` module).
 
 ### Response assembler tests (11 unit + 4 property = 15 tests)
 
-Location: `src/client/response_assembler.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/client/response_assembler.rs` (inline `#[cfg(test)]` module).
 
 | Area             | Count | What is tested                                                                                       |
 | ---------------- | ----- | ---------------------------------------------------------------------------------------------------- |
@@ -71,7 +71,7 @@ Location: `src/client/response_assembler.rs` (inline `#[cfg(test)]` module).
 
 ### Tool trait and registry tests (5 tests)
 
-Location: `src/client/tools/mod.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/client/tools/mod.rs` (inline `#[cfg(test)]` module).
 
 | Test                         | What is tested                                       |
 | ---------------------------- | ---------------------------------------------------- |
@@ -83,7 +83,7 @@ Location: `src/client/tools/mod.rs` (inline `#[cfg(test)]` module).
 
 ### GetCurrentTime tool tests (4 tests)
 
-Location: `src/client/tools/current_time.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/client/tools/current_time.rs` (inline `#[cfg(test)]` module).
 
 | Test                  | What is tested                               |
 | --------------------- | -------------------------------------------- |
@@ -92,9 +92,9 @@ Location: `src/client/tools/current_time.rs` (inline `#[cfg(test)]` module).
 | `days_to_date_epoch`  | Day 0 → 1970-01-01                           |
 | `days_to_date_known`  | Day 20528 → 2026-03-16                       |
 
-### ShellTool tests (4 run + 4 ignored = 8 tests)
+### ShellTool tests (8 run + 4 ignored = 12 tests)
 
-Location: `src/client/tools/shell.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/client/tools/shell.rs` (inline `#[cfg(test)]` module).
 
 Non-Docker (always run):
 
@@ -120,7 +120,7 @@ Docker-dependent (`#[ignore]`, require `pc-test-sandbox` container):
 
 ### Protocol serde tests (14 tests)
 
-Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/protocol.rs` (inline `#[cfg(test)]` module).
 
 | Area              | Count | What is tested                                                                                                        |
 | ----------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
@@ -128,61 +128,48 @@ Location: `src/protocol.rs` (inline `#[cfg(test)]` module).
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (12 tests)
+### Integration tests (28 tests)
 
-Location: `tests/integration.rs` with helpers in `tests/support/`.
+Location: `crates/prosthetic-conscience/tests/integration.rs` with helpers in `crates/prosthetic-conscience/tests/support/`.
 
-| Test                                                                 | What it proves                                                                                                                                                                                                                                        |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `happy_path_streams_chunks_and_done`                                 | Full pipeline: HTTP POST → kernel dispatch → WS job frame → 2 worker chunks → relay → SSE events → client receives 2 data + `[DONE]`                                                                                                                  |
-| `no_workers_returns_sse_error`                                       | No workers connected → kernel rejects with `SendClientError` + `SendClientDone` → client sees error event + `[DONE]`                                                                                                                                  |
-| `worker_error_sends_error_and_done`                                  | Worker sends chunk then `{"type":"error"}` → relay sends error directly + handler calls `assignment_failed` → client sees chunk + 2 errors + `[DONE]`                                                                                                 |
-| `worker_re_registration_handles_second_job`                          | Worker completes first job, re-registers with fresh ID, receives and completes second job on same WS connection                                                                                                                                       |
-| `concurrent_streams_no_cross_contamination`                          | 10 workers, 10 clients, 20 chunks each — all spawned concurrently. Each chunk tagged with `client_stream_id:index`. Asserts: no cross-contamination, chunk ordering preserved, all 10 stream IDs distinct                                             |
-| `completed_streams_drain_from_state`                                 | 3 jobs (success, error, timeout) then assert all state drains: active_streams=0, stream_registry=0, available_workers=0, worker_registry=0                                                                                                            |
-| `stream_timeout_sends_error_and_done`                                | Gateway with short TTLs (`stream_ttl: 3, tick_interval: 50ms`), worker accepts job but never responds → client gets `"stream timed out"` error + `[DONE]`                                                                                             |
-| `long_running_stream_survives_with_heartbeats`                       | Short TTL + fast heartbeat (`stream_heartbeat_interval: 100ms`). Worker sends chunk, waits 250ms past original TTL, sends second chunk + end → both chunks arrive, no timeout. Proves heartbeats work                                                 |
-| `worker_disconnect_mid_stream_sends_error_and_done`                  | Worker sends 1 chunk then closes WS → relay detects disconnect → `AssignmentFailed` → client receives chunk, error event, `[DONE]`                                                                                                                    |
-| `gateway_client_collects_chunks_and_assembles`                       | `GatewayClient` sends request, collects 4 SSE chunks, `response_assembler::assemble()` produces correct `CompletedMessage` with content "Hello there" and finish_reason "stop"                                                                        |
-| `gateway_client_returns_error_on_no_workers`                         | `GatewayClient.chat()` does not panic when gateway returns SSE error (no workers available). Returns Ok with error chunks.                                                                                                                            |
-| `tool_loop_executes_tool_and_re_requests`                            | Two-round tool loop: MockWorker returns `tool_calls` for `get_current_time` → tool executes → re-request includes tool result message → MockWorker returns final text. Verifies tools in payload, tool result format, conversation history structure. |
-| `consensus_llm_drafts_claim_via_tool_loop`                           | Consensus LLM turn loop with MockWorker returning `draft_claim` tool call → engine creates draft → verifies draft buffer populated correctly.                                                                                                         |
-| `consensus_seed_fails_for_unknown_session_id`                        | `pc-consensus-seed` rejects unknown session IDs.                                                                                                                                                                                                      |
-| `consensus_seed_joins_existing_session_and_persists_fixture_entries` | Seed binary creates session, appends fixture entries, verifies they persist.                                                                                                                                                                          |
-| `consensus_app_join_bootstraps_from_existing_session`                | `ConsensusApp::join()` connects to existing session and bootstraps engine from committed entries.                                                                                                                                                     |
+| Test group                          | Count | What it proves                                                                                                                                                 |
+| ----------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session websocket flows             | 7     | Session create/append, subscribe notifications, nonexistent sessions, subscriber timeout, multi-subscriber fanout, disconnect cleanup, and handshake timeout |
+| Consensus seed and bootstrap        | 3     | Seeding fixture logs into a live session, rejecting unknown sessions, and `ConsensusApp::join()` bootstrapping from committed entries                       |
+| Transcription routing               | 5     | Transcription happy path, no-worker error, worker error propagation, capability isolation, and mixed chat/transcription worker pools                        |
+| Client tool loop and gateway client | 4     | Generic tool loop re-requesting, consensus clarification-then-draft flow, SSE assembly, and graceful no-worker error handling                               |
+| Chat streaming and lifecycle        | 9     | Happy path chat streaming, no-worker rejection, worker error relay, re-registration, concurrency isolation, state draining, timeout, disconnect, heartbeats |
 
 Test harness components:
 
-- `TestGateway` (`tests/support/gateway.rs`): starts real Axum server on random port with isolated state.
-- `MockWorker` (`tests/support/worker.rs`): tokio-tungstenite WS client with `recv_job()`, `send_chunk()`, `send_end()`, `send_error()`, `disconnect()`.
-- `SseClient` (`tests/support/client.rs`): reqwest HTTP client with manual SSE parsing, `next_event()`, `collect_all()`.
+- `TestGateway` (`crates/prosthetic-conscience/tests/support/gateway.rs`): starts real Axum server on random port with isolated state.
+- `MockWorker` (`crates/prosthetic-conscience/tests/support/worker.rs`): tokio-tungstenite WS client with `recv_job()`, `send_chunk()`, `send_end()`, `send_error()`, `disconnect()`.
+- `SseClient` (`crates/prosthetic-conscience/tests/support/client.rs`): reqwest HTTP client with manual SSE parsing, `next_event()`, `collect_all()`.
 
-### Consensus tool dispatch tests (22 tests)
+### Consensus tool dispatch tests (23 tests)
 
-Location: `src/consensus/tools.rs` (inline `#[cfg(test)]` module).
+Location: `crates/consensus/src/tools.rs` (inline `#[cfg(test)]` module).
 
 | Area                   | Count | What is tested                                                                                                                                                                                        |
 | ---------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool dispatch          | 12    | `overview`, `claim_detail`, `draft_claim`, `draft_relation`, `draft_stance`, `draft_resolve`, `draft_comment`, `show_drafts`, `remove_draft`, `submit_drafts`, `clear_drafts`, `no_structured_action` |
-| Error paths            | 4     | Unknown tool, missing required arguments (`claim_detail`, `draft_claim`, `no_structured_action`)                                                                                                      |
-| Tool definitions       | 2     | Total count (15), LLM-filtered set excludes `submit_drafts`/`clear_drafts`, includes `no_structured_action` last                                                                                      |
+| Tool dispatch          | 14    | `overview`, `claim_detail`, `preview_overview`, `preview_claim_detail`, `draft_claim`, `draft_relation`, `draft_stance`, `draft_resolve`, `draft_comment`, `show_drafts`, `remove_draft`, `submit_drafts`, `clear_drafts`, `impact_analysis` |
+| Error paths            | 4     | Unknown tool, missing required arguments, invalid claim-ref shapes, and engine errors such as removing a nonexistent draft                                                                            |
+| Tool definitions       | 3     | Total count (14), LLM-filtered set excludes `submit_drafts`/`clear_drafts` and omits `no_structured_action`, draft tools do not expose `author`                                                     |
 | Integration            | 2     | Round-trip draft→show→submit, preview includes uncommitted drafts                                                                                                                                     |
-| Impact analysis        | 1     | Reports status changes from draft relations                                                                                                                                                           |
-| `no_structured_action` | 1     | Returns reason + response JSON without engine mutation                                                                                                                                                |
 
 ### Consensus LLM tests (7 tests)
 
-Location: `src/consensus_cli/llm.rs` (inline `#[cfg(test)]` module).
+Location: `crates/consensus/src/llm_turn.rs` (inline `#[cfg(test)]` module).
 
-| Area               | Count | What is tested                                                                                                                   |
-| ------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------- |
-| System prompt      | 1     | Contains review boundary, `MUST invoke a tool`, `no_structured_action`, safe tool names, excludes `submit_drafts`/`clear_drafts` |
-| Request payload    | 1     | Includes `tool_choice: "required"` and `max_completion_tokens`                                                                   |
-| History truncation | 5     | Under limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut               |
+| Area               | Count | What is tested                                                                                                                                      |
+| ------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| System prompt      | 1     | Contains review boundary, clarify-first wording, claim-ref guidance, safe tool names, excludes `submit_drafts`, `clear_drafts`, and `no_structured_action` |
+| Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                     |
+| History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                |
 
-### Consensus app tests (3 tests)
+### Consensus entry buffer tests (3 tests)
 
-Location: `src/consensus_cli/app.rs` (inline `#[cfg(test)]` module).
+Location: `crates/consensus/src/entry_buffer.rs` (inline `#[cfg(test)]` module).
 
 | Area                  | Count | What is tested                                            |
 | --------------------- | ----- | --------------------------------------------------------- |
@@ -190,14 +177,22 @@ Location: `src/consensus_cli/app.rs` (inline `#[cfg(test)]` module).
 | Entry buffering       | 1     | Out-of-order entries buffered until gap is closed         |
 | Tool trace formatting | 1     | `format_tool_trace` lists each tool round                 |
 
+### Consensus app tests (1 test)
+
+Location: `crates/prosthetic-conscience/src/consensus_cli/app.rs` (inline `#[cfg(test)]` module).
+
+| Area                  | Count | What is tested                            |
+| --------------------- | ----- | ----------------------------------------- |
+| Tool trace formatting | 1     | `format_tool_trace` lists each tool round |
+
 ### Consensus eval tests (3 tests)
 
-Location: `src/consensus/eval.rs` (inline `#[cfg(test)]` module).
+Location: `crates/prosthetic-conscience/src/consensus_support/eval.rs` (inline `#[cfg(test)]` module).
 
-| Area            | Count | What is tested                                                                                     |
-| --------------- | ----- | -------------------------------------------------------------------------------------------------- |
-| Scoring         | 2     | Stance draft matches argument and draft buffer, `no_structured_action` requires empty draft buffer |
-| Context seeding | 1     | Synthetic history contains properly paired tool call/result messages                               |
+| Area            | Count | What is tested                                                                                             |
+| --------------- | ----- | ---------------------------------------------------------------------------------------------------------- |
+| Scoring         | 2     | Stance draft matches argument and draft buffer, plain-text response cases require an empty draft buffer    |
+| Context seeding | 1     | Synthetic history contains properly paired tool call/result messages                                       |
 
 ### What is NOT tested
 
@@ -225,11 +220,11 @@ This methodology is mature and should continue to be the primary testing approac
 
 ### Runtime and adapters: integration-tested
 
-The runtime is intentionally simple ("so simple that its correctness is obvious by inspection"). The happy path integration test exercises the full wiring between kernel, registry, effect executors, and adapters. Fault tolerance and error paths are not yet tested at the integration level.
+The runtime is intentionally simple ("so simple that its correctness is obvious by inspection"). The integration suite now exercises the full wiring between kernel, registry, effect executors, transport adapters, and the consensus/session flows. Fault tolerance and some HTTP/relay edge cases still have gaps, but the runtime is no longer covered only by the happy path.
 
-### Integration testing: in progress
+### Integration testing: active
 
-The test harness is implemented and the happy path test passes. Remaining tests are described below.
+The test harness now covers session WS flows, transcription routing, chat streaming, generic tool calling, and consensus-specific session bootstrap flows. Remaining gaps are described below.
 
 ## Planned End-to-End Testing Approach
 
@@ -352,11 +347,12 @@ Testing-level invariants (properties the test suite itself must maintain):
 - GetCurrentTime tool: adequate coverage (4 tests).
 - ShellTool: adequate coverage (8 tests, 4 non-Docker + 4 Docker-gated `#[ignore]`).
 - Protocol: strong coverage (14 serde tests).
-- Consensus tool dispatch: strong coverage (22 tests).
+- Consensus tool dispatch: strong coverage (23 tests).
 - Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
-- Consensus app: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
+- Consensus entry buffer: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
+- Consensus app: minimal coverage (1 test — trace formatting).
 - Consensus eval: adequate coverage (3 tests — scoring and context seeding).
-- Integration: 28 tests passing. Includes consensus-specific tests: `consensus_llm_drafts_claim_via_tool_loop`, `consensus_seed_*` (2), `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
+- Integration: 28 tests passing. Includes consensus-specific tests: `consensus_llm_drafts_claim_after_clarification_turn`, `consensus_seed_*` (2), and `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
 ## Load into context when
 
@@ -367,16 +363,17 @@ Testing-level invariants (properties the test suite itself must maintain):
 
 ## Relevant files
 
-- `src/gateway/kernel.rs` (unit + property tests)
-- `src/gateway/channel_registry.rs` (registry tests)
-- `src/client/response_assembler.rs` (assembler unit + property tests)
-- `src/consensus/tools.rs` (tool dispatch tests)
-- `src/consensus/eval.rs` (eval scoring tests)
-- `src/consensus_cli/llm.rs` (LLM turn loop tests)
-- `src/consensus_cli/app.rs` (app tests)
-- `src/protocol.rs` (serde round-trip tests)
-- `tests/integration.rs` (integration tests)
-- `tests/support/` (test harness: `gateway.rs`, `worker.rs`, `client.rs`)
+- `crates/prosthetic-conscience/src/gateway/kernel.rs` (unit + property tests)
+- `crates/prosthetic-conscience/src/gateway/channel_registry.rs` (registry tests)
+- `crates/prosthetic-conscience/src/client/response_assembler.rs` (assembler unit + property tests)
+- `crates/consensus/src/tools.rs` (tool dispatch tests)
+- `crates/consensus/src/llm_turn.rs` (LLM turn loop tests)
+- `crates/consensus/src/entry_buffer.rs` (entry buffer tests)
+- `crates/prosthetic-conscience/src/consensus_support/eval.rs` (eval scoring tests)
+- `crates/prosthetic-conscience/src/consensus_cli/app.rs` (app tests)
+- `crates/prosthetic-conscience/src/protocol.rs` (serde round-trip tests)
+- `crates/prosthetic-conscience/tests/integration.rs` (integration tests)
+- `crates/prosthetic-conscience/tests/support/` (test harness: `gateway.rs`, `worker.rs`, `client.rs`)
 - `fixtures/tool-call-eval/` (eval benchmark suites)
 - `proptest-regressions/gateway/kernel.txt` (regression cases)
 - `Cargo.toml` (test dependencies: `proptest`, `reqwest`, `tokio-tungstenite`)
