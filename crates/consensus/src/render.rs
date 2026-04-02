@@ -281,10 +281,10 @@ pub fn claim_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::reducer::{replay, to_graph};
-    use crate::consensus::solver::grounded_labelling;
-    use crate::consensus::status::compute_all;
-    use crate::consensus::types::*;
+    use crate::reducer::{replay, to_graph};
+    use crate::solver::grounded_labelling;
+    use crate::status::compute_all;
+    use crate::types::*;
 
     fn empty_statuses() -> HashMap<ClaimId, EpistemicStatus> {
         HashMap::new()

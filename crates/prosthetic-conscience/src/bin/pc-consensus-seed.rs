@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use prosthetic_conscience::consensus::fixtures::{FixtureScenario, scenario_log};
 use prosthetic_conscience::consensus_cli::seed::{join_and_seed_session, load_entries_from_path};
+use prosthetic_conscience::consensus_support::fixtures::{FixtureScenario, scenario_log};
 
 #[derive(Parser)]
 #[command(

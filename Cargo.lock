@@ -291,6 +291,12 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 [[package]]
 name = "consensus"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -1063,6 +1069,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "consensus",
  "either",
  "futures-util",
  "im",

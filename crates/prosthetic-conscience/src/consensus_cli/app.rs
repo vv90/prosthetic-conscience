@@ -3,16 +3,16 @@ use std::io::{self, Write};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::consensus::engine::EngineError;
-use crate::consensus::entry_buffer::{
-    ApplyResult, EntryBuffer, EntryBufferError, format_tool_trace,
-};
-use crate::consensus::format::{
+use uuid::Uuid;
+
+use consensus::engine::EngineError;
+use consensus::entry_buffer::{ApplyResult, EntryBuffer, EntryBufferError, format_tool_trace};
+use consensus::format::{
     format_claim_detail, format_drafts, format_impact_analysis, format_overview,
 };
-use crate::consensus::llm_turn::LlmTurnTrace;
-use crate::consensus::render::OverviewData;
-use crate::consensus::types::ClaimId;
+use consensus::llm_turn::LlmTurnTrace;
+use consensus::render::OverviewData;
+use consensus::types::ClaimId;
 
 use super::llm::{ConsensusLlm, LlmError};
 use super::session::{SessionClient, SessionError, SessionEvent};
@@ -304,7 +304,10 @@ impl ConsensusApp {
     }
 
     async fn begin_submission(&mut self) -> Result<(), AppError> {
-        let Some(pending) = self.buffer.begin_submission()? else {
+        let Some(pending) = self
+            .buffer
+            .begin_submission(|| ClaimId(Uuid::new_v4().to_string()))?
+        else {
             println!("No pending drafts to submit.");
             return Ok(());
         };
@@ -504,7 +507,7 @@ mod tests {
 
     #[test]
     fn format_tool_trace_lists_each_tool_round() {
-        use crate::consensus::llm_turn::{LlmRoundTrace, ToolExecutionTrace};
+        use consensus::llm_turn::{LlmRoundTrace, ToolExecutionTrace};
 
         let trace = LlmTurnTrace {
             rounds: vec![LlmRoundTrace {

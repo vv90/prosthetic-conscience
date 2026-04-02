@@ -1,4 +1,16 @@
-//! Future home of the wasm-compatible consensus core.
+//! Standalone wasm-buildable consensus core.
 //!
-//! This crate is intentionally empty in the initial workspace split so the
-//! main application can migrate code into it gradually.
+//! This crate is initially a copied slice of the existing application-side
+//! consensus modules so the logic can be compiled and verified independently.
+
+pub mod engine;
+pub mod entry_buffer;
+pub mod format;
+pub mod llm_turn;
+pub mod reducer;
+pub mod render;
+pub mod response;
+pub mod solver;
+pub mod status;
+pub mod tools;
+pub mod types;

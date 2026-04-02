@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use crate::consensus::types::Entry;
+use consensus::types::Entry;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SeedParseError {
@@ -63,7 +63,7 @@ pub fn load_entries_from_value(value: Value) -> Result<Vec<Entry>, SeedParseErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::fixtures::{
+    use crate::consensus_support::fixtures::{
         FixtureScenario, authentication_deliberation_log, scenario_log,
     };
 

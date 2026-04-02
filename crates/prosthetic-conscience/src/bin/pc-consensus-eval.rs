@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use prosthetic_conscience::consensus::eval::{
+use prosthetic_conscience::consensus_support::eval::{
     ExperimentRunConfig, load_suite_from_path, render_markdown_summary, run_suite,
 };
 

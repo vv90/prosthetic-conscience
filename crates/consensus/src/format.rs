@@ -413,16 +413,16 @@ fn format_attention_signal(signal: &AttentionSignal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::reducer::{replay, to_graph};
-    use crate::consensus::render;
-    use crate::consensus::solver::grounded_labelling;
-    use crate::consensus::status::compute_all;
-    use crate::consensus::types::*;
+    use crate::reducer::{replay, to_graph};
+    use crate::render;
+    use crate::solver::grounded_labelling;
+    use crate::status::compute_all;
+    use crate::types::*;
 
     fn build(
         entries: &[Entry],
     ) -> (
-        crate::consensus::types::MaterializedState,
+        crate::types::MaterializedState,
         std::collections::HashMap<ClaimId, EpistemicStatus>,
     ) {
         let state = replay(entries);

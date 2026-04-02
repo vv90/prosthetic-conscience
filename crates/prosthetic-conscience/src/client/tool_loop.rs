@@ -5,10 +5,11 @@
 use serde_json::{Value, json};
 
 use super::gateway_client::{ClientError, GatewayClient};
-use super::response_assembler::{
-    self, AssemblerError, CompletedMessage, assistant_message_value, tool_result_message,
-};
 use super::tools::{ToolError, ToolRegistry};
+use consensus::response::{
+    self as response_assembler, AssemblerError, CompletedMessage, assistant_message_value,
+    tool_result_message,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolLoopError {

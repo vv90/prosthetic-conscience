@@ -11,12 +11,12 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::consensus::engine::{ClaimRef, ConsensusEngine};
-use crate::consensus::format::{format_drafts, format_impact_analysis, format_overview};
-use crate::consensus::response::{
+use crate::engine::{ClaimRef, ConsensusEngine};
+use crate::format::{format_drafts, format_impact_analysis, format_overview};
+use crate::response::{
     AssemblerError, CompletedMessage, assemble, assistant_message_value, tool_result_message,
 };
-use crate::consensus::tools;
+use crate::tools;
 
 pub const MAX_TOOL_ROUNDS: usize = 8;
 pub const MAX_COMPLETION_TOKENS: u64 = 512;
@@ -527,7 +527,7 @@ fn describe_claim_ref(engine: &ConsensusEngine, claim: &ClaimRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::types::{ClaimId, ClaimKind, Entry};
+    use crate::types::{ClaimId, ClaimKind, Entry};
 
     #[test]
     fn prompt_includes_review_boundary_and_safe_tools() {

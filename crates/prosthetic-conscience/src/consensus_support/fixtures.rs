@@ -8,10 +8,10 @@ use std::str::FromStr;
 use clap::ValueEnum;
 use serde::Serialize;
 
-use super::engine::ConsensusEngine;
-use super::format::format_overview;
-use super::render::OverviewData;
-use super::types::{ClaimId, ClaimKind, Entry, Outcome, Position, RelationKind};
+use consensus::engine::ConsensusEngine;
+use consensus::format::format_overview;
+use consensus::render::OverviewData;
+use consensus::types::{ClaimId, ClaimKind, Entry, Outcome, Position, RelationKind};
 
 /// Named built-in fixture scenarios.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -324,7 +324,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::consensus::reducer::replay;
+    use consensus::reducer::replay;
 
     #[test]
     fn fixture_scenario_slug_and_lookup_are_stable() {

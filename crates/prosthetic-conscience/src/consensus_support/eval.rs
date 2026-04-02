@@ -7,15 +7,15 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::chat_gateway::response_assembler::{
+use crate::consensus_cli::llm::ConsensusLlm;
+use crate::consensus_support::fixtures::{FixtureScenario, scenario_log};
+use consensus::engine::{ClaimRef, ConsensusEngine, DraftContent, DraftEntry};
+use consensus::llm_turn::{LlmTurnTrace, ToolExecutionTrace};
+use consensus::render::OverviewData;
+use consensus::response::{
     CompletedMessage, CompletedToolCall, assistant_message_value, tool_result_message,
 };
-use crate::consensus::engine::{ClaimRef, ConsensusEngine, DraftContent, DraftEntry};
-use crate::consensus::fixtures::{FixtureScenario, scenario_log};
-use crate::consensus::llm_turn::{LlmTurnTrace, ToolExecutionTrace};
-use crate::consensus::render::OverviewData;
-use crate::consensus::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
-use crate::consensus_cli::llm::ConsensusLlm;
+use consensus::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
 
 fn default_history_turns() -> Vec<usize> {
     vec![0, 4, 12]
@@ -844,8 +844,8 @@ fn outcome_name(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::llm_turn::ToolExecutionTrace;
-    use crate::consensus::types::ClaimId;
+    use consensus::llm_turn::ToolExecutionTrace;
+    use consensus::types::ClaimId;
 
     #[test]
     fn draft_stance_matches_argument_and_draft() {
@@ -869,7 +869,7 @@ mod tests {
             dispatch_error: None,
         };
         let draft = DraftEntry {
-            id: crate::consensus::engine::DraftId(1),
+            id: consensus::engine::DraftId(1),
             entry: DraftContent::Stance {
                 target: ClaimRef::Committed(ClaimId(String::from("prop-jwt"))),
                 position: Position::Block,
@@ -893,7 +893,7 @@ mod tests {
             }],
         };
         let trace = LlmTurnTrace {
-            rounds: vec![crate::consensus::llm_turn::LlmRoundTrace {
+            rounds: vec![consensus::llm_turn::LlmRoundTrace {
                 round: 0,
                 request_history_messages: 1,
                 request_messages: 2,

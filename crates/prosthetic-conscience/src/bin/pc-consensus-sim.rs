@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-use prosthetic_conscience::consensus::fixtures::{FixtureScenario, TrialLog, scenario_log};
+use prosthetic_conscience::consensus_support::fixtures::{FixtureScenario, TrialLog, scenario_log};
 
 #[derive(Parser)]
 #[command(
@@ -39,7 +39,7 @@ enum OutputFormat {
 
 #[derive(Serialize)]
 struct SessionEntriesResponse<'a> {
-    entries: &'a [prosthetic_conscience::consensus::types::Entry],
+    entries: &'a [consensus::types::Entry],
     total: usize,
 }
 
@@ -49,9 +49,9 @@ struct ExperimentBundle<'a> {
     title: &'a str,
     description: &'a str,
     participants: &'a [String],
-    entries: &'a [prosthetic_conscience::consensus::types::Entry],
+    entries: &'a [consensus::types::Entry],
     total: usize,
-    final_overview: prosthetic_conscience::consensus::render::OverviewData,
+    final_overview: consensus::render::OverviewData,
     final_overview_text: String,
 }
 
@@ -114,9 +114,7 @@ fn render_json<T: Serialize>(value: &T, compact: bool) -> Result<String, serde_j
     }
 }
 
-fn render_jsonl(
-    entries: &[prosthetic_conscience::consensus::types::Entry],
-) -> Result<String, serde_json::Error> {
+fn render_jsonl(entries: &[consensus::types::Entry]) -> Result<String, serde_json::Error> {
     let mut out = String::new();
     for entry in entries {
         out.push_str(&serde_json::to_string(entry)?);

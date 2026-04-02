@@ -1,11 +1,11 @@
 use serde_json::Value;
 
 use crate::chat_gateway::gateway_client::{ClientError, GatewayClient};
-use crate::consensus::engine::ConsensusEngine;
-use crate::consensus::llm_turn::{
+use consensus::engine::ConsensusEngine;
+use consensus::llm_turn::{
     self, LlmRoundTrace, LlmTurnTrace, ProcessResponseError, TurnConfig, TurnStep,
 };
-use crate::consensus::response::CompletedMessage;
+use consensus::response::CompletedMessage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

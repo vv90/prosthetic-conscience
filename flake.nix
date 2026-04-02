@@ -28,6 +28,7 @@
             "rustfmt"
             "clippy"
           ];
+          targets = [ "wasm32-unknown-unknown" ];
         };
 
         whisper-cpp-local = pkgs.stdenv.mkDerivation rec {

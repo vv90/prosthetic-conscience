@@ -8,11 +8,10 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use uuid::Uuid;
 
-use crate::consensus::engine::{ConsensusEngine, DraftId, EngineError};
-use crate::consensus::llm_turn::LlmTurnTrace;
-use crate::consensus::types::{ClaimId, Entry};
+use crate::engine::{ConsensusEngine, DraftId, EngineError};
+use crate::llm_turn::LlmTurnTrace;
+use crate::types::{ClaimId, Entry};
 
 // ---------------------------------------------------------------------------
 // Pending submission tracking
@@ -153,10 +152,19 @@ impl EntryBuffer {
     }
 
     /// Prepare a submission: serialize the current drafts into payloads.
-    pub fn begin_submission(&mut self) -> Result<Option<PendingSubmission>, EntryBufferError> {
-        let bundle = self
-            .engine
-            .submission_bundle(|| ClaimId(Uuid::new_v4().to_string()));
+    ///
+    /// The `next_claim_id` closure is called to generate fresh claim IDs for
+    /// any new claims in the submission bundle. This keeps ID generation as a
+    /// caller concern (e.g., `Uuid::new_v4()` in CLI, `crypto.randomUUID()`
+    /// in browser WASM).
+    pub fn begin_submission<F>(
+        &mut self,
+        next_claim_id: F,
+    ) -> Result<Option<PendingSubmission>, EntryBufferError>
+    where
+        F: FnMut() -> ClaimId,
+    {
+        let bundle = self.engine.submission_bundle(next_claim_id);
 
         if bundle.entries.is_empty() {
             return Ok(None);
@@ -245,7 +253,7 @@ pub fn compact_debug_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::llm_turn::{LlmRoundTrace, ToolExecutionTrace};
+    use crate::llm_turn::{LlmRoundTrace, ToolExecutionTrace};
     use serde_json::json;
 
     #[test]

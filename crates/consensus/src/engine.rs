@@ -683,7 +683,7 @@ impl ConsensusEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::types::*;
+    use crate::types::*;
 
     fn engine() -> ConsensusEngine {
         ConsensusEngine::new(String::from("assistant"))

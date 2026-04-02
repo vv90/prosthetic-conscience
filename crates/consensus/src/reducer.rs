@@ -148,8 +148,8 @@ pub fn to_graph(state: &MaterializedState) -> (Graph, Vec<ClaimId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::solver::{Label, grounded_labelling};
-    use crate::consensus::types::*;
+    use crate::solver::{Label, grounded_labelling};
+    use crate::types::*;
 
     fn claim(id: &str, author: &str, body: &str, kind: ClaimKind) -> Entry {
         Entry::Claim {

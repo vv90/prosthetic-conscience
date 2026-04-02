@@ -71,9 +71,9 @@ pub fn compute_all(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::reducer::{replay, to_graph};
-    use crate::consensus::solver::grounded_labelling;
-    use crate::consensus::types::*;
+    use crate::reducer::{replay, to_graph};
+    use crate::solver::grounded_labelling;
+    use crate::types::*;
 
     fn make_stance(target: &str, author: &str, position: Position) -> StanceState {
         StanceState {

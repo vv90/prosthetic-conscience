@@ -8,6 +8,7 @@ async-stream = "0.3"
 base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "json", "multipart"] }
 clap = { version = "4", features = ["derive"] }
+consensus = { path = "../consensus" }
 either = "1.15.0"
 im = "15"
 futures-util = "0.3"

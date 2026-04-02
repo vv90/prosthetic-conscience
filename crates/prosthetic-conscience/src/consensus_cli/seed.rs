@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::consensus::seed::{SeedParseError, load_entries_from_value};
-use crate::consensus::types::Entry;
+use crate::consensus_support::seed::{SeedParseError, load_entries_from_value};
+use consensus::types::Entry;
 
 use super::session::{SessionClient, SessionError, SessionEvent};
 
