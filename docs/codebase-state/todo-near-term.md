@@ -93,21 +93,37 @@ Outstanding issues:
 
 Core extraction is done: the consensus runtime now lives in `crates/consensus/`, `prosthetic-conscience` depends on it as a workspace crate, and the crate already builds for `wasm32-unknown-unknown`.
 
-**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for entry reception, gap detection, connection state (`Connected`/`Disconnected`), and paginated catch-up (`FetchResult` with `FetchTarget::End` / `FetchTarget::Index`). 28 tests (24 targeted + 4 property-based). Does not yet own `EntryBuffer` or submission tracking.
+Implementation process for the browser/WASM layer now lives in [`docs/codebase-state/consensus-browser-ui-implementation.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/consensus-browser-ui-implementation.md). Invariant and testing terminology now lives in [`docs/codebase-state/testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md). Together they are the source of truth for the incremental interface -> constraints/correctness-properties -> logic loop described below.
 
-**Next steps for coordinator:**
+**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest indexed entry, slot-based gap detection, page-bounded fetch planning (`FetchMissing { from, limit }`), and local `SubmitEntry` emission. 20 tests (13 targeted + 7 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
 
-- Integrate `EntryBuffer` into the coordinator (submission resume, echo tracking).
-- Replace the imperative control flow in `consensus_cli/app.rs` with the coordinator reducer.
-- Wire the coordinator into the browser/WASM shell.
-- Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
-- Add bootstrap session metadata so connect handling can receive the latest entry index together with the full latest entry payload, and use that to simplify initial catch-up planning.
+**Phase 6 implementation order:**
+
+14. Establish the new pure browser-facing app boundary in `crates/consensus/`:
+    `AppState`, `AppInput`, `AppEffect`, `AppView`, `AppTransition`.
+15. For that first app slice, write explicit app-layer constraints and correctness properties before expanding behavior.
+16. Implement the smallest local-only interaction slice behind the app boundary:
+    local drafts, overview, selected claim detail, impact analysis, explicit submit intent.
+17. Expand the session coordinator into the higher-level pure source of truth for session sync policy:
+    reconnect/catch-up, append gating, submission resume, queued-event draining.
+18. Treat `EntryBuffer` as transitional. Fold its responsibilities into the higher-level coordinator rather than preserving both as long-term public boundaries.
+19. Replace the imperative session/submission control flow in `consensus_cli/app.rs` with the higher-level pure app/coordinator loop.
+20. Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
+21. Add bootstrap session metadata so connect handling can receive the latest entry index together with the full latest entry payload, and use that to simplify initial catch-up planning.
+22. Only after the pure app boundary is stable, add a thin `wasm-bindgen` wrapper crate that exposes the app-level interface rather than engine/coordinator internals.
+23. Build the first browser prototype against that wrapper with a minimal JS shell:
+    DOM rendering, websocket/HTTP execution, timers, auth token handling.
 
 **Remaining Phase 6 tasks:**
 
-14. Add a `crates/consensus-wasm/` wrapper crate with `wasm-bindgen` and `serde-wasm-bindgen`.
-15. Export `ConsensusEngine`, `EntryBuffer`, and pure `llm_turn` helpers for JS/TS.
-16. Build the first browser prototype on top of the wasm artifact and existing session/inference endpoints.
+- Do not recreate the terminal REPL in the browser; build the browser interaction model from the app boundary outward.
+- Keep JavaScript thin: JS executes effects and renders view data, while Rust owns decisions and state transitions.
+- Add browser-facing functionality in small increments, and for each increment:
+  1. establish interface
+  2. establish constraints
+  3. establish correctness properties
+  4. implement logic
+- Re-evaluate the JS↔WASM surface after each increment and avoid exposing temporary lower-level methods as permanent API.
 
 ### Protocol integrity concerns (identified, mitigations planned)
 

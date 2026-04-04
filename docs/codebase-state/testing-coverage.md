@@ -167,20 +167,21 @@ Location: `crates/consensus/src/llm_turn.rs` (inline `#[cfg(test)]` module).
 | Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                            |
 | History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                         |
 
-### Coordinator reducer tests (28 tests)
+### Coordinator reducer tests (20 tests)
 
 Location: `crates/consensus/src/coordinator.rs` (inline `#[cfg(test)]` module).
 
 | Area                        | Count | What is tested                                                                                                                                                  |
 | --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Entry reception and gaps    | 12    | Next-expected advances frontier, known index is noop, gap emits FetchMissing with page_limit, buffered entries drain on gap fill, state starts at zero frontier |
-| Connected/Disconnected      | 6     | Connected emits FetchMissing from frontier, duplicate suppression during active fetch, disconnected clears fetch_target, connected flag tracking                |
-| FetchResult pagination      | 6     | Full page emits next fetch, short page completes, empty page completes, multi-page lifecycle, entries applied and frontier advanced                             |
-| Fetch-aware gap handling    | 4     | Gap during active fetch suppressed, target upgraded when gap extends beyond current, gap with no fetch starts paginated fetch, fetch completes at target        |
-| Property: limit bounds      | 1     | Every `FetchMissing` has `limit <= page_limit` and `limit > 0`                                                                                                  |
-| Property: connected flag    | 1     | After any sequence of `Connected`/`Disconnected`, `is_connected()` matches the last one                                                                         |
-| Property: disconnect clears | 1     | After any sequence ending in `Disconnected`, `fetch_target` is cleared                                                                                          |
-| Property: no duplicates     | 1     | At most one `FetchMissing` per transition                                                                                                                       |
+| Bootstrap and resync        | 7     | `init` empty/latest/error cases, `sync_to_latest` noop, non-shrinking behavior, filling requested latest slot, preserving existing received value              |
+| Entry reception and effects | 6     | Duplicate receive noop, requested-slot fill, future receive emits eager `FetchMissing`, `EntryCreated` emits one submit effect, `next_expected()` semantics, public type shapes |
+| Property: first writer wins | 1     | Duplicate indices never overwrite the first received value                                                                                                      |
+| Property: hole coverage     | 1     | Future receives cover every newly requested slot below the current upper bound                                                                                  |
+| Property: fetch bounds      | 1     | `FetchMissing` ranges are ascending, non-overlapping, bounded by `page_limit`, and never exceed `slots.len()`                                                 |
+| Property: slot layout       | 1     | `next_expected()` always matches the first requested slot or `slots.len()`                                                                                      |
+| Property: monotonic state   | 1     | `slots.len()` and `next_expected()` never decrease; previously received slots remain unchanged                                                                  |
+| Property: fetch coverage    | 1     | Newly created requested slots are covered by fetch effects; non-extending receives emit no fetches                                                             |
+| Property: submit noop state | 1     | `EntryCreated` never mutates the slot layout                                                                                                                    |
 
 ### Consensus entry buffer tests (3 tests)
 
@@ -229,9 +230,11 @@ Location: `crates/prosthetic-conscience/src/consensus_support/eval.rs` (inline `
 The kernel is a pure reducer `reduce(state, event) -> (state, effects)` with no I/O. This enables:
 
 - **Deterministic unit tests**: construct state, apply event, assert on output state + effects. No mocks, no async, no timing.
-- **Property-based tests**: generate arbitrary event sequences via `proptest`, apply them to initial state, assert invariants hold on every intermediate state. The small ID pool (3 workers, 3 streams) maximizes collision probability.
+- **Property-based tests**: generate arbitrary event sequences via `proptest`, apply them to initial state, and sample-check semantic correctness properties across many traces. The small ID pool (3 workers, 3 streams) maximizes collision probability.
 
-This methodology is mature and should continue to be the primary testing approach for all kernel logic.
+See [`testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md) for the canonical distinction between invariants, constraints, transition rules, and test evidence.
+
+This methodology is mature and should continue to be the primary testing approach for kernel logic that cannot be enforced structurally or by the type system.
 
 ### Runtime and adapters: integration-tested
 
@@ -337,12 +340,12 @@ Characterize throughput and latency, detect regressions. Run separately from CI 
 
 **Phase C** (performance baseline): 8. Throughput and latency benchmarks. 9. Backpressure verification.
 
-## Invariants
+## Test-Suite Constraints
 
-Testing-level invariants (properties the test suite itself must maintain):
+Test-suite discipline rules and coverage goals:
 
 - **T1**: Every kernel transition rule in `gateway-state-machine.md` has a corresponding unit test.
-- **T2**: Every kernel invariant (I1–I5) has a corresponding property test.
+- **T2**: Every kernel semantic correctness property that is not structurally or type-enforced should have a corresponding property test.
 - **T3**: Integration tests must not depend on wall-clock timing for correctness (use short TTLs, not sleeps).
 - **T4**: Integration tests must be isolated — each test gets its own server and state.
 - **T5**: No test should log or assert on prompt/completion content (privacy constraint applies to tests too).
@@ -364,7 +367,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - Protocol: strong coverage (14 serde tests).
 - Consensus tool dispatch: strong coverage (23 tests).
 - Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
-- Coordinator reducer: strong coverage (28 tests — 24 targeted + 4 property-based, covers entry reception, gap detection, connection state, paginated catch-up).
+- Coordinator reducer: strong coverage (20 tests — 13 targeted + 7 property-based, covers bootstrap from latest entry, slot monotonicity, gap detection, and page-bounded fetch planning).
 - Consensus entry buffer: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
 - Consensus app: minimal coverage (1 test — trace formatting).
 - Consensus eval: adequate coverage (3 tests — scoring and context seeding).

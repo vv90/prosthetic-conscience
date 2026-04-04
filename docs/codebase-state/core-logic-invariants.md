@@ -107,6 +107,24 @@ The channel is the cancellation mechanism: when the kernel emits terminal effect
 
 ## Invariants
 
+Canonical definitions live in [`testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md).
+
+In this document, "invariant" refers to a core correctness property over reachable states or valid transitions. Some historical property names, such as `I5`, are temporal/liveness properties rather than strict single-state invariants, but they are kept under their existing identifiers because the test and design vocabulary already uses them that way.
+
+**Working distinctions:**
+
+- _Invariant / correctness property_: universal statement over reachable states or valid transition sequences.
+- _Transition rule_: what one event does in one class of cases.
+- _Constraint_: architectural or implementation discipline, documented separately from invariants.
+- _Test case_: one concrete scenario or regression check.
+
+**Enforcement / evidence labels:**
+
+- _Structural_: violation is impossible by construction.
+- _Type-enforced_: violation is prevented by the type system or visibility rules.
+- _Property-tested_: broad sampled evidence over generated traces; useful, but not proof and not enforcement.
+- _Missing_: identified but not yet backed by construction or broad tests.
+
 Universal properties that hold across all reachable states. Organized by layer.
 
 ### Structural (type-level)
@@ -133,7 +151,7 @@ See `gateway-state-machine.md` for the full list. These are properties of the re
 - **I5**: Every `client_stream_id` that enters the kernel eventually gets terminal effects -- either immediately (pre-dispatch error), via `AssignmentCleared` (normal completion), or via tick expiration (timeout).
 - **I6**: Dispatch only targets workers whose capabilities include the required capability.
 
-All six invariants are covered by property tests over arbitrary event sequences.
+All six semantic kernel properties currently have property-test coverage over arbitrary event sequences. That coverage is evidence, not construction-level enforcement.
 
 ### Runtime
 

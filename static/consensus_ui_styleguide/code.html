@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Manrope:wght@600;700;800&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(16px);
+        }
+        .no-line-rule { border: none !important; }
+        .tonal-shift { transition: background-color 0.3s ease; }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "on-primary-fixed": "#00201a",
+                        "tertiary-fixed-dim": "#fabd00",
+                        "background": "#f4faff",
+                        "on-tertiary-fixed-variant": "#5b4300",
+                        "secondary-container": "#cfe6f2",
+                        "on-primary": "#ffffff",
+                        "on-secondary-fixed-variant": "#354a53",
+                        "tertiary-container": "#574000",
+                        "tertiary-fixed": "#ffdf9e",
+                        "primary-fixed-dim": "#94d3c1",
+                        "surface-container-high": "#ddeaf2",
+                        "outline": "#707975",
+                        "on-tertiary": "#ffffff",
+                        "inverse-surface": "#263238",
+                        "on-secondary": "#ffffff",
+                        "secondary-fixed-dim": "#b4cad6",
+                        "primary-fixed": "#afefdd",
+                        "surface-container-lowest": "#ffffff",
+                        "on-background": "#111d23",
+                        "on-secondary-fixed": "#071e27",
+                        "tertiary": "#3c2b00",
+                        "surface-container-low": "#e9f6fd",
+                        "error-container": "#ffdad6",
+                        "secondary": "#4c616c",
+                        "error": "#ba1a1a",
+                        "on-error-container": "#93000a",
+                        "on-primary-container": "#7ebdac",
+                        "surface-tint": "#29695b",
+                        "inverse-primary": "#94d3c1",
+                        "primary": "#00342b",
+                        "surface": "#f4faff",
+                        "on-tertiary-container": "#dfa800",
+                        "surface-container": "#e3f0f8",
+                        "primary-container": "#004d40",
+                        "on-surface-variant": "#3f4945",
+                        "outline-variant": "#bfc9c4",
+                        "surface-container-highest": "#d7e4ec",
+                        "on-surface": "#111d23",
+                        "on-primary-fixed-variant": "#065043",
+                        "surface-bright": "#f4faff",
+                        "on-error": "#ffffff",
+                        "surface-variant": "#d7e4ec",
+                        "secondary-fixed": "#cfe6f2",
+                        "on-tertiary-fixed": "#261a00",
+                        "inverse-on-surface": "#e6f3fb",
+                        "on-secondary-container": "#526772",
+                        "surface-dim": "#cfdce4"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope"],
+                        "body": ["Inter"],
+                        "label": ["Inter"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+</head>
+<body class="bg-surface font-body text-on-surface selection:bg-primary-fixed selection:text-on-primary-fixed">
+<!-- SideNavBar (The Anchor) -->
+<aside class="fixed left-0 top-0 h-full w-64 bg-slate-50 flex flex-col overflow-y-auto no-line-rule tonal-shift font-['Manrope'] tracking-tight z-40">
+<div class="p-8">
+<h1 class="text-xl font-bold text-teal-900">Editorial Workbench</h1>
+<p class="text-xs text-slate-500 mt-1">Consensus Engine</p>
+</div>
+<div class="px-4 mb-6">
+<button class="w-full bg-primary text-on-primary py-3 rounded-xl font-semibold flex items-center justify-center gap-2 hover:opacity-90 transition-all scale-95 duration-150 ease-in-out">
+<span class="material-symbols-outlined text-lg">add</span>
+                New Session
+            </button>
+</div>
+<nav class="flex-1 space-y-1 px-4">
+<a class="flex items-center gap-3 px-4 py-3 text-teal-900 font-semibold border-r-4 border-teal-800 bg-slate-200/50 transition-colors" href="#">
+<span class="material-symbols-outlined">forum</span>
+                Sessions
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 hover:text-teal-700 hover:bg-slate-200/50 transition-colors" href="#">
+<span class="material-symbols-outlined">history</span>
+                History
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 hover:text-teal-700 hover:bg-slate-200/50 transition-colors" href="#">
+<span class="material-symbols-outlined">account_balance_wallet</span>
+                Vault
+            </a>
+<a class="flex items-center gap-3 px-4 py-3 text-slate-500 hover:text-teal-700 hover:bg-slate-200/50 transition-colors" href="#">
+<span class="material-symbols-outlined">settings</span>
+                Settings
+            </a>
+</nav>
+<div class="p-6 mt-auto">
+<div class="flex items-center gap-3">
+<img alt="User profile" class="w-10 h-10 rounded-full bg-surface-container-high" data-alt="Close up portrait of a professional editor in a modern office, soft bokeh lighting, warm professional atmosphere" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBa1D-V2GlwtiJpokE3fUF9ruIuj5wVw8jGTIv8wjCtnE3ZPd9uzu0c0lRMGcSKUuEnTaauNQbC0yxD8hnRGlG7zyEVPtpKNh7CyJwafRbCbVh6JCCdAS2jYuh47PMGKq75pzNiDb-jhCO-vYqqXEhGbQxXIHX70JDyPBG8cxjG8NU1djXmf0x_K4lcaOQxuC3ZoSV1QVWnYh7siklcJEO1lmy6qESb5QgeO21H93edUASfjaonMwbUB-gpLHEDYYfWeFEjyqOHz6s"/>
+<div>
+<p class="text-sm font-bold">Alex Thorne</p>
+<p class="text-[10px] uppercase tracking-wider opacity-60">Lead Architect</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- TopNavBar -->
+<header class="fixed top-0 right-0 left-64 bg-white/80 backdrop-blur-xl flex justify-between items-center px-6 py-3 z-30 shadow-sm shadow-slate-200/50 no-line-rule tonal-shift">
+<div class="flex items-center gap-6">
+<span class="text-lg font-bold text-teal-900 font-headline">Consensus App</span>
+<div class="flex gap-4 items-center font-['Inter'] font-medium text-sm text-slate-600">
+<span class="text-teal-800 font-bold">Session ID: #4402</span>
+<span>12 Participants</span>
+<span class="flex items-center gap-1 text-green-600"><span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Connected</span>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 text-slate-600 hover:text-teal-600 transition-opacity opacity-80 hover:opacity-100">
+<span class="material-symbols-outlined">group</span>
+</button>
+<button class="p-2 text-slate-600 hover:text-teal-600 transition-opacity opacity-80 hover:opacity-100">
+<span class="material-symbols-outlined">wifi</span>
+</button>
+<button class="p-2 text-slate-600 hover:text-teal-600 transition-opacity opacity-80 hover:opacity-100">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+<img alt="User Avatar" class="w-8 h-8 rounded-lg bg-surface-container shadow-sm" data-alt="Abstract minimal geometric avatar with teal and white patterns representing digital identity" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAykZjFfO11gyfuh2dCW8tlOZMPerVU-nWlGd7uG2dquVU0AYlaUpq_eKvNBye7G2KzMzF5ekr9dP0WYPJMF_gjhzmyD1feG-EwKrSObpA6kXnwEsn6_FsEzA05H6DZERTYNYieLB9xlXTjwEzi_LgUNkHevaLNjMH5nXqAM_3F6aQuSp-fIykX9PkCgWrm9VkB-enOFQTMpZtx__0s1BfGFvQdqsUn3Fo1NfYwdBKR57yCfAezqyCUE0cY4nm2OaZyMpXeYPksIlg"/>
+</div>
+</header>
+<!-- Main Workspace Content -->
+<main class="ml-64 pt-[60px] pb-32 min-h-screen flex flex-col">
+<!-- Top Pane (Exploration - Expanded) -->
+<section class="flex-grow p-8 bg-surface space-y-8">
+<div class="max-w-6xl mx-auto">
+<div class="flex justify-between items-end mb-8">
+<div>
+<h2 class="text-4xl font-headline font-extrabold tracking-tight text-primary mb-2">Exploration Engine</h2>
+<p class="text-on-surface-variant max-w-xl font-body leading-relaxed">Dynamic consensus insights synthesized from current session data and historical precedents.</p>
+</div>
+<div class="flex gap-2">
+<span class="bg-surface-container-high px-4 py-2 rounded-full text-xs font-bold text-primary uppercase tracking-widest">Active Analysis</span>
+</div>
+</div>
+<!-- Bento Grid of Insights -->
+<div class="grid grid-cols-12 gap-6">
+<!-- Market Alignment Card -->
+<div class="col-span-12 md:col-span-7 bg-surface-container-lowest p-8 rounded-xl shadow-sm border border-outline-variant/15 flex flex-col gap-4">
+<div class="flex justify-between items-start">
+<span class="bg-tertiary-fixed-dim text-on-tertiary-fixed px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest">Needs Review</span>
+<span class="material-symbols-outlined text-tertiary-fixed-dim">trending_up</span>
+</div>
+<h3 class="text-2xl font-headline font-bold text-primary">Market Alignment Gap</h3>
+<p class="text-on-surface-variant leading-relaxed">Current pricing structures show a 14% deviation from regional consensus models in Northern EMEA. The proposed subscription tiers lack the necessary elasticity for mid-market penetration.</p>
+<div class="mt-4 p-4 bg-surface-container-low rounded-lg">
+<p class="text-xs font-bold text-secondary uppercase mb-2">Suggested Correction</p>
+<p class="text-sm italic">"Introduce a 'Standard+' tier with variable API credit allocation to bridge the gap."</p>
+</div>
+</div>
+<!-- Potential Friction Card -->
+<div class="col-span-12 md:col-span-5 bg-surface-container-lowest p-8 rounded-xl shadow-sm border border-outline-variant/15 flex flex-col gap-4">
+<div class="flex justify-between items-start">
+<span class="bg-tertiary-fixed-dim text-on-tertiary-fixed px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest">Disputed</span>
+<span class="material-symbols-outlined text-tertiary-fixed-dim">warning</span>
+</div>
+<h3 class="text-xl font-headline font-bold text-primary">Potential Friction</h3>
+<p class="text-sm text-on-surface-variant leading-relaxed">Governance protocols regarding data sovereignty in the hybrid approach remain a point of contention among 4 stakeholders.</p>
+<div class="mt-auto pt-4 flex -space-x-2">
+<div class="w-8 h-8 rounded-full bg-slate-300 border-2 border-white"></div>
+<div class="w-8 h-8 rounded-full bg-slate-400 border-2 border-white"></div>
+<div class="w-8 h-8 rounded-full bg-slate-500 border-2 border-white"></div>
+<div class="w-8 h-8 flex items-center justify-center rounded-full bg-primary-container text-[10px] text-white font-bold border-2 border-white">+1</div>
+</div>
+</div>
+<!-- Precedent Card -->
+<div class="col-span-12 bg-primary text-white p-8 rounded-xl shadow-lg relative overflow-hidden group">
+<div class="relative z-10 grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
+<div class="col-span-2">
+<div class="flex items-center gap-2 mb-4">
+<span class="bg-primary-container text-on-primary-container px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest">Accepted</span>
+<span class="text-primary-fixed-dim text-sm font-medium">Historical Precedent Found</span>
+</div>
+<h3 class="text-3xl font-headline font-bold mb-4">Project Helios Protocol</h3>
+<p class="text-primary-fixed-dim/80 leading-relaxed text-lg">The hybrid architecture proposed mirrors the success of the 2022 Helios rollout. Data indicates a 98% stability rate when using this specific caching layer consensus.</p>
+</div>
+<div class="flex justify-end">
+<div class="w-32 h-32 rounded-full border-4 border-primary-fixed-dim/20 flex items-center justify-center group-hover:scale-110 transition-transform duration-500">
+<span class="material-symbols-outlined text-5xl text-primary-fixed-dim" style="font-variation-settings: 'FILL' 1;">verified</span>
+</div>
+</div>
+</div>
+<!-- Background decoration -->
+<div class="absolute top-0 right-0 w-64 h-64 bg-primary-container/20 rounded-full -mr-20 -mt-20 blur-3xl"></div>
+</div>
+</div>
+</div>
+</section>
+<!-- Horizontal Divider (The Visual Split) -->
+<div class="h-[2px] bg-surface-container-high mx-8 shadow-inner"></div>
+<!-- Bottom Pane (Draft - Compressed) -->
+<section class="p-8 bg-surface-container-low min-h-[200px]">
+<div class="max-w-6xl mx-auto flex gap-8 items-start opacity-70 hover:opacity-100 transition-opacity duration-300">
+<div class="w-12 h-12 rounded-lg bg-surface-container-lowest flex items-center justify-center shadow-sm">
+<span class="material-symbols-outlined text-primary">edit_note</span>
+</div>
+<div class="flex-1">
+<h4 class="text-xs font-bold text-secondary uppercase tracking-widest mb-2">Draft Section</h4>
+<h3 class="text-2xl font-headline font-bold text-primary mb-3">Support for hybrid approach</h3>
+<p class="text-on-surface-variant font-body leading-relaxed max-w-3xl">The consensus engine suggests that by integrating the local caching layer with the global verification node, we can reduce latency by 45% while maintaining strict compliance headers. This approach is tentatively favored by the board...</p>
+</div>
+<button class="flex items-center gap-2 text-primary font-bold text-sm bg-white px-4 py-2 rounded-lg shadow-sm border border-outline-variant/10">
+<span class="material-symbols-outlined text-sm">open_in_full</span>
+                    Expand Draft
+                </button>
+</div>
+</section>
+</main>
+<!-- BottomNavBar / Interaction Bar -->
+<div class="fixed bottom-0 right-0 w-[calc(100%-16rem)] z-50 flex items-center gap-4 px-8 pb-8 bg-gradient-to-t from-white via-white/90 to-transparent">
+<div class="flex-1 glass-panel rounded-2xl p-2 shadow-2xl flex items-center gap-4 border border-outline-variant/10">
+<div class="flex-1 relative">
+<input class="w-full bg-transparent border-none focus:ring-0 text-on-surface placeholder:text-slate-400 font-body py-4 px-6 text-base" placeholder="Ask the assistant for insights or consensus maps..." type="text"/>
+</div>
+<div class="flex items-center gap-2 px-4">
+<button class="bg-teal-900 text-white rounded-full px-10 py-5 flex items-center justify-center gap-3 shadow-lg hover:scale-[1.02] active:scale-95 transition-all duration-200">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">mic</span>
+<span class="font-['Inter'] text-sm font-bold uppercase tracking-widest">Push to Talk</span>
+</button>
+</div>
+</div>
+<button class="w-16 h-16 rounded-full bg-surface-container-lowest text-primary shadow-xl flex items-center justify-center hover:bg-primary hover:text-white transition-colors duration-300">
+<span class="material-symbols-outlined text-3xl">bolt</span>
+</button>
+</div>
+</body></html>

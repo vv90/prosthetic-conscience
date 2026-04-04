@@ -1,14 +1,28 @@
 # Session Coordinator Behavior
 
-Snapshot date: 2026-04-03
+Snapshot date: 2026-04-04
 
-Status: **partial** — the pure coordinator reducer is implemented in `crates/consensus/src/coordinator.rs` with entry reception, gap detection, connection state, paginated catch-up, and local entry submission. `EntryBuffer` and `BackoffPolicy` also live in `consensus`. The higher-level `SessionCoordinator` wrapper (owning `EntryBuffer`, submission resume, and the full event/action contract described below) is still planned.
+Status: **partial** — `crates/consensus/src/coordinator.rs` currently implements only a narrow pure reducer for bootstrapping from an optional latest indexed entry, slot-based gap detection, page-bounded fetch planning, and local `SubmitEntry` emission. `EntryBuffer` and `BackoffPolicy` also live in `consensus`. The higher-level `SessionCoordinator` wrapper (owning `EntryBuffer`, reconnect/catch-up policy, submission resume, and the full event/action contract described below) is still planned.
 
 Load into session context when working on: session coordinator extraction, browser/WASM session wrappers, catch-up and reconnect behavior, pending submission recovery, coordinator property tests, protocol integrity concerns.
 
-## Behavior
+## Implemented Today
 
-- `SessionCoordinator` is the proposed pure source of truth for client-side session sync policy.
+- `crates/consensus/src/coordinator.rs` is a pure slot-based reducer over indexed entries.
+- Its current surface is:
+  - `init(page_limit, latest)` for bootstrap from an optional `LatestEntry<T>`
+  - `sync_to_latest(state, latest)` for non-shrinking resync against a latest known entry
+  - `reduce(state, Event::Received { .. } | Event::EntryCreated(..))`
+  - `Effect::FetchMissing { from, limit }` and `Effect::SubmitEntry(T)`
+- It does not currently track connection state, fetch-in-flight state, reconnect/catch-up completion, append acknowledgements/failures, or `EntryBuffer`.
+- `crates/consensus/src/entry_buffer.rs` separately owns contiguous entry application, skipped payload handling, and pending submission echo tracking.
+- `crates/prosthetic-conscience/src/consensus_cli/app.rs` still owns reconnect handling, catch-up pagination, queued-event draining, and submission resume.
+
+## Planned SessionCoordinator Contract
+
+The next sections describe the still-planned higher-level wrapper, not the currently shipped reducer in `crates/consensus/src/coordinator.rs`.
+
+- The planned `SessionCoordinator` is the pure source of truth for client-side session sync policy.
 - It consumes `CoordinatorEvent` values from an impure shell and returns `CoordinatorAction` values for the shell to execute.
 - It performs no I/O, no async waiting, no sleeping, no printing, and no direct access to websocket, HTTP, or channels.
 - It owns only pure decision state:
@@ -110,22 +124,22 @@ The coordinator requests work but does not perform it:
 
 The coordinator is responsible for when those pure operations are invoked and what actions follow from them.
 
-## Invariants
+## Correctness Properties
 
-These are universal properties that must hold for every reachable coordinator state after any valid event sequence.
+Canonical definitions live in [`testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md).
 
-### Structural invariants
+These are coordinator correctness properties over reachable states and valid event sequences. Constraints are listed separately so they do not get confused with invariants.
+
+### Constraints
 
 - `SC1` — The coordinator performs no I/O.
   - All network, timer, channel, and UI work is expressed only through returned actions.
 - `SC2` — Session-management decisions are centralized in the coordinator.
   - Connection state, catch-up state, append send gating, and submission resume policy must not be duplicated as independent sources of truth in the shell.
-- `SC3` — State transitions are deterministic.
-  - For a fixed starting state and event sequence, the coordinator must always produce the same next state and same ordered action sequence.
-- `SC4` — Event and action classification helpers must use explicit match arms with no wildcard.
-  - Adding a new event or action variant must force the author to decide how it affects invariants and tests.
+- `SC3` — Event and action classification helpers use explicit match arms with no wildcard.
+  - Adding a new event or action variant must force the author to decide how it affects correctness properties and tests.
 
-### Log synchronization invariants
+### Log synchronization properties
 
 - `LG1` — `buffer.next_index()` is monotonic non-decreasing.
 - `LG2` — Every session index `< buffer.next_index()` has already been finalized exactly once as either applied or skipped.
@@ -137,7 +151,7 @@ These are universal properties that must hold for every reachable coordinator st
 - `LG8` — The applied engine state depends only on the indexed session log prefix, not on whether entries arrived via live websocket events or HTTP catch-up pages.
 - `LG9` — `EntryApplied` and `EntrySkipped` actions correspond exactly to entries that became newly contiguous in that transition.
 
-### Connection invariants
+### Connection properties
 
 - `CN1` — `connected` changes only in response to `Disconnected` and `Reconnected` events.
 - `CN2` — Duplicate disconnects and duplicate reconnects are idempotent.
@@ -146,7 +160,7 @@ These are universal properties that must hold for every reachable coordinator st
 - `CN4` — `Warning` events are observational only.
   - They emit `WarningReceived` but do not change connection, catch-up, or submission state.
 
-### Catch-up invariants
+### Catch-up properties
 
 - `CU1` — Entering catch-up always starts from `buffer.next_index()`.
 - `CU2` — While `catching_up == true`, the coordinator must not emit `SendAppend`.
@@ -154,10 +168,10 @@ These are universal properties that must hold for every reachable coordinator st
 - `CU4` — Catch-up mode ends only on `CatchUpComplete`.
 - `CU5` — `CatchUpComplete` emits `DrainQueuedEvents` before any submission-resume send is emitted.
   - This is the race boundary between HTTP replay and already-queued live websocket events.
-- `CU6` — Catch-up page processing uses the same entry application path and invariants as live entry processing.
+- `CU6` — Catch-up page processing uses the same entry application path and correctness properties as live entry processing.
 - `CU7` — A full catch-up page may request another `FetchEntries`; a non-full final page does not itself finalize catch-up unless the shell reports `CatchUpComplete`.
 
-### Submission invariants
+### Submission properties
 
 - `SB1` — `pending_submission.next_entry` is monotonic non-decreasing.
 - `SB2` — Submission progress advances only when the echoed session payload matches the expected pending payload.
@@ -177,7 +191,7 @@ These are universal properties that must hold for every reachable coordinator st
 - `SB10` — `SubmissionComplete` may only be emitted after every payload in the pending submission has been echoed and `finish_submission()` has succeeded.
 - `SB11` — `SubmissionComplete` is emitted at most once per pending submission.
 
-### Action-contract invariants
+### Action-contract properties
 
 - `AC1` — `ConnectionChanged { connected }` is emitted if and only if the connection-state boolean actually changed.
 - `AC2` — `SubmissionPaused` is emitted only when progress is blocked by transport state rather than by local draft state.
@@ -185,7 +199,7 @@ These are universal properties that must hold for every reachable coordinator st
 - `AC4` — `AppendAcknowledged` means only that the transport accepted the send request, not that the entry exists in the session log.
 - `AC5` — `CatchUpComplete` means only that the shell has exhausted catch-up fetches, not that queued live events have already been drained.
 
-### Conditional liveness invariants
+### Conditional liveness properties
 
 - `LV1` — If missing indices eventually arrive, every buffered out-of-order entry is eventually finalized as applied or skipped.
 - `LV2` — If the transport eventually reconnects and the shell keeps executing requested fetches, catch-up eventually reaches the current session log frontier.
@@ -263,64 +277,68 @@ The current CLI behavior is correct but encoded imperatively across:
 
 The core design principle is the same one used in the gateway kernel: if it is a decision, it belongs in the pure state machine. If it is I/O, it belongs in the shell.
 
-## Implemented: Coordinator Reducer
+## Implemented: Current Coordinator Reducer
 
-`crates/consensus/src/coordinator.rs` implements the first layer of the coordinator as a pure reducer: `reduce(state, event) -> Transition { state, effects }`. This layer handles entry reception, gap detection, connection state, and paginated catch-up. It does not yet own `EntryBuffer` or submission tracking — those remain in the CLI app layer.
+`crates/consensus/src/coordinator.rs` currently implements a narrower first layer:
+
+- `init(page_limit, latest) -> Result<Transition<T>, InitError>`
+- `sync_to_latest(state, latest) -> Transition<T>`
+- `reduce(state, event) -> Transition<T>`
+
+This layer does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission resume — those remain in the CLI app layer.
 
 ### Types
 
 ```rust
-enum FetchTarget {
-    End,           // keep fetching until a short page (initial catch-up)
-    Index(usize),  // fetch until next_expected >= target (gap fill)
+pub struct LatestEntry<T> {
+    pub index: usize,
+    pub entry: T,
 }
 
 pub struct CoordinatorState<T> {
-    next_expected: usize,
-    received: BTreeMap<usize, T>,
-    connected: bool,
-    fetch_target: Option<FetchTarget>,
+    slots: Vec<Slot<T>>,
     page_limit: usize,
 }
 
 pub enum Event<T> {
     Received { index: usize, entry: T },
     EntryCreated(T),
-    Connected,
-    Disconnected,
-    FetchResult { entries: Vec<(usize, T)> },
 }
 
 pub enum Effect<T> {
-    FetchMissing { after: usize, limit: usize },
+    FetchMissing { from: usize, limit: usize },
     SubmitEntry(T),
 }
 ```
 
+`Slot<T>` is internal to the reducer and has two states: `Requested` and `Received(T)`.
+
 ### Transition rules
 
-- **`Received`**: applies entry if `index == next_expected`, buffers if future, no-op if already seen. Gap detection starts a paginated fetch (`FetchTarget::Index(max_received)`) if no fetch is in progress, or upgrades an existing target if the new gap extends beyond it.
-- **`EntryCreated`**: emits `SubmitEntry` unconditionally.
-- **`Connected`**: sets `connected = true`, starts `FetchTarget::End` fetch from `next_expected` if no fetch in progress.
-- **`Disconnected`**: sets `connected = false`, clears `fetch_target`.
-- **`FetchResult`**: applies all entries, then checks completion: `Index(n)` done when `next_expected >= n`, `End` done when `entries.len() < page_limit`. Otherwise emits next `FetchMissing`.
+- **`init(page_limit, latest)`**: validates `page_limit > 0`, starts with empty slots, then delegates to `sync_to_latest`.
+- **`sync_to_latest(Some(latest))`**: extends `slots` up to `latest.index` without shrinking existing state, fills the latest slot only if it is still requested, and emits `FetchMissing` effects for every remaining requested range.
+- **`sync_to_latest(None)`**: no-op.
+- **`Received` on an existing `Requested` slot**: fills the slot and emits no effects.
+- **`Received` on an existing `Received` slot**: no-op; first writer wins.
+- **`Received` beyond the current upper bound**: extends the slots vector with requested holes, stores the received entry, and emits bounded ascending `FetchMissing` effects that cover the new holes.
+- **`EntryCreated`**: emits exactly one `SubmitEntry` and does not modify `slots`.
 
-### Implemented invariants (tested)
+### Implemented semantic properties with current test evidence
 
-- Every `FetchMissing` has `limit <= page_limit` and `limit > 0`.
-- At most one fetch is in progress at any time (`fetch_target.is_some()` gates emission).
-- `Connected` emits exactly one `FetchMissing` if no fetch is in progress.
-- `Disconnected` clears `fetch_target`.
-- `FetchResult` with a full page emits another `FetchMissing`; short page completes.
-- `connected` flag tracks `Connected`/`Disconnected` events faithfully.
-- Gap detection during an active fetch upgrades the target instead of starting a duplicate.
+- `next_expected()` is the first requested slot, or `slots.len()` if no holes remain.
+- `slots.len()` never decreases.
+- Existing received slots are never overwritten.
+- Every emitted fetch range is ascending, non-overlapping, bounded by `page_limit`, and within `slots.len()`.
+- Every newly introduced requested slot is covered by at least one `FetchMissing`.
 
-### Test coverage (28 tests)
+### Transition-rule / panic-safety coverage
 
-- 12 targeted entry/gap tests (receive, buffer, gap detect, frontier advance)
-- 6 Connected/Disconnected tests (fetch emission, duplicate suppression, flag tracking)
-- 6 FetchResult pagination tests (full page, short page, empty page, multi-page lifecycle)
-- 4 property-based tests (limit bounds, connected flag, disconnect clears fetch, no duplicate FetchMissing per transition)
+- `init(0, ...)` returns `InitError::InvalidPageLimit` instead of panicking.
+
+### Test coverage (20 tests)
+
+- 13 targeted tests for init/sync semantics, duplicate suppression, eager fetch planning, `next_expected()` behavior, and public type shapes.
+- 7 property-based tests for first-writer-wins, hole coverage, fetch-range bounds, slot-layout consistency, state monotonicity, fetch coverage, and `EntryCreated` slot preservation.
 
 ## Protocol Integrity Concerns
 
@@ -363,15 +381,15 @@ Splitting entries into cleartext metadata (relations/graph topology) and opaque 
 
 - `EntryBuffer` is implemented and satisfies the pure log-application and submission-echo portion of the design.
 - `BackoffPolicy` is implemented as a pure helper in `consensus`.
-- Coordinator reducer is implemented with entry reception, gap detection, connection state, and paginated catch-up (28 tests).
-- `SessionCoordinator` (the higher-level wrapper owning `EntryBuffer`, submission resume, and the full event/action contract described above) is not yet implemented.
+- Coordinator reducer is implemented with bootstrap from an optional latest entry, slot-based gap detection, page-bounded fetch planning, and local submit-effect emission (20 tests).
+- `SessionCoordinator` (the higher-level wrapper owning `EntryBuffer`, reconnect/catch-up policy, submission resume, and the full event/action contract described above) is not yet implemented.
 - Current CLI behavior is the reference behavior that the coordinator extraction must preserve.
 
 ## Load into Context When
 
 - Extracting session coordination logic from `consensus_cli/app.rs`.
 - Designing property tests for reconnect, catch-up, and submission resume.
-- Reviewing whether a new event or action variant preserves the state machine invariants.
+- Reviewing whether a new event or action variant preserves the coordinator correctness properties.
 - Building a browser/WASM session wrapper around the consensus core.
 - Evaluating protocol integrity or version compatibility concerns.
 
@@ -385,3 +403,4 @@ Splitting entries into cleartext metadata (relations/graph topology) and opaque 
 - `crates/consensus/src/coordinator.rs`
 - `docs/codebase-state/session-behavior.md`
 - `docs/codebase-state/core-logic-invariants.md`
+- `docs/codebase-state/testing-methodology-and-invariants.md`
