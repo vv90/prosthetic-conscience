@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 62666201ed2c7c11c9e86a489522214ea01f089cd969a0f1cfa1130bfba431fc # shrinks to indices = [1, 2]
+cc 55d46c105afca6185005136cee849209b304bdb7862a8eab326b645f69c62f45 # shrinks to ops = [Receive { index: 30, value: 0 }, Receive { index: 31, value: 0 }]

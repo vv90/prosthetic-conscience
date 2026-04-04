@@ -929,18 +929,18 @@ mod tests {
         engine
             .draft_stance(ClaimRef::Draft(draft_claim), Position::Block)
             .unwrap();
-        let entries = engine.submit_drafts();
+        let entries = engine.submit_drafts().unwrap();
         assert_eq!(entries.len(), 2);
         assert!(engine.show_drafts().is_empty());
         assert!(matches!(
             &entries[0],
             Entry::Claim { claim_id, author, body, .. }
-                if claim_id == &ClaimId("draft-0".into()) && author == "assistant" && body == "A"
+                if *claim_id == ClaimId("draft-0".into()) && author == "assistant" && body == "A"
         ));
         assert!(matches!(
             &entries[1],
             Entry::Stance { target_id, author, position }
-                if target_id == &ClaimId("draft-0".into())
+                if *target_id == ClaimId("draft-0".into())
                     && author == "assistant"
                     && *position == Position::Block
         ));
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn submit_empty_returns_empty() {
         let mut engine = engine();
-        assert!(engine.submit_drafts().is_empty());
+        assert!(engine.submit_drafts().unwrap().is_empty());
     }
 
     #[test]
@@ -980,7 +980,7 @@ mod tests {
             .unwrap();
 
         let committed = engine.overview();
-        let preview = engine.preview_overview();
+        let preview = engine.preview_overview().unwrap();
         assert_eq!(committed.total_claims, 1);
         assert_eq!(preview.total_claims, 2);
         assert_eq!(preview.proposals.len(), 1);
@@ -1027,6 +1027,7 @@ mod tests {
 
         let detail = engine
             .preview_claim_detail(&ClaimRef::Committed(ClaimId("c1".into())))
+            .unwrap()
             .unwrap();
         assert_eq!(detail.attacked_by.len(), 1);
     }
@@ -1061,7 +1062,7 @@ mod tests {
             )
             .unwrap();
 
-        let impact = engine.impact_analysis();
+        let impact = engine.impact_analysis().unwrap();
         assert_eq!(impact.new_claims.len(), 1);
         assert_eq!(impact.new_claims[0].draft_id, draft_id);
         assert_eq!(impact.status_changes.len(), 1);
@@ -1101,7 +1102,9 @@ mod tests {
             .unwrap();
 
         let mut ids = vec!["final-1", "final-2"].into_iter();
-        let bundle = engine.submission_bundle(|| ClaimId(ids.next().unwrap().into()));
+        let bundle = engine
+            .submission_bundle(|| ClaimId(ids.next().unwrap().into()))
+            .unwrap();
 
         assert_eq!(bundle.claim_id_map.len(), 1);
         assert_eq!(bundle.claim_id_map[0].draft_id, draft_claim_id);

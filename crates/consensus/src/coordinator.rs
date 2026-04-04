@@ -200,6 +200,11 @@ mod tests {
         }
     }
 
+    /// Unwrapping helper for tests — `init` returns Result now.
+    fn test_init(page_limit: usize, latest: Option<LatestEntry<Dummy>>) -> Transition<Dummy> {
+        init(page_limit, latest).unwrap()
+    }
+
     fn fetch_ranges(effects: &[Effect<Dummy>]) -> Vec<(usize, usize)> {
         effects
             .iter()
@@ -261,7 +266,7 @@ mod tests {
 
     #[test]
     fn init_without_latest_returns_empty_state_and_no_effects() {
-        let transition = init::<Dummy>(3, None);
+        let transition = test_init(3, None);
 
         assert!(transition.state.slots.is_empty());
         assert_eq!(transition.state.next_expected(), 0);
@@ -269,14 +274,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "page_limit must be > 0")]
-    fn init_with_zero_page_limit_panics() {
-        let _ = init::<Dummy>(0, None);
+    fn init_with_zero_page_limit_returns_error() {
+        assert!(init::<Dummy>(0, None).is_err());
     }
 
     #[test]
     fn init_with_latest_creates_requested_holes_and_fetches_them() {
-        let transition = init(2, Some(latest(3, 30)));
+        let transition = test_init(2, Some(latest(3, 30)));
 
         assert_eq!(
             transition.state.slots,
@@ -299,7 +303,7 @@ mod tests {
 
     #[test]
     fn sync_to_latest_none_is_noop() {
-        let initial = init(3, Some(latest(2, 20))).state;
+        let initial = test_init(3, Some(latest(2, 20))).state;
 
         let transition = sync_to_latest(initial.clone(), None::<LatestEntry<Dummy>>);
 
@@ -309,7 +313,7 @@ mod tests {
 
     #[test]
     fn sync_to_latest_never_shrinks_state() {
-        let initial = init(3, Some(latest(5, 50))).state;
+        let initial = test_init(3, Some(latest(5, 50))).state;
 
         let transition = sync_to_latest(initial.clone(), Some(latest(2, 20)));
 
@@ -319,7 +323,7 @@ mod tests {
 
     #[test]
     fn sync_to_latest_fills_requested_latest_slot() {
-        let initial = init(4, Some(latest(5, 50))).state;
+        let initial = test_init(4, Some(latest(5, 50))).state;
 
         let transition = sync_to_latest(initial, Some(latest(3, 30)));
 
@@ -336,7 +340,7 @@ mod tests {
     #[test]
     fn sync_to_latest_preserves_existing_received_value() {
         let initial = reduce(
-            init::<Dummy>(4, None).state,
+            test_init(4, None).state,
             Event::Received {
                 index: 3,
                 entry: Dummy(30),
@@ -352,7 +356,7 @@ mod tests {
     #[test]
     fn duplicate_received_preserves_first_value_and_emits_no_effects() {
         let first = reduce(
-            init::<Dummy>(4, None).state,
+            test_init(4, None).state,
             Event::Received {
                 index: 2,
                 entry: Dummy(20),
@@ -374,7 +378,7 @@ mod tests {
 
     #[test]
     fn received_requested_slot_fills_without_effects() {
-        let initial = init(4, Some(latest(3, 30))).state;
+        let initial = test_init(4, Some(latest(3, 30))).state;
 
         let transition = reduce(
             initial,
@@ -391,7 +395,7 @@ mod tests {
     #[test]
     fn future_received_extends_state_and_emits_eager_fetches() {
         let transition = reduce(
-            init::<Dummy>(2, None).state,
+            test_init(2, None).state,
             Event::Received {
                 index: 4,
                 entry: Dummy(40),
@@ -419,14 +423,14 @@ mod tests {
 
     #[test]
     fn entry_created_emits_exactly_one_submit_entry() {
-        let transition = reduce(init::<Dummy>(4, None).state, Event::EntryCreated(Dummy(42)));
+        let transition = reduce(test_init(4, None).state, Event::EntryCreated(Dummy(42)));
 
         assert_eq!(transition.effects, vec![Effect::SubmitEntry(Dummy(42))]);
     }
 
     #[test]
     fn next_expected_matches_first_requested_slot_or_len() {
-        let mut state = init(4, Some(latest(3, 30))).state;
+        let mut state = test_init(4, Some(latest(3, 30))).state;
         assert_eq!(state.next_expected(), 0);
 
         state = reduce(
@@ -505,7 +509,7 @@ mod tests {
         fn first_writer_wins_for_duplicate_indices(
             events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
         ) {
-            let mut state = init::<Dummy>(5, None).state;
+            let mut state = test_init(5, None).state;
             let mut expected = BTreeMap::new();
 
             for (index, value) in events {
@@ -520,7 +524,7 @@ mod tests {
         fn future_received_covers_all_missing_slots_below_upper_bound(
             events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
         ) {
-            let mut state = init::<Dummy>(5, None).state;
+            let mut state = test_init(5, None).state;
 
             for (index, value) in events {
                 let len_before = state.slots.len();
@@ -551,7 +555,7 @@ mod tests {
             )
         ) {
             let page_limit = 5;
-            let mut state = init::<Dummy>(page_limit, None).state;
+            let mut state = test_init(page_limit, None).state;
 
             for op in ops {
                 let transition = apply_op(state, op);
@@ -574,22 +578,6 @@ mod tests {
         }
 
         #[test]
-        fn next_expected_monotonic_non_decreasing_across_received_events(
-            events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
-        ) {
-            let mut state = init::<Dummy>(5, None).state;
-            let mut previous = state.next_expected();
-
-            for (index, value) in events {
-                let transition = reduce(state, Event::Received { index, entry: Dummy(value) });
-                let next = transition.state.next_expected();
-                prop_assert!(next >= previous);
-                previous = next;
-                state = transition.state;
-            }
-        }
-
-        #[test]
         fn next_expected_matches_slot_layout_after_ops(
             ops in prop::collection::vec(
                 prop_oneof![
@@ -600,7 +588,7 @@ mod tests {
                 0..64,
             )
         ) {
-            let mut state = init::<Dummy>(5, None).state;
+            let mut state = test_init(5, None).state;
 
             for op in ops {
                 let transition = apply_op(state, op);
@@ -616,6 +604,147 @@ mod tests {
 
                 state = transition.state;
             }
+        }
+
+        // S1: Received slots are never overwritten.
+        // S2: slots.len() never decreases.
+        // N1: next_expected() never decreases.
+        #[test]
+        fn state_monotonicity_across_all_ops(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
+                    prop::option::of((0usize..32, 0usize..1000))
+                        .prop_map(Op::SyncLatest),
+                ],
+                0..64,
+            )
+        ) {
+            let mut state = test_init(5, None).state;
+            let mut prev_len = state.slots.len();
+            let mut prev_next = state.next_expected();
+            let mut prev_received = received_values(&state);
+
+            for op in ops {
+                let transition = apply_op(state, op);
+
+                // S2: slots never shrink.
+                prop_assert!(
+                    transition.state.slots.len() >= prev_len,
+                    "slots.len() decreased from {} to {}",
+                    prev_len, transition.state.slots.len()
+                );
+
+                // N1: next_expected never decreases.
+                let next = transition.state.next_expected();
+                prop_assert!(
+                    next >= prev_next,
+                    "next_expected decreased from {} to {}",
+                    prev_next, next
+                );
+
+                // S1: previously Received slots keep their values.
+                let new_received = received_values(&transition.state);
+                for (idx, value) in &prev_received {
+                    prop_assert!(
+                        new_received.get(idx) == Some(value),
+                        "Received slot {} was overwritten", idx
+                    );
+                }
+
+                prev_len = transition.state.slots.len();
+                prev_next = next;
+                prev_received = new_received;
+                state = transition.state;
+            }
+        }
+
+        // F1 (bound): every FetchMissing range fits within slots.len().
+        // F3: every Requested slot created by any op is covered by a FetchMissing.
+        // F4: no FetchMissing when no new Requested slots are created.
+        #[test]
+        fn fetch_coverage_across_all_ops(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
+                    prop::option::of((0usize..32, 0usize..1000))
+                        .prop_map(Op::SyncLatest),
+                ],
+                0..64,
+            )
+        ) {
+            let page_limit = 5;
+            let mut state = test_init(page_limit, None).state;
+
+            for op in ops {
+                let prev_len = state.slots.len();
+                let is_receive = matches!(op, Op::Receive { .. });
+                let prev_requested: Vec<usize> = requested_indices(&state);
+                let transition = apply_op(state, op);
+                let new_requested: Vec<usize> = requested_indices(&transition.state);
+
+                // Newly created Requested slots = in new but not in prev.
+                let prev_set: std::collections::HashSet<usize> = prev_requested.iter().copied().collect();
+                let newly_requested: Vec<usize> = new_requested.iter()
+                    .filter(|i| !prev_set.contains(i))
+                    .copied()
+                    .collect();
+
+                // F1 (bound): from + limit <= slots.len().
+                for effect in &transition.effects {
+                    if let Effect::FetchMissing { from, limit } = effect {
+                        prop_assert!(
+                            from + limit <= transition.state.slots.len(),
+                            "FetchMissing {{ from: {from}, limit: {limit} }} exceeds slots.len() {}",
+                            transition.state.slots.len()
+                        );
+                    }
+                }
+
+                // F3: every newly created Requested slot is covered.
+                for index in &newly_requested {
+                    prop_assert!(
+                        is_covered(*index, &transition.effects),
+                        "newly Requested slot {index} not covered by any FetchMissing"
+                    );
+                }
+
+                // F4: Received at an index that does not extend slots
+                // emits no FetchMissing effects.
+                if is_receive && transition.state.slots.len() == prev_len {
+                    let has_fetch = transition.effects.iter()
+                        .any(|e| matches!(e, Effect::FetchMissing { .. }));
+                    prop_assert!(
+                        !has_fetch,
+                        "FetchMissing emitted by Received that did not extend slots"
+                    );
+                }
+
+                state = transition.state;
+            }
+        }
+
+        // U1: EntryCreated does not modify slots.
+        #[test]
+        fn entry_created_does_not_modify_slots(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
+                    prop::option::of((0usize..32, 0usize..1000))
+                        .prop_map(Op::SyncLatest),
+                ],
+                0..32,
+            ),
+            value in 0usize..1000,
+        ) {
+            let mut state = test_init(5, None).state;
+            for op in ops {
+                state = apply_op(state, op).state;
+            }
+
+            let slots_before = state.slots.clone();
+            let transition = reduce(state, Event::EntryCreated(Dummy(value)));
+            prop_assert_eq!(transition.state.slots, slots_before);
         }
     }
 }
