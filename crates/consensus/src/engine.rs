@@ -324,7 +324,10 @@ impl ConsensusEngine {
             .iter()
             .position(|d| d.id == id)
             .ok_or(EngineError::DraftNotFound(id))?;
-        let removed_is_claim = matches!(self.drafts[pos].entry, DraftContent::Claim { .. });
+        let removed_is_claim = self
+            .drafts
+            .get(pos)
+            .is_some_and(|draft| matches!(draft.entry, DraftContent::Claim { .. }));
         if removed_is_claim
             && let Some(referenced_by) = self
                 .drafts
@@ -343,17 +346,14 @@ impl ConsensusEngine {
     }
 
     /// Drain all drafts and return their entries for submission.
-    pub fn submit_drafts(&mut self) -> Vec<Entry> {
+    pub fn submit_drafts(&mut self) -> Result<Vec<Entry>, EngineError> {
         let entries: Vec<Entry> = self
             .drafts
             .iter()
-            .map(|draft| {
-                self.materialize_draft_for_preview(draft)
-                    .expect("draft refs are validated before submission")
-            })
-            .collect();
+            .map(|draft| self.materialize_draft_for_preview(draft))
+            .collect::<Result<_, _>>()?;
         self.drafts.clear();
-        entries
+        Ok(entries)
     }
 
     /// Discard all drafts.
@@ -364,42 +364,46 @@ impl ConsensusEngine {
     // -- Preview (committed + drafts) ---------------------------------------
 
     /// Overview including uncommitted drafts.
-    pub fn preview_overview(&self) -> OverviewData {
-        let merged = self.merged_entries();
+    pub fn preview_overview(&self) -> Result<OverviewData, EngineError> {
+        let merged = self.merged_entries()?;
         let (state, statuses) = Self::materialize(&merged);
-        render::overview(&state, &statuses)
+        Ok(render::overview(&state, &statuses))
     }
 
     /// Claim detail including uncommitted drafts.
-    pub fn preview_claim_detail(&self, claim: &ClaimRef) -> Option<ClaimDetail> {
-        let claim_id = self
-            .resolve_claim_ref_for_preview(claim)
-            .expect("draft refs are validated before preview");
-        let merged = self.merged_entries();
+    pub fn preview_claim_detail(
+        &self,
+        claim: &ClaimRef,
+    ) -> Result<Option<ClaimDetail>, EngineError> {
+        let claim_id = self.resolve_claim_ref_for_preview(claim)?;
+        let merged = self.merged_entries()?;
         let (state, statuses) = Self::materialize(&merged);
-        render::claim_detail(&state, &statuses, &claim_id)
+        Ok(render::claim_detail(&state, &statuses, &claim_id))
     }
 
     /// Compare committed state with committed + drafts.
-    pub fn impact_analysis(&self) -> ImpactAnalysis {
+    pub fn impact_analysis(&self) -> Result<ImpactAnalysis, EngineError> {
         let (committed_state, committed_statuses) = Self::materialize(&self.log);
-        let merged = self.merged_entries();
+        let merged = self.merged_entries()?;
         let (preview_state, preview_statuses) = Self::materialize(&merged);
-        Self::build_impact_analysis(
+        Ok(Self::build_impact_analysis(
             &self.drafts,
             &self.draft_author,
             &committed_state,
             &committed_statuses,
             &preview_state,
             &preview_statuses,
-        )
+        ))
     }
 
     /// Clone the current drafts into a finalized submission bundle.
     ///
     /// Draft claim ids are rewritten using `next_claim_id`, while references to
     /// existing committed claim ids are preserved.
-    pub fn submission_bundle<F>(&self, mut next_claim_id: F) -> SubmissionBundle
+    pub fn submission_bundle<F>(
+        &self,
+        mut next_claim_id: F,
+    ) -> Result<SubmissionBundle, EngineError>
     where
         F: FnMut() -> ClaimId,
     {
@@ -420,9 +424,8 @@ impl ConsensusEngine {
             .map(|draft| {
                 draft_ids.push(draft.id);
                 self.materialize_draft_for_submission(draft, &claim_id_map)
-                    .expect("draft refs are validated before submission")
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let mut claim_id_map: Vec<ClaimIdMapping> = claim_id_map
             .into_iter()
@@ -430,11 +433,11 @@ impl ConsensusEngine {
             .collect();
         claim_id_map.sort_by_key(|mapping| mapping.draft_id.0);
 
-        SubmissionBundle {
+        Ok(SubmissionBundle {
             draft_ids,
             entries,
             claim_id_map,
-        }
+        })
     }
 
     // -- Internal -----------------------------------------------------------
@@ -445,18 +448,15 @@ impl ConsensusEngine {
         id
     }
 
-    fn merged_entries(&self) -> Vec<Entry> {
+    fn merged_entries(&self) -> Result<Vec<Entry>, EngineError> {
         let mut merged = self.log.clone();
         merged.extend(
             self.drafts
                 .iter()
-                .map(|draft| {
-                    self.materialize_draft_for_preview(draft)
-                        .expect("draft refs are validated before preview")
-                })
-                .collect::<Vec<_>>(),
+                .map(|draft| self.materialize_draft_for_preview(draft))
+                .collect::<Result<Vec<_>, _>>()?,
         );
-        merged
+        Ok(merged)
     }
 
     /// Run the full pipeline: replay → graph → solve → status.

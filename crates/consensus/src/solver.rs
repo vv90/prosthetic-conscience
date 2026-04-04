@@ -46,7 +46,10 @@ impl Graph {
     }
 
     pub fn attackers(&self, target: NodeId) -> &[NodeId] {
-        &self.attacked_by[target.0 as usize]
+        self.attacked_by
+            .get(target.0 as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 
@@ -77,10 +80,14 @@ impl GraphBuilder {
         let mut supported_by = vec![Vec::new(); n];
 
         for (source, target) in self.attacks {
-            attacked_by[target.0 as usize].push(source);
+            if let Some(attackers) = attacked_by.get_mut(target.0 as usize) {
+                attackers.push(source);
+            }
         }
         for (source, target) in self.supports {
-            supported_by[target.0 as usize].push(source);
+            if let Some(supporters) = supported_by.get_mut(target.0 as usize) {
+                supporters.push(source);
+            }
         }
 
         Graph {
@@ -108,24 +115,34 @@ pub fn grounded_labelling(graph: &Graph) -> Vec<Label> {
         let mut changed = false;
 
         for node in 0..n {
-            if labels[node] != Label::Undec {
+            if labels.get(node).copied() != Some(Label::Undec) {
                 continue;
             }
 
-            let attackers = &graph.attacked_by[node];
+            let attackers = graph
+                .attacked_by
+                .get(node)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
 
-            let all_attackers_out = attackers.iter().all(|a| labels[a.0 as usize] == Label::Out);
+            let all_attackers_out = attackers
+                .iter()
+                .all(|a| labels.get(a.0 as usize).copied() == Some(Label::Out));
 
             if all_attackers_out {
-                labels[node] = Label::In;
-                changed = true;
+                if let Some(label) = labels.get_mut(node) {
+                    *label = Label::In;
+                    changed = true;
+                }
                 continue;
             }
 
-            let any_attacker_in = attackers.iter().any(|a| labels[a.0 as usize] == Label::In);
+            let any_attacker_in = attackers
+                .iter()
+                .any(|a| labels.get(a.0 as usize).copied() == Some(Label::In));
 
-            if any_attacker_in {
-                labels[node] = Label::Out;
+            if any_attacker_in && let Some(label) = labels.get_mut(node) {
+                *label = Label::Out;
                 changed = true;
             }
         }

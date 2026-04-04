@@ -61,7 +61,7 @@ pub fn compute_all(
             .filter(|s| s.target_id == *claim_id)
             .collect();
 
-        let status = epistemic_status(labels[i], &stances);
+        let status = epistemic_status(labels.get(i).copied().unwrap_or(Label::Undec), &stances);
         result.insert(claim_id.clone(), status);
     }
 

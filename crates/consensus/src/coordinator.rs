@@ -1,25 +1,32 @@
-//! Minimal session coordination interface.
+//! Pure session coordination reducer.
 //!
-//! This module intentionally defines only the smallest reducer-shaped boundary
-//! for stream entry reception, gap fetching, and entry submission.
+//! This module defines a small reducer-shaped boundary for:
+//! - bootstrapping from the latest known indexed entry
+//! - receiving live or fetched stream entries
+//! - planning fetches for missing ranges
+//! - emitting submission requests for locally created entries
 //!
-//! Invariants for the current surface:
-//! - Receiving an entry with a known index does not modify state or produce effects.
-//! - Every emitted `Effect::FetchMissing` has `limit > 0`.
-//! - When a transition learns a new received index, every missing index below
-//!   the maximum received index is covered by at least one `FetchMissing`
-//!   interval `[after, after + limit)`.
-//! - `Event::EntryCreated` emits exactly one `Effect::SubmitEntry`.
+//! The coordinator is synchronous, performs no I/O, and must never panic in
+//! non-test code.
 
-use std::collections::BTreeSet;
-use std::marker::PhantomData;
+/// A latest known indexed entry used for bootstrap or resync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestEntry<T> {
+    pub index: usize,
+    pub entry: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slot<T> {
+    Requested,
+    Received(T),
+}
 
 /// Opaque reducer state for stream coordination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinatorState<T> {
-    next_expected: usize,
-    received: BTreeSet<usize>,
-    marker: PhantomData<T>,
+    slots: Vec<Slot<T>>,
+    page_limit: usize,
 }
 
 /// Inputs to the coordinator.
@@ -32,7 +39,7 @@ pub enum Event<T> {
 /// Outputs requested by the coordinator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect<T> {
-    FetchMissing { after: usize, limit: usize },
+    FetchMissing { from: usize, limit: usize },
     SubmitEntry(T),
 }
 
@@ -43,52 +50,82 @@ pub struct Transition<T> {
     pub effects: Vec<Effect<T>>,
 }
 
+/// Errors from coordinator bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InitError {
+    #[error("page_limit must be > 0")]
+    InvalidPageLimit,
+}
+
 impl<T> CoordinatorState<T> {
-    /// Create an empty coordinator state.
-    pub fn new() -> Self {
-        Self {
-            next_expected: 0,
-            received: BTreeSet::new(),
-            marker: PhantomData,
-        }
+    /// The first missing slot, or the known upper bound if no slots are missing.
+    pub fn next_expected(&self) -> usize {
+        self.slots
+            .iter()
+            .position(|slot| matches!(slot, Slot::Requested))
+            .unwrap_or(self.slots.len())
+    }
+}
+
+/// Create coordinator state from a page limit and optional latest known entry.
+pub fn init<T>(
+    page_limit: usize,
+    latest: Option<LatestEntry<T>>,
+) -> Result<Transition<T>, InitError> {
+    if page_limit == 0 {
+        return Err(InitError::InvalidPageLimit);
     }
 
-    /// The next stream index the coordinator expects to receive.
-    pub fn next_expected(&self) -> usize {
-        self.next_expected
+    let state = CoordinatorState {
+        slots: Vec::new(),
+        page_limit,
+    };
+
+    Ok(sync_to_latest(state, latest))
+}
+
+/// Update coordinator state to the latest known entry without shrinking state.
+pub fn sync_to_latest<T>(
+    mut state: CoordinatorState<T>,
+    latest: Option<LatestEntry<T>>,
+) -> Transition<T> {
+    if let Some(latest) = latest {
+        apply_latest(&mut state, latest);
+        let effects = plan_missing_fetches(&state);
+        return Transition { state, effects };
+    }
+
+    Transition {
+        state,
+        effects: Vec::new(),
     }
 }
 
 /// Reduce one event into a new state and requested effects.
-pub fn reduce<T>(state: CoordinatorState<T>, event: Event<T>) -> Transition<T> {
+pub fn reduce<T>(mut state: CoordinatorState<T>, event: Event<T>) -> Transition<T> {
     match event {
         Event::Received { index, entry } => {
-            let _ = entry;
-
-            if state.received.contains(&index) {
-                return Transition {
-                    state,
-                    effects: Vec::new(),
+            if let Some(slot) = state.slots.get_mut(index) {
+                return match slot {
+                    Slot::Received(_) => Transition {
+                        state,
+                        effects: Vec::new(),
+                    },
+                    Slot::Requested => {
+                        *slot = Slot::Received(entry);
+                        Transition {
+                            state,
+                            effects: Vec::new(),
+                        }
+                    }
                 };
             }
 
-            let mut state = state;
-            state.received.insert(index);
-
-            while state.received.contains(&state.next_expected) {
-                state.next_expected += 1;
+            state.slots.resize_with(index + 1, || Slot::Requested);
+            if let Some(slot) = state.slots.get_mut(index) {
+                *slot = Slot::Received(entry);
             }
-
-            let effects = match state.received.last().copied() {
-                Some(max_received) if state.next_expected < max_received => {
-                    vec![Effect::FetchMissing {
-                        after: state.next_expected,
-                        limit: max_received - state.next_expected,
-                    }]
-                }
-                _ => Vec::new(),
-            };
-
+            let effects = plan_missing_fetches(&state);
             Transition { state, effects }
         }
         Event::EntryCreated(entry) => Transition {
@@ -98,8 +135,51 @@ pub fn reduce<T>(state: CoordinatorState<T>, event: Event<T>) -> Transition<T> {
     }
 }
 
+fn apply_latest<T>(state: &mut CoordinatorState<T>, latest: LatestEntry<T>) {
+    if latest.index >= state.slots.len() {
+        state
+            .slots
+            .resize_with(latest.index + 1, || Slot::Requested);
+    }
+
+    if matches!(state.slots.get(latest.index), Some(Slot::Requested))
+        && let Some(slot) = state.slots.get_mut(latest.index)
+    {
+        *slot = Slot::Received(latest.entry);
+    }
+}
+
+fn plan_missing_fetches<T>(state: &CoordinatorState<T>) -> Vec<Effect<T>> {
+    let mut effects = Vec::new();
+    let mut index = 0;
+
+    while index < state.slots.len() {
+        if !matches!(state.slots.get(index), Some(Slot::Requested)) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < state.slots.len() && matches!(state.slots.get(index), Some(Slot::Requested)) {
+            index += 1;
+        }
+
+        let end = index;
+        let mut from = start;
+        while from < end {
+            let limit = (end - from).min(state.page_limit);
+            effects.push(Effect::FetchMissing { from, limit });
+            from += limit;
+        }
+    }
+
+    effects
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use proptest::prelude::*;
 
     use super::*;
@@ -107,129 +187,351 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct Dummy(usize);
 
-    #[test]
-    fn state_new_starts_with_zero_frontier() {
-        let state = CoordinatorState::<Dummy>::new();
+    #[derive(Debug, Clone)]
+    enum Op {
+        Receive { index: usize, value: usize },
+        SyncLatest(Option<(usize, usize)>),
+    }
 
-        assert_eq!(state.next_expected(), 0);
+    fn latest(index: usize, value: usize) -> LatestEntry<Dummy> {
+        LatestEntry {
+            index,
+            entry: Dummy(value),
+        }
+    }
+
+    fn fetch_ranges(effects: &[Effect<Dummy>]) -> Vec<(usize, usize)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::FetchMissing { from, limit } => Some((*from, *limit)),
+                Effect::SubmitEntry(_) => None,
+            })
+            .collect()
+    }
+
+    fn requested_indices(state: &CoordinatorState<Dummy>) -> Vec<usize> {
+        state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot {
+                Slot::Requested => Some(index),
+                Slot::Received(_) => None,
+            })
+            .collect()
+    }
+
+    fn received_values(state: &CoordinatorState<Dummy>) -> BTreeMap<usize, Dummy> {
+        state
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot {
+                Slot::Requested => None,
+                Slot::Received(value) => Some((index, value.clone())),
+            })
+            .collect()
+    }
+
+    fn is_covered(index: usize, effects: &[Effect<Dummy>]) -> bool {
+        effects.iter().any(|effect| match effect {
+            Effect::FetchMissing { from, limit } => {
+                *from <= index && index < from.saturating_add(*limit)
+            }
+            Effect::SubmitEntry(_) => false,
+        })
+    }
+
+    fn apply_op(state: CoordinatorState<Dummy>, op: Op) -> Transition<Dummy> {
+        match op {
+            Op::Receive { index, value } => reduce(
+                state,
+                Event::Received {
+                    index,
+                    entry: Dummy(value),
+                },
+            ),
+            Op::SyncLatest(Some((index, value))) => {
+                sync_to_latest(state, Some(latest(index, value)))
+            }
+            Op::SyncLatest(None) => sync_to_latest(state, None),
+        }
     }
 
     #[test]
-    fn receiving_next_expected_advances_frontier_without_effects() {
-        let state = CoordinatorState::<Dummy>::new();
+    fn init_without_latest_returns_empty_state_and_no_effects() {
+        let transition = init::<Dummy>(3, None);
 
-        let transition = reduce(
-            state,
-            Event::Received {
-                index: 0,
-                entry: Dummy(0),
-            },
-        );
-
-        assert_eq!(transition.state.next_expected(), 1);
+        assert!(transition.state.slots.is_empty());
+        assert_eq!(transition.state.next_expected(), 0);
         assert!(transition.effects.is_empty());
     }
 
     #[test]
-    fn receiving_known_index_is_noop() {
-        let first = reduce(
-            CoordinatorState::<Dummy>::new(),
+    #[should_panic(expected = "page_limit must be > 0")]
+    fn init_with_zero_page_limit_panics() {
+        let _ = init::<Dummy>(0, None);
+    }
+
+    #[test]
+    fn init_with_latest_creates_requested_holes_and_fetches_them() {
+        let transition = init(2, Some(latest(3, 30)));
+
+        assert_eq!(
+            transition.state.slots,
+            vec![
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Received(Dummy(30)),
+            ]
+        );
+        assert_eq!(transition.state.next_expected(), 0);
+        assert_eq!(
+            transition.effects,
+            vec![
+                Effect::FetchMissing { from: 0, limit: 2 },
+                Effect::FetchMissing { from: 2, limit: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn sync_to_latest_none_is_noop() {
+        let initial = init(3, Some(latest(2, 20))).state;
+
+        let transition = sync_to_latest(initial.clone(), None::<LatestEntry<Dummy>>);
+
+        assert_eq!(transition.state, initial);
+        assert!(transition.effects.is_empty());
+    }
+
+    #[test]
+    fn sync_to_latest_never_shrinks_state() {
+        let initial = init(3, Some(latest(5, 50))).state;
+
+        let transition = sync_to_latest(initial.clone(), Some(latest(2, 20)));
+
+        assert_eq!(transition.state.slots.len(), initial.slots.len());
+        assert_eq!(transition.state.slots[5], Slot::Received(Dummy(50)));
+    }
+
+    #[test]
+    fn sync_to_latest_fills_requested_latest_slot() {
+        let initial = init(4, Some(latest(5, 50))).state;
+
+        let transition = sync_to_latest(initial, Some(latest(3, 30)));
+
+        assert_eq!(transition.state.slots[3], Slot::Received(Dummy(30)));
+        assert_eq!(
+            transition.effects,
+            vec![
+                Effect::FetchMissing { from: 0, limit: 3 },
+                Effect::FetchMissing { from: 4, limit: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn sync_to_latest_preserves_existing_received_value() {
+        let initial = reduce(
+            init::<Dummy>(4, None).state,
             Event::Received {
-                index: 0,
-                entry: Dummy(0),
+                index: 3,
+                entry: Dummy(30),
+            },
+        )
+        .state;
+
+        let transition = sync_to_latest(initial, Some(latest(3, 999)));
+
+        assert_eq!(transition.state.slots[3], Slot::Received(Dummy(30)));
+    }
+
+    #[test]
+    fn duplicate_received_preserves_first_value_and_emits_no_effects() {
+        let first = reduce(
+            init::<Dummy>(4, None).state,
+            Event::Received {
+                index: 2,
+                entry: Dummy(20),
             },
         );
 
         let duplicate = reduce(
             first.state.clone(),
             Event::Received {
-                index: 0,
+                index: 2,
                 entry: Dummy(999),
             },
         );
 
         assert_eq!(duplicate.state, first.state);
         assert!(duplicate.effects.is_empty());
+        assert_eq!(duplicate.state.slots[2], Slot::Received(Dummy(20)));
     }
 
     #[test]
-    fn receiving_gap_emits_fetch_missing_covering_gap_prefix() {
+    fn received_requested_slot_fills_without_effects() {
+        let initial = init(4, Some(latest(3, 30))).state;
+
         let transition = reduce(
-            CoordinatorState::<Dummy>::new(),
+            initial,
             Event::Received {
-                index: 3,
-                entry: Dummy(3),
+                index: 1,
+                entry: Dummy(10),
             },
         );
 
-        assert_eq!(transition.state.next_expected(), 0);
+        assert_eq!(transition.state.slots[1], Slot::Received(Dummy(10)));
+        assert!(transition.effects.is_empty());
+    }
+
+    #[test]
+    fn future_received_extends_state_and_emits_eager_fetches() {
+        let transition = reduce(
+            init::<Dummy>(2, None).state,
+            Event::Received {
+                index: 4,
+                entry: Dummy(40),
+            },
+        );
+
+        assert_eq!(
+            transition.state.slots,
+            vec![
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Received(Dummy(40)),
+            ]
+        );
         assert_eq!(
             transition.effects,
-            vec![Effect::FetchMissing { after: 0, limit: 3 }]
+            vec![
+                Effect::FetchMissing { from: 0, limit: 2 },
+                Effect::FetchMissing { from: 2, limit: 2 },
+            ]
         );
     }
 
     #[test]
     fn entry_created_emits_exactly_one_submit_entry() {
-        let transition = reduce(
-            CoordinatorState::<Dummy>::new(),
-            Event::EntryCreated(Dummy(42)),
-        );
+        let transition = reduce(init::<Dummy>(4, None).state, Event::EntryCreated(Dummy(42)));
 
         assert_eq!(transition.effects, vec![Effect::SubmitEntry(Dummy(42))]);
     }
 
     #[test]
+    fn next_expected_matches_first_requested_slot_or_len() {
+        let mut state = init(4, Some(latest(3, 30))).state;
+        assert_eq!(state.next_expected(), 0);
+
+        state = reduce(
+            state,
+            Event::Received {
+                index: 0,
+                entry: Dummy(0),
+            },
+        )
+        .state;
+        assert_eq!(state.next_expected(), 1);
+
+        state = reduce(
+            state,
+            Event::Received {
+                index: 1,
+                entry: Dummy(1),
+            },
+        )
+        .state;
+        assert_eq!(state.next_expected(), 2);
+
+        state = reduce(
+            state,
+            Event::Received {
+                index: 2,
+                entry: Dummy(2),
+            },
+        )
+        .state;
+        assert_eq!(state.next_expected(), 4);
+    }
+
+    #[test]
     fn type_shapes_cover_all_public_variants() {
-        let received = Event::Received {
-            index: 3,
-            entry: Dummy(3),
-        };
-        let entry_created = Event::EntryCreated(Dummy(4));
-        let fetch_missing = Effect::<Dummy>::FetchMissing {
-            after: 9,
-            limit: 100,
-        };
-        let submit_entry = Effect::SubmitEntry(Dummy(5));
+        let latest_entry = latest(4, 40);
+        assert_eq!(latest_entry.index, 4);
+        assert_eq!(latest_entry.entry, Dummy(40));
 
-        match received {
-            Event::Received { index, entry } => {
-                assert_eq!(index, 3);
-                assert_eq!(entry, Dummy(3));
+        let all_events = vec![
+            Event::Received {
+                index: 3,
+                entry: Dummy(30),
+            },
+            Event::EntryCreated(Dummy(50)),
+        ];
+
+        for event in all_events {
+            match event {
+                Event::Received { index, entry } => {
+                    assert_eq!(index, 3);
+                    assert_eq!(entry, Dummy(30));
+                }
+                Event::EntryCreated(entry) => assert_eq!(entry, Dummy(50)),
             }
-            Event::EntryCreated(_) => panic!("constructed wrong event variant"),
         }
 
-        match entry_created {
-            Event::EntryCreated(entry) => assert_eq!(entry, Dummy(4)),
-            Event::Received { .. } => panic!("constructed wrong event variant"),
-        }
+        let all_effects = vec![
+            Effect::FetchMissing { from: 2, limit: 3 },
+            Effect::SubmitEntry(Dummy(60)),
+        ];
 
-        match fetch_missing {
-            Effect::FetchMissing { after, limit } => {
-                assert_eq!(after, 9);
-                assert_eq!(limit, 100);
+        for effect in all_effects {
+            match effect {
+                Effect::FetchMissing { from, limit } => {
+                    assert_eq!(from, 2);
+                    assert_eq!(limit, 3);
+                }
+                Effect::SubmitEntry(entry) => assert_eq!(entry, Dummy(60)),
             }
-            Effect::SubmitEntry(_) => panic!("constructed wrong effect variant"),
-        }
-
-        match submit_entry {
-            Effect::SubmitEntry(entry) => assert_eq!(entry, Dummy(5)),
-            Effect::FetchMissing { .. } => panic!("constructed wrong effect variant"),
         }
     }
 
     proptest! {
         #[test]
-        fn every_fetch_missing_has_positive_limit(indices in prop::collection::vec(0usize..32, 0..64)) {
-            let mut state = CoordinatorState::<Dummy>::new();
+        fn first_writer_wins_for_duplicate_indices(
+            events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
+        ) {
+            let mut state = init::<Dummy>(5, None).state;
+            let mut expected = BTreeMap::new();
 
-            for index in indices {
-                let transition = reduce(state, Event::Received { index, entry: Dummy(index) });
+            for (index, value) in events {
+                let transition = reduce(state, Event::Received { index, entry: Dummy(value) });
+                expected.entry(index).or_insert(Dummy(value));
+                prop_assert_eq!(received_values(&transition.state), expected.clone());
+                state = transition.state;
+            }
+        }
 
-                for effect in &transition.effects {
-                    if let Effect::FetchMissing { limit, .. } = effect {
-                        prop_assert!(*limit > 0);
+        #[test]
+        fn future_received_covers_all_missing_slots_below_upper_bound(
+            events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
+        ) {
+            let mut state = init::<Dummy>(5, None).state;
+
+            for (index, value) in events {
+                let len_before = state.slots.len();
+                let transition = reduce(state, Event::Received { index, entry: Dummy(value) });
+
+                if index >= len_before {
+                    for missing in requested_indices(&transition.state) {
+                        prop_assert!(
+                            is_covered(missing, &transition.effects),
+                            "missing slot {missing} was not covered by fetch effects"
+                        );
                     }
                 }
 
@@ -238,32 +540,33 @@ mod tests {
         }
 
         #[test]
-        fn newly_received_indices_cover_all_missing_indices(indices in prop::collection::vec(0usize..32, 0..64)) {
-            let mut state = CoordinatorState::<Dummy>::new();
+        fn fetch_effects_are_ascending_non_overlapping_and_bounded(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
+                    prop::option::of((0usize..32, 0usize..1000))
+                        .prop_map(Op::SyncLatest),
+                ],
+                0..64,
+            )
+        ) {
+            let page_limit = 5;
+            let mut state = init::<Dummy>(page_limit, None).state;
 
-            for index in indices {
-                let was_known = state.received.contains(&index);
-                let transition = reduce(state, Event::Received { index, entry: Dummy(index) });
+            for op in ops {
+                let transition = apply_op(state, op);
+                let fetches = fetch_ranges(&transition.effects);
 
-                if !was_known {
-                    if let Some(max_received) = transition.state.received.last().copied() {
-                        for missing in 0..max_received {
-                            if !transition.state.received.contains(&missing) {
-                                prop_assert!(
-                                    transition.effects.iter().any(|effect| matches!(
-                                        effect,
-                                        Effect::FetchMissing { after, limit }
-                                            if *limit > 0
-                                                && *after <= missing
-                                                && missing < after.saturating_add(*limit)
-                                    )),
-                                    "missing index {missing} was not covered by any FetchMissing effect"
-                                );
-                            }
-                        }
+                let mut prev_end = 0usize;
+                let mut first = true;
+                for (from, limit) in fetches {
+                    prop_assert!(limit > 0);
+                    prop_assert!(limit <= page_limit);
+                    if !first {
+                        prop_assert!(from >= prev_end);
                     }
-                } else {
-                    prop_assert!(transition.effects.is_empty());
+                    prev_end = from + limit;
+                    first = false;
                 }
 
                 state = transition.state;
@@ -271,14 +574,45 @@ mod tests {
         }
 
         #[test]
-        fn each_entry_created_emits_exactly_one_submit_entry(values in prop::collection::vec(0usize..32, 0..64)) {
-            let mut state = CoordinatorState::<Dummy>::new();
+        fn next_expected_monotonic_non_decreasing_across_received_events(
+            events in prop::collection::vec((0usize..32, 0usize..1000), 0..64)
+        ) {
+            let mut state = init::<Dummy>(5, None).state;
+            let mut previous = state.next_expected();
 
-            for value in values {
-                let transition = reduce(state, Event::EntryCreated(Dummy(value)));
+            for (index, value) in events {
+                let transition = reduce(state, Event::Received { index, entry: Dummy(value) });
+                let next = transition.state.next_expected();
+                prop_assert!(next >= previous);
+                previous = next;
+                state = transition.state;
+            }
+        }
 
-                prop_assert_eq!(transition.effects.len(), 1);
-                prop_assert_eq!(transition.effects.first(), Some(&Effect::SubmitEntry(Dummy(value))));
+        #[test]
+        fn next_expected_matches_slot_layout_after_ops(
+            ops in prop::collection::vec(
+                prop_oneof![
+                    (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
+                    prop::option::of((0usize..32, 0usize..1000))
+                        .prop_map(Op::SyncLatest),
+                ],
+                0..64,
+            )
+        ) {
+            let mut state = init::<Dummy>(5, None).state;
+
+            for op in ops {
+                let transition = apply_op(state, op);
+                let next_expected = transition.state.next_expected();
+
+                for slot in &transition.state.slots[..next_expected] {
+                    prop_assert!(matches!(slot, Slot::Received(_)));
+                }
+
+                if next_expected < transition.state.slots.len() {
+                    prop_assert!(matches!(transition.state.slots[next_expected], Slot::Requested));
+                }
 
                 state = transition.state;
             }

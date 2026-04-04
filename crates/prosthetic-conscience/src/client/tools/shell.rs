@@ -128,7 +128,10 @@ fn truncate_output(raw: &[u8], max_bytes: usize) -> String {
     if total <= max_bytes {
         String::from_utf8_lossy(raw).into_owned()
     } else {
-        let truncated = String::from_utf8_lossy(&raw[..max_bytes]);
+        let truncated = raw
+            .get(..max_bytes)
+            .map(String::from_utf8_lossy)
+            .unwrap_or_else(|| String::from_utf8_lossy(raw));
         format!("{truncated}\n... (truncated, {total} bytes total)")
     }
 }

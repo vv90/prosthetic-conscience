@@ -41,6 +41,8 @@ pub enum AppError {
     EntryBuffer(#[from] EntryBufferError),
     #[error("stdin read failed: {0}")]
     Stdin(#[from] io::Error),
+    #[error("internal state error: {0}")]
+    Internal(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,15 +189,17 @@ impl ConsensusApp {
             {
                 Ok(trace) => {
                     self.print_tool_trace(&trace);
-                    let message = trace
-                        .final_message
-                        .expect("successful trace has final message");
-                    if let Some(content) = &message.content
-                        && !content.trim().is_empty()
-                    {
-                        println!("{content}");
+                    if let Some(message) = trace.final_message.as_ref() {
+                        if let Some(content) = &message.content
+                            && !content.trim().is_empty()
+                        {
+                            println!("{content}");
+                        }
+                        self.print_draft_review();
+                    } else {
+                        self.history.pop();
+                        return Err(AppError::Llm(LlmError::MissingFinalMessage));
                     }
-                    self.print_draft_review();
                 }
                 Err(error) => {
                     self.print_tool_trace(&error.trace);
@@ -336,7 +340,11 @@ impl ConsensusApp {
             }
 
             let waiting_for = pending.next_entry;
-            let payload = pending.payloads[waiting_for].clone();
+            let Some(payload) = pending.payloads.get(waiting_for).cloned() else {
+                return Err(AppError::Internal(format!(
+                    "missing pending submission payload at index {waiting_for}"
+                )));
+            };
             match self.session.append_json(payload).await {
                 Ok(()) => {}
                 Err(SessionError::Disconnected(reason)) => {
@@ -488,10 +496,10 @@ impl ConsensusApp {
 
     fn print_draft_review(&self) {
         println!("{}", format_drafts(self.buffer.engine().show_drafts()));
-        println!(
-            "{}",
-            format_impact_analysis(&self.buffer.engine().impact_analysis())
-        );
+        match self.buffer.engine().impact_analysis() {
+            Ok(impact) => println!("{}", format_impact_analysis(&impact)),
+            Err(error) => eprintln!("Draft impact analysis unavailable: {error}"),
+        }
     }
 
     fn print_tool_trace(&self, trace: &LlmTurnTrace) {

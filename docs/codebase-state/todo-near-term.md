@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-04-02
+Snapshot date: 2026-04-03
 
 ## Consensus protocol implementation
 
@@ -93,9 +93,30 @@ Outstanding issues:
 
 Core extraction is done: the consensus runtime now lives in `crates/consensus/`, `prosthetic-conscience` depends on it as a workspace crate, and the crate already builds for `wasm32-unknown-unknown`.
 
+**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for entry reception, gap detection, connection state (`Connected`/`Disconnected`), and paginated catch-up (`FetchResult` with `FetchTarget::End` / `FetchTarget::Index`). 28 tests (24 targeted + 4 property-based). Does not yet own `EntryBuffer` or submission tracking.
+
+**Next steps for coordinator:**
+
+- Integrate `EntryBuffer` into the coordinator (submission resume, echo tracking).
+- Replace the imperative control flow in `consensus_cli/app.rs` with the coordinator reducer.
+- Wire the coordinator into the browser/WASM shell.
+- Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
+- Add bootstrap session metadata so connect handling can receive the latest entry index together with the full latest entry payload, and use that to simplify initial catch-up planning.
+
+**Remaining Phase 6 tasks:**
+
 14. Add a `crates/consensus-wasm/` wrapper crate with `wasm-bindgen` and `serde-wasm-bindgen`.
 15. Export `ConsensusEngine`, `EntryBuffer`, and pure `llm_turn` helpers for JS/TS.
 16. Build the first browser prototype on top of the wasm artifact and existing session/inference endpoints.
+
+### Protocol integrity concerns (identified, mitigations planned)
+
+These concerns apply once consensus logic runs in distributed browser clients. See `docs/codebase-state/session-coordinator-behavior.md` for full details.
+
+- **Version drift**: clients running different WASM versions may interpret entries differently. Mitigation: session-level protocol version advertisement, client-enforced compatibility checks, entry schema version tags.
+- **Log pollution**: malicious or buggy clients could spam the session log. Mitigation: gateway-side per-session/per-client rate limiting (content-opaque), client-side activity signals.
+- **Entry rejection**: kept unconditional to preserve gateway content-opacity. Schema version tags allow clients to skip unparseable entries.
+- **Gateway graph management**: splitting entries into cleartext metadata + opaque content was rejected — graph topology IS the interesting part, exposing it changes the trust boundary.
 
 ### Deferred
 
@@ -142,6 +163,21 @@ Core extraction is done: the consensus runtime now lives in `crates/consensus/`,
 33–36. Introduce `Payload` enum (`Plaintext(Value)` / `Encrypted(EncryptedBlob)`) in protocol crate.
 
 ## Other tasks
+
+### Panic-safety enforcement
+
+46. Add a dedicated CI gate for panic safety on non-test targets:
+    `cargo clippy --workspace --lib --bins -- -D warnings -W clippy::indexing_slicing -W clippy::panic -W clippy::unwrap_used -W clippy::expect_used -W clippy::unreachable -W clippy::todo -W clippy::unimplemented`
+47. Add a second CI/scripted scan that rejects panic constructs in non-test Rust code before `#[cfg(test)]` blocks:
+    `panic!`, `unreachable!`, `todo!`, `unimplemented!`, `assert!`, `assert_eq!`, `assert_ne!`, `unwrap()`, `expect()`.
+48. Add an explicit workspace lint/checking entrypoint so panic-safety verification is not just ad hoc terminal knowledge.
+49. Audit production code for direct indexing/slicing and replace remaining cases with `.get()`, `.get_mut()`, `.first()`, `.get(..)` or explicit error paths.
+50. Audit arithmetic and allocation hot paths for implicit panic/abort risks; prefer checked operations (`checked_*`, validation before subtraction/addition, defensive bounds handling).
+51. Evaluate adding `#[no_panic]`-style checks to critical pure entrypoints only:
+    reducers, coordinators, parsers, and other kernel-like functions where link-time no-panic assertions are tractable.
+52. Document and enforce boundary rules for untrusted code:
+    external tools run out-of-process; Rust panics must not cross FFI boundaries; use `catch_unwind` only as containment where unwind is enabled, not as a substitute for panic-free design.
+53. Review in-process dependencies and libraries for trust boundaries; isolate crash-prone or low-trust behavior behind subprocess boundaries where practical.
 
 43. Add worker handshake/version/capability validation.
 44. Remove `GatewayAdapter` once runtime coverage is confirmed complete.

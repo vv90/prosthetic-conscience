@@ -107,17 +107,19 @@ pub(crate) async fn audio_transcriptions(
         "model": model,
         "file_name": file_name,
     });
-    if let Some(lang) = language {
-        payload["language"] = json!(lang);
-    }
-    if let Some(p) = prompt {
-        payload["prompt"] = json!(p);
-    }
-    if let Some(fmt) = response_format {
-        payload["response_format"] = json!(fmt);
-    }
-    if let Some(temp) = temperature {
-        payload["temperature"] = json!(temp);
+    if let Some(payload_obj) = payload.as_object_mut() {
+        if let Some(lang) = language {
+            payload_obj.insert(String::from("language"), json!(lang));
+        }
+        if let Some(p) = prompt {
+            payload_obj.insert(String::from("prompt"), json!(p));
+        }
+        if let Some(fmt) = response_format {
+            payload_obj.insert(String::from("response_format"), json!(fmt));
+        }
+        if let Some(temp) = temperature {
+            payload_obj.insert(String::from("temperature"), json!(temp));
+        }
     }
 
     // Register a stream channel to receive the worker's response.

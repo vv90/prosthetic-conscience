@@ -30,6 +30,8 @@ pub enum ToolError {
     MissingArgument(&'static str),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    #[error("serialization error: {0}")]
+    Serialize(#[from] serde_json::Error),
     #[error("engine error: {0}")]
     Engine(#[from] EngineError),
 }
@@ -125,10 +127,9 @@ fn require_outcome(args: &Value, field: &'static str) -> Result<Outcome, ToolErr
     }
 }
 
-/// Serialize a value that is known to be serializable.
-/// All render/engine types derive Serialize, so this cannot fail.
-fn to_json<T: Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).expect("type derives Serialize")
+/// Serialize a value to JSON without panicking.
+fn to_json<T: Serialize>(value: &T) -> Result<Value, ToolError> {
+    serde_json::to_value(value).map_err(ToolError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,11 +140,11 @@ fn to_json<T: Serialize>(value: &T) -> Value {
 pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result<Value, ToolError> {
     match tool {
         // -- Query committed state --
-        "overview" => Ok(to_json(&engine.overview())),
+        "overview" => Ok(to_json(&engine.overview())?),
 
         "claim_detail" => {
             let id = require_str(&args, "claim_id")?;
-            Ok(to_json(&engine.claim_detail(&ClaimId(id.to_owned()))))
+            Ok(to_json(&engine.claim_detail(&ClaimId(id.to_owned())))?)
         }
 
         // -- Draft creation --
@@ -185,7 +186,7 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
         }
 
         // -- Draft management --
-        "show_drafts" => Ok(to_json(&engine.show_drafts())),
+        "show_drafts" => Ok(to_json(&engine.show_drafts())?),
 
         "remove_draft" => {
             let id = require_u64(&args, "draft_id")?;
@@ -194,9 +195,9 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
         }
 
         "submit_drafts" => {
-            let entries = engine.submit_drafts();
+            let entries = engine.submit_drafts()?;
             let count = entries.len();
-            Ok(json!({ "submitted": count, "entries": to_json(&entries) }))
+            Ok(json!({ "submitted": count, "entries": to_json(&entries)? }))
         }
 
         "clear_drafts" => {
@@ -206,14 +207,14 @@ pub fn dispatch(engine: &mut ConsensusEngine, tool: &str, args: Value) -> Result
         }
 
         // -- Preview --
-        "preview_overview" => Ok(to_json(&engine.preview_overview())),
+        "preview_overview" => Ok(to_json(&engine.preview_overview()?)?),
 
         "preview_claim_detail" => {
             let claim = require_claim_ref(&args, "claim")?;
-            Ok(to_json(&engine.preview_claim_detail(&claim)))
+            Ok(to_json(&engine.preview_claim_detail(&claim)?)?)
         }
 
-        "impact_analysis" => Ok(to_json(&engine.impact_analysis())),
+        "impact_analysis" => Ok(to_json(&engine.impact_analysis()?)?),
 
         _ => Err(ToolError::UnknownTool(tool.to_owned())),
     }

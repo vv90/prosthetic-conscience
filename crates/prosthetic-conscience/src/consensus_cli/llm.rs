@@ -15,6 +15,8 @@ pub enum LlmError {
     ProcessResponse(#[from] ProcessResponseError),
     #[error("max tool rounds ({max}) exceeded")]
     MaxRoundsExceeded { max: usize },
+    #[error("turn completed without a final message")]
+    MissingFinalMessage,
 }
 
 #[derive(Debug)]
@@ -51,14 +53,11 @@ impl ConsensusLlm {
         engine: &mut ConsensusEngine,
         history: &mut Vec<Value>,
     ) -> Result<CompletedMessage, LlmError> {
-        self.run_turn_with_trace(engine, history)
+        let trace = self
+            .run_turn_with_trace(engine, history)
             .await
-            .map(|trace| {
-                trace
-                    .final_message
-                    .expect("successful trace has final message")
-            })
-            .map_err(|error| error.error)
+            .map_err(|error| error.error)?;
+        trace.final_message.ok_or(LlmError::MissingFinalMessage)
     }
 
     pub async fn run_turn_with_trace(

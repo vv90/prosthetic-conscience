@@ -52,7 +52,7 @@ impl AppendLog {
     pub fn slice(&self, after: usize, limit: usize) -> &[Value] {
         let start = after.min(self.entries.len());
         let end = (start + limit).min(self.entries.len());
-        &self.entries[start..end]
+        self.entries.get(start..end).unwrap_or(&[])
     }
 }
 

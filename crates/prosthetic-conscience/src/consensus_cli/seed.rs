@@ -43,6 +43,8 @@ pub enum SeedError {
     },
     #[error("gateway persisted {actual} entries, expected {expected}")]
     PersistedLengthMismatch { expected: usize, actual: usize },
+    #[error("missing expected payload at entry #{index}")]
+    MissingExpectedPayload { index: usize },
 }
 
 pub fn load_entries_from_path(path: &Path) -> Result<Vec<Entry>, SeedError> {
@@ -78,7 +80,9 @@ pub async fn seed_session(session: &mut SessionClient, entries: &[Entry]) -> Res
     let mut next_index = 0usize;
     while next_index < payloads.len() {
         let waiting_for = next_index;
-        let payload = payloads[waiting_for].clone();
+        let Some(payload) = payloads.get(waiting_for).cloned() else {
+            return Err(SeedError::MissingExpectedPayload { index: waiting_for });
+        };
 
         match session.append_json(payload).await {
             Ok(()) => {
@@ -116,7 +120,9 @@ async fn wait_for_expected_echo(
                     });
                 }
 
-                let expected = &payloads[*next_index];
+                let expected = payloads
+                    .get(*next_index)
+                    .ok_or(SeedError::MissingExpectedPayload { index: *next_index })?;
                 if payload != *expected {
                     return Err(SeedError::EchoPayloadMismatch {
                         index,
@@ -163,7 +169,9 @@ async fn wait_for_reconnect_and_sync(
                     });
                 }
 
-                let expected = &payloads[*next_index];
+                let expected = payloads
+                    .get(*next_index)
+                    .ok_or(SeedError::MissingExpectedPayload { index: *next_index })?;
                 if payload != *expected {
                     return Err(SeedError::EchoPayloadMismatch {
                         index,
@@ -194,7 +202,9 @@ async fn sync_persisted_entries(
     let persisted = page.entries.len();
     for (offset, actual) in page.entries.into_iter().enumerate() {
         let index = *next_index + offset;
-        let expected = &payloads[index];
+        let expected = payloads
+            .get(index)
+            .ok_or(SeedError::MissingExpectedPayload { index })?;
         if actual != *expected {
             return Err(SeedError::PersistedPayloadMismatch {
                 index,

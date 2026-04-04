@@ -64,7 +64,9 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedMessage, AssemblerError> {
             return Err(AssemblerError::EmptyChoices { index: chunk_idx });
         }
 
-        let choice = &choices[0];
+        let Some(choice) = choices.first() else {
+            return Err(AssemblerError::EmptyChoices { index: chunk_idx });
+        };
         let delta = match choice.get("delta") {
             Some(d) => d,
             None => continue,

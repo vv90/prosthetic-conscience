@@ -456,7 +456,7 @@ fn evaluate_case(
         expected_argument_match |= argument_match;
 
         let outcome_match = match expected {
-            ExpectedToolUse::PlainTextResponse { .. } => unreachable!(),
+            ExpectedToolUse::PlainTextResponse { .. } => false,
             ExpectedToolUse::AnyStructuredTool => !final_drafts.is_empty(),
             ExpectedToolUse::AnyTool { .. } => argument_match,
             _ => final_drafts

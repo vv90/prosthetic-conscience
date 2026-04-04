@@ -42,7 +42,11 @@ pub async fn run(
     if !tool_defs.is_empty() {
         let names: Vec<&str> = tool_defs
             .iter()
-            .filter_map(|d| d["function"]["name"].as_str())
+            .filter_map(|d| {
+                d.get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+            })
             .collect();
         eprintln!("\x1b[2m--- tools: {} ---\x1b[0m", names.join(", "));
     }

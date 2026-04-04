@@ -168,12 +168,17 @@ impl WhisperClient {
 
     pub async fn transcribe(&self, payload: Value) -> Result<Value, TranscriptionError> {
         let req = parse_request(&payload)?;
+        let header_len = req.audio_bytes.len().min(16);
+        let header = req
+            .audio_bytes
+            .get(..header_len)
+            .unwrap_or(&req.audio_bytes);
 
         tracing::debug!(
             file_name = %req.file_name,
             mime_type = %req.mime_type,
             audio_size = req.audio_bytes.len(),
-            header = ?&req.audio_bytes[..req.audio_bytes.len().min(16)],
+            header = ?header,
             "transcription request"
         );
 

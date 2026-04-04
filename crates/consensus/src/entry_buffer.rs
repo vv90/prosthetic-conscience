@@ -164,7 +164,7 @@ impl EntryBuffer {
     where
         F: FnMut() -> ClaimId,
     {
-        let bundle = self.engine.submission_bundle(next_claim_id);
+        let bundle = self.engine.submission_bundle(next_claim_id)?;
 
         if bundle.entries.is_empty() {
             return Ok(None);

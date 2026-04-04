@@ -2,9 +2,9 @@
 
 Snapshot date: 2026-04-03
 
-Status: **proposed** — target pure state machine for client-side session synchronization, catch-up orchestration, and submission resume. `EntryBuffer` and `BackoffPolicy` already live in `consensus`; the coordinator itself is the planned extraction from `consensus_cli/app.rs`.
+Status: **partial** — the pure coordinator reducer is implemented in `crates/consensus/src/coordinator.rs` with entry reception, gap detection, connection state, paginated catch-up, and local entry submission. `EntryBuffer` and `BackoffPolicy` also live in `consensus`. The higher-level `SessionCoordinator` wrapper (owning `EntryBuffer`, submission resume, and the full event/action contract described below) is still planned.
 
-Load into session context when working on: session coordinator extraction, browser/WASM session wrappers, catch-up and reconnect behavior, pending submission recovery, coordinator property tests.
+Load into session context when working on: session coordinator extraction, browser/WASM session wrappers, catch-up and reconnect behavior, pending submission recovery, coordinator property tests, protocol integrity concerns.
 
 ## Behavior
 
@@ -26,6 +26,16 @@ Load into session context when working on: session coordinator extraction, brows
   - converting transport results into coordinator events
 
 The design goal is to replace the current imperative control flow spread across `handle_session_event`, `catch_up`, `drain_queued_session_events`, and `resume_pending_submission` with a pure event/action loop.
+
+## Panic Safety
+
+No non-test session-management code may panic.
+
+- Do not use `panic!`, `unreachable!`, `todo!`, or `unimplemented!`.
+- Do not use `assert!`, `assert_eq!`, `assert_ne!`, `unwrap()`, or `expect()` in production code.
+- Invalid setup, invalid transport data, and violated assumptions must be represented as ordinary return values: `Result`, explicit coordinator effects, or other non-panicking state transitions.
+
+Tests are the only exception.
 
 ## Event / Action Contract
 
@@ -194,8 +204,10 @@ These are universal properties that must hold for every reachable coordinator st
 2. It emits `CoordinatorEvent::Entry { index, payload }`.
 3. The coordinator delegates to `EntryBuffer::apply_or_buffer_entry()`.
 4. For each newly contiguous result:
-  - `ApplyResult::Applied` becomes `EntryApplied { index }`
-  - `ApplyResult::Skipped` becomes `EntrySkipped { index, error }`
+
+- `ApplyResult::Applied` becomes `EntryApplied { index }`
+- `ApplyResult::Skipped` becomes `EntrySkipped { index, error }`
+
 5. If the echoed payload advances a pending submission and there is more work to send, the coordinator may emit the next `SendAppend`, subject to `SB6`.
 
 ### Disconnect and reconnect flow
@@ -251,11 +263,108 @@ The current CLI behavior is correct but encoded imperatively across:
 
 The core design principle is the same one used in the gateway kernel: if it is a decision, it belongs in the pure state machine. If it is I/O, it belongs in the shell.
 
+## Implemented: Coordinator Reducer
+
+`crates/consensus/src/coordinator.rs` implements the first layer of the coordinator as a pure reducer: `reduce(state, event) -> Transition { state, effects }`. This layer handles entry reception, gap detection, connection state, and paginated catch-up. It does not yet own `EntryBuffer` or submission tracking — those remain in the CLI app layer.
+
+### Types
+
+```rust
+enum FetchTarget {
+    End,           // keep fetching until a short page (initial catch-up)
+    Index(usize),  // fetch until next_expected >= target (gap fill)
+}
+
+pub struct CoordinatorState<T> {
+    next_expected: usize,
+    received: BTreeMap<usize, T>,
+    connected: bool,
+    fetch_target: Option<FetchTarget>,
+    page_limit: usize,
+}
+
+pub enum Event<T> {
+    Received { index: usize, entry: T },
+    EntryCreated(T),
+    Connected,
+    Disconnected,
+    FetchResult { entries: Vec<(usize, T)> },
+}
+
+pub enum Effect<T> {
+    FetchMissing { after: usize, limit: usize },
+    SubmitEntry(T),
+}
+```
+
+### Transition rules
+
+- **`Received`**: applies entry if `index == next_expected`, buffers if future, no-op if already seen. Gap detection starts a paginated fetch (`FetchTarget::Index(max_received)`) if no fetch is in progress, or upgrades an existing target if the new gap extends beyond it.
+- **`EntryCreated`**: emits `SubmitEntry` unconditionally.
+- **`Connected`**: sets `connected = true`, starts `FetchTarget::End` fetch from `next_expected` if no fetch in progress.
+- **`Disconnected`**: sets `connected = false`, clears `fetch_target`.
+- **`FetchResult`**: applies all entries, then checks completion: `Index(n)` done when `next_expected >= n`, `End` done when `entries.len() < page_limit`. Otherwise emits next `FetchMissing`.
+
+### Implemented invariants (tested)
+
+- Every `FetchMissing` has `limit <= page_limit` and `limit > 0`.
+- At most one fetch is in progress at any time (`fetch_target.is_some()` gates emission).
+- `Connected` emits exactly one `FetchMissing` if no fetch is in progress.
+- `Disconnected` clears `fetch_target`.
+- `FetchResult` with a full page emits another `FetchMissing`; short page completes.
+- `connected` flag tracks `Connected`/`Disconnected` events faithfully.
+- Gap detection during an active fetch upgrades the target instead of starting a duplicate.
+
+### Test coverage (28 tests)
+
+- 12 targeted entry/gap tests (receive, buffer, gap detect, frontier advance)
+- 6 Connected/Disconnected tests (fetch emission, duplicate suppression, flag tracking)
+- 6 FetchResult pagination tests (full page, short page, empty page, multi-page lifecycle)
+- 4 property-based tests (limit bounds, connected flag, disconnect clears fetch, no duplicate FetchMissing per transition)
+
+## Protocol Integrity Concerns
+
+These concerns were identified during the design of the browser/WASM client and are relevant to Phase 6 (WASM boundary and browser integration).
+
+### Version drift across distributed clients
+
+When consensus logic runs as WASM in independent browser tabs, clients may run different versions of the consensus crate. Different versions may interpret entries differently, produce incompatible drafts, or disagree on graph state.
+
+**Recommended mitigation (Phase 1):**
+
+- Session-level protocol version: each client advertises its consensus crate version on join. The gateway stores this as opaque metadata (no content awareness needed).
+- Clients enforce compatibility: on join, a client checks whether the session's existing participants are running a compatible version. Incompatible clients refuse to join or display a warning.
+- Entry schema version tag: each entry includes a schema version field. Clients that cannot parse an entry's schema version can still consume the log index (skip the entry) without corrupting their state.
+
+**Deferred:** WASM binary hash pinning (require all clients to run the same binary hash), consensus-based moderation of entry acceptance.
+
+### Bad actor log pollution
+
+A malicious or buggy client could spam the session log with garbage entries, polluting the deliberation state for all participants.
+
+**Recommended mitigation (Phase 1):**
+
+- Gateway-side rate limiting: per-session, per-client entry append rate limits. The gateway enforces this without inspecting entry content (content-opaque).
+- Client-side activity signals: clients can emit metadata-only signals (e.g., "participant X submitted N entries in the last M seconds") that other clients use to detect unusual patterns.
+
+**Deferred:** Consensus-based moderation (e.g., vote-to-kick), entry rollback, or content-aware filtering.
+
+### Entry rejection
+
+The current design accepts all well-formed entries unconditionally. Adding server-side rejection would require the gateway to understand entry semantics, breaking the content-opacity principle.
+
+**Decision:** Keep entry acceptance unconditional. Schema version tags allow clients to skip entries they cannot interpret. Rate limiting prevents volume-based abuse. Semantic validation remains client-side.
+
+### Gateway graph management (rejected approach)
+
+Splitting entries into cleartext metadata (relations/graph topology) and opaque content was considered and rejected. Graph structure IS the semantically interesting part of deliberations — exposing it to the gateway changes the trust boundary without simplifying the protocol. It also creates consistency risks between metadata and content, and couples the gateway to schema evolution.
+
 ## Status
 
-- `EntryBuffer` is implemented and already satisfies the pure log-application and submission-echo portion of the design.
+- `EntryBuffer` is implemented and satisfies the pure log-application and submission-echo portion of the design.
 - `BackoffPolicy` is implemented as a pure helper in `consensus`.
-- `SessionCoordinator` is not yet implemented.
+- Coordinator reducer is implemented with entry reception, gap detection, connection state, and paginated catch-up (28 tests).
+- `SessionCoordinator` (the higher-level wrapper owning `EntryBuffer`, submission resume, and the full event/action contract described above) is not yet implemented.
 - Current CLI behavior is the reference behavior that the coordinator extraction must preserve.
 
 ## Load into Context When
@@ -264,6 +373,7 @@ The core design principle is the same one used in the gateway kernel: if it is a
 - Designing property tests for reconnect, catch-up, and submission resume.
 - Reviewing whether a new event or action variant preserves the state machine invariants.
 - Building a browser/WASM session wrapper around the consensus core.
+- Evaluating protocol integrity or version compatibility concerns.
 
 ## Relevant Files
 
@@ -272,6 +382,6 @@ The core design principle is the same one used in the gateway kernel: if it is a
 - `crates/consensus/src/entry_buffer.rs`
 - `crates/consensus/src/backoff.rs`
 - `crates/consensus/src/protocol.rs`
-- `crates/consensus/src/coordinator.rs` (planned)
+- `crates/consensus/src/coordinator.rs`
 - `docs/codebase-state/session-behavior.md`
 - `docs/codebase-state/core-logic-invariants.md`

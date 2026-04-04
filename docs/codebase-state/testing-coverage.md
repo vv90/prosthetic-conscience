@@ -1,6 +1,6 @@
 # Testing Coverage and Methodology
 
-Snapshot date: 2026-04-02
+Snapshot date: 2026-04-03
 
 ## Overview
 
@@ -132,13 +132,13 @@ Location: `crates/prosthetic-conscience/src/protocol.rs` (inline `#[cfg(test)]` 
 
 Location: `crates/prosthetic-conscience/tests/integration.rs` with helpers in `crates/prosthetic-conscience/tests/support/`.
 
-| Test group                          | Count | What it proves                                                                                                                                                 |
-| ----------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Test group                          | Count | What it proves                                                                                                                                               |
+| ----------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Session websocket flows             | 7     | Session create/append, subscribe notifications, nonexistent sessions, subscriber timeout, multi-subscriber fanout, disconnect cleanup, and handshake timeout |
-| Consensus seed and bootstrap        | 3     | Seeding fixture logs into a live session, rejecting unknown sessions, and `ConsensusApp::join()` bootstrapping from committed entries                       |
-| Transcription routing               | 5     | Transcription happy path, no-worker error, worker error propagation, capability isolation, and mixed chat/transcription worker pools                        |
-| Client tool loop and gateway client | 4     | Generic tool loop re-requesting, consensus clarification-then-draft flow, SSE assembly, and graceful no-worker error handling                               |
-| Chat streaming and lifecycle        | 9     | Happy path chat streaming, no-worker rejection, worker error relay, re-registration, concurrency isolation, state draining, timeout, disconnect, heartbeats |
+| Consensus seed and bootstrap        | 3     | Seeding fixture logs into a live session, rejecting unknown sessions, and `ConsensusApp::join()` bootstrapping from committed entries                        |
+| Transcription routing               | 5     | Transcription happy path, no-worker error, worker error propagation, capability isolation, and mixed chat/transcription worker pools                         |
+| Client tool loop and gateway client | 4     | Generic tool loop re-requesting, consensus clarification-then-draft flow, SSE assembly, and graceful no-worker error handling                                |
+| Chat streaming and lifecycle        | 9     | Happy path chat streaming, no-worker rejection, worker error relay, re-registration, concurrency isolation, state draining, timeout, disconnect, heartbeats  |
 
 Test harness components:
 
@@ -150,22 +150,37 @@ Test harness components:
 
 Location: `crates/consensus/src/tools.rs` (inline `#[cfg(test)]` module).
 
-| Area                   | Count | What is tested                                                                                                                                                                                        |
-| ---------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool dispatch          | 14    | `overview`, `claim_detail`, `preview_overview`, `preview_claim_detail`, `draft_claim`, `draft_relation`, `draft_stance`, `draft_resolve`, `draft_comment`, `show_drafts`, `remove_draft`, `submit_drafts`, `clear_drafts`, `impact_analysis` |
-| Error paths            | 4     | Unknown tool, missing required arguments, invalid claim-ref shapes, and engine errors such as removing a nonexistent draft                                                                            |
-| Tool definitions       | 3     | Total count (14), LLM-filtered set excludes `submit_drafts`/`clear_drafts` and omits `no_structured_action`, draft tools do not expose `author`                                                     |
-| Integration            | 2     | Round-trip draft→show→submit, preview includes uncommitted drafts                                                                                                                                     |
+| Area             | Count | What is tested                                                                                                                                                                                                                               |
+| ---------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool dispatch    | 14    | `overview`, `claim_detail`, `preview_overview`, `preview_claim_detail`, `draft_claim`, `draft_relation`, `draft_stance`, `draft_resolve`, `draft_comment`, `show_drafts`, `remove_draft`, `submit_drafts`, `clear_drafts`, `impact_analysis` |
+| Error paths      | 4     | Unknown tool, missing required arguments, invalid claim-ref shapes, and engine errors such as removing a nonexistent draft                                                                                                                   |
+| Tool definitions | 3     | Total count (14), LLM-filtered set excludes `submit_drafts`/`clear_drafts` and omits `no_structured_action`, draft tools do not expose `author`                                                                                              |
+| Integration      | 2     | Round-trip draft→show→submit, preview includes uncommitted drafts                                                                                                                                                                            |
 
 ### Consensus LLM tests (7 tests)
 
 Location: `crates/consensus/src/llm_turn.rs` (inline `#[cfg(test)]` module).
 
-| Area               | Count | What is tested                                                                                                                                      |
-| ------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Area               | Count | What is tested                                                                                                                                             |
+| ------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | System prompt      | 1     | Contains review boundary, clarify-first wording, claim-ref guidance, safe tool names, excludes `submit_drafts`, `clear_drafts`, and `no_structured_action` |
-| Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                     |
-| History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                |
+| Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                            |
+| History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                         |
+
+### Coordinator reducer tests (28 tests)
+
+Location: `crates/consensus/src/coordinator.rs` (inline `#[cfg(test)]` module).
+
+| Area                        | Count | What is tested                                                                                                                                                  |
+| --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entry reception and gaps    | 12    | Next-expected advances frontier, known index is noop, gap emits FetchMissing with page_limit, buffered entries drain on gap fill, state starts at zero frontier |
+| Connected/Disconnected      | 6     | Connected emits FetchMissing from frontier, duplicate suppression during active fetch, disconnected clears fetch_target, connected flag tracking                |
+| FetchResult pagination      | 6     | Full page emits next fetch, short page completes, empty page completes, multi-page lifecycle, entries applied and frontier advanced                             |
+| Fetch-aware gap handling    | 4     | Gap during active fetch suppressed, target upgraded when gap extends beyond current, gap with no fetch starts paginated fetch, fetch completes at target        |
+| Property: limit bounds      | 1     | Every `FetchMissing` has `limit <= page_limit` and `limit > 0`                                                                                                  |
+| Property: connected flag    | 1     | After any sequence of `Connected`/`Disconnected`, `is_connected()` matches the last one                                                                         |
+| Property: disconnect clears | 1     | After any sequence ending in `Disconnected`, `fetch_target` is cleared                                                                                          |
+| Property: no duplicates     | 1     | At most one `FetchMissing` per transition                                                                                                                       |
 
 ### Consensus entry buffer tests (3 tests)
 
@@ -189,10 +204,10 @@ Location: `crates/prosthetic-conscience/src/consensus_cli/app.rs` (inline `#[cfg
 
 Location: `crates/prosthetic-conscience/src/consensus_support/eval.rs` (inline `#[cfg(test)]` module).
 
-| Area            | Count | What is tested                                                                                             |
-| --------------- | ----- | ---------------------------------------------------------------------------------------------------------- |
-| Scoring         | 2     | Stance draft matches argument and draft buffer, plain-text response cases require an empty draft buffer    |
-| Context seeding | 1     | Synthetic history contains properly paired tool call/result messages                                       |
+| Area            | Count | What is tested                                                                                          |
+| --------------- | ----- | ------------------------------------------------------------------------------------------------------- |
+| Scoring         | 2     | Stance draft matches argument and draft buffer, plain-text response cases require an empty draft buffer |
+| Context seeding | 1     | Synthetic history contains properly paired tool call/result messages                                    |
 
 ### What is NOT tested
 
@@ -349,6 +364,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - Protocol: strong coverage (14 serde tests).
 - Consensus tool dispatch: strong coverage (23 tests).
 - Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
+- Coordinator reducer: strong coverage (28 tests — 24 targeted + 4 property-based, covers entry reception, gap detection, connection state, paginated catch-up).
 - Consensus entry buffer: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
 - Consensus app: minimal coverage (1 test — trace formatting).
 - Consensus eval: adequate coverage (3 tests — scoring and context seeding).
@@ -368,6 +384,7 @@ Testing-level invariants (properties the test suite itself must maintain):
 - `crates/prosthetic-conscience/src/client/response_assembler.rs` (assembler unit + property tests)
 - `crates/consensus/src/tools.rs` (tool dispatch tests)
 - `crates/consensus/src/llm_turn.rs` (LLM turn loop tests)
+- `crates/consensus/src/coordinator.rs` (coordinator reducer tests)
 - `crates/consensus/src/entry_buffer.rs` (entry buffer tests)
 - `crates/prosthetic-conscience/src/consensus_support/eval.rs` (eval scoring tests)
 - `crates/prosthetic-conscience/src/consensus_cli/app.rs` (app tests)

@@ -269,7 +269,10 @@ pub fn build_request_payload(
 pub fn build_system_prompt(participant: &str, engine: &ConsensusEngine) -> String {
     let overview = format_overview(&engine.overview());
     let drafts = format_drafts(engine.show_drafts());
-    let impact = format_impact_analysis(&engine.impact_analysis());
+    let impact = match engine.impact_analysis() {
+        Ok(impact) => format_impact_analysis(&impact),
+        Err(error) => format!("Impact analysis unavailable: {error}"),
+    };
     let tool_list = tools::llm_tool_definitions()
         .into_iter()
         .map(|tool| format!("- {}: {}", tool.name, tool.description))
@@ -335,12 +338,14 @@ pub fn truncate_history(history: &mut Vec<Value>, max: usize) {
 
     let mut cut = excess;
     while cut < history.len() {
-        let role = history[cut]
-            .get("role")
+        let role = history
+            .get(cut)
+            .and_then(|value| value.get("role"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let has_tool_calls = history[cut]
-            .get("tool_calls")
+        let has_tool_calls = history
+            .get(cut)
+            .and_then(|value| value.get("tool_calls"))
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty());
 
@@ -516,6 +521,8 @@ fn render_mutation_confirmation(
 fn describe_claim_ref(engine: &ConsensusEngine, claim: &ClaimRef) -> String {
     engine
         .preview_claim_detail(claim)
+        .ok()
+        .flatten()
         .map(|detail| format!("\"{}\"", detail.claim.body))
         .unwrap_or_else(|| String::from("that idea"))
 }

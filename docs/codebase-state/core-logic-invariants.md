@@ -43,6 +43,22 @@ This is enforced through:
 
 This is a non-negotiable design constraint. All future kernel logic must follow the same pattern. No `&mut` on state, no `.insert()`, `.remove()`, `.retain()`, or field assignment on state fields.
 
+### Panic safety
+
+Non-test code must never panic.
+
+This is a repo-wide rule. In production code, do not use:
+
+- `panic!`
+- `unreachable!`
+- `todo!`
+- `unimplemented!`
+- `assert!`, `assert_eq!`, `assert_ne!`
+- `unwrap()`
+- `expect()`
+
+If an input is invalid, return an error. If a state seems impossible, encode that impossibility in types or handle the branch defensively and return an error or effect instead. Tests are the only place where panic-based assertions are allowed.
+
 ## Scope
 
 The core logic comprises three layers:
