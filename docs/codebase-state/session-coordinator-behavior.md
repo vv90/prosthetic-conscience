@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-04-04
 
-Status: **partial** — `crates/consensus/src/coordinator.rs` currently implements only a narrow pure reducer for bootstrapping from an optional latest indexed entry, slot-based gap detection, page-bounded fetch planning, and local `SubmitEntry` emission. `EntryBuffer` and `BackoffPolicy` also live in `consensus`. The higher-level `SessionCoordinator` wrapper (owning `EntryBuffer`, reconnect/catch-up policy, submission resume, and the full event/action contract described below) is still planned.
+Status: **partial** — `crates/consensus/src/coordinator.rs` currently implements only a narrow pure reducer for bootstrapping from an optional latest indexed entry, slot-based gap detection, and page-bounded fetch planning. `EntryBuffer` and `BackoffPolicy` also live in `consensus`. The higher-level `SessionCoordinator` wrapper (owning `EntryBuffer`, reconnect/catch-up policy, submission resume, and the full event/action contract described below) is still planned.
 
 Load into session context when working on: session coordinator extraction, browser/WASM session wrappers, catch-up and reconnect behavior, pending submission recovery, coordinator property tests, protocol integrity concerns.
 
@@ -12,8 +12,8 @@ Load into session context when working on: session coordinator extraction, brows
 - Its current surface is:
   - `init(page_limit, latest)` for bootstrap from an optional `LatestEntry<T>`
   - `sync_to_latest(state, latest)` for non-shrinking resync against a latest known entry
-  - `reduce(state, Event::Received { .. } | Event::EntryCreated(..))`
-  - `Effect::FetchMissing { from, limit }` and `Effect::SubmitEntry(T)`
+  - `reduce(state, Event::Received { .. })`
+  - `Effect::FetchMissing { from, limit }`
 - It does not currently track connection state, fetch-in-flight state, reconnect/catch-up completion, append acknowledgements/failures, or `EntryBuffer`.
 - `crates/consensus/src/entry_buffer.rs` separately owns contiguous entry application, skipped payload handling, and pending submission echo tracking.
 - `crates/prosthetic-conscience/src/consensus_cli/app.rs` still owns reconnect handling, catch-up pagination, queued-event draining, and submission resume.
@@ -295,19 +295,17 @@ pub struct LatestEntry<T> {
     pub entry: T,
 }
 
-pub struct CoordinatorState<T> {
+pub struct State<T> {
     slots: Vec<Slot<T>>,
     page_limit: usize,
 }
 
 pub enum Event<T> {
     Received { index: usize, entry: T },
-    EntryCreated(T),
 }
 
 pub enum Effect<T> {
     FetchMissing { from: usize, limit: usize },
-    SubmitEntry(T),
 }
 ```
 
@@ -321,7 +319,6 @@ pub enum Effect<T> {
 - **`Received` on an existing `Requested` slot**: fills the slot and emits no effects.
 - **`Received` on an existing `Received` slot**: no-op; first writer wins.
 - **`Received` beyond the current upper bound**: extends the slots vector with requested holes, stores the received entry, and emits bounded ascending `FetchMissing` effects that cover the new holes.
-- **`EntryCreated`**: emits exactly one `SubmitEntry` and does not modify `slots`.
 
 ### Implemented semantic properties with current test evidence
 
@@ -335,10 +332,10 @@ pub enum Effect<T> {
 
 - `init(0, ...)` returns `InitError::InvalidPageLimit` instead of panicking.
 
-### Test coverage (20 tests)
+### Test coverage (19 tests)
 
-- 13 targeted tests for init/sync semantics, duplicate suppression, eager fetch planning, `next_expected()` behavior, and public type shapes.
-- 7 property-based tests for first-writer-wins, hole coverage, fetch-range bounds, slot-layout consistency, state monotonicity, fetch coverage, and `EntryCreated` slot preservation.
+- 13 targeted tests for init/sync semantics, duplicate suppression, eager fetch planning, `next_expected()` behavior, committed-prefix access, and public type shapes.
+- 6 property-based tests for first-writer-wins, hole coverage, fetch-range bounds, slot-layout consistency, state monotonicity, and fetch coverage.
 
 ## Protocol Integrity Concerns
 
@@ -381,7 +378,7 @@ Splitting entries into cleartext metadata (relations/graph topology) and opaque 
 
 - `EntryBuffer` is implemented and satisfies the pure log-application and submission-echo portion of the design.
 - `BackoffPolicy` is implemented as a pure helper in `consensus`.
-- Coordinator reducer is implemented with bootstrap from an optional latest entry, slot-based gap detection, page-bounded fetch planning, and local submit-effect emission (20 tests).
+- Coordinator reducer is implemented with bootstrap from an optional latest entry, slot-based gap detection, page-bounded fetch planning, and committed-prefix access (19 tests).
 - `SessionCoordinator` (the higher-level wrapper owning `EntryBuffer`, reconnect/catch-up policy, submission resume, and the full event/action contract described above) is not yet implemented.
 - Current CLI behavior is the reference behavior that the coordinator extraction must preserve.
 

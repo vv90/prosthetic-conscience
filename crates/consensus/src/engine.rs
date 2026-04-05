@@ -212,13 +212,12 @@ impl ConsensusEngine {
 
     /// High-level overview of the committed deliberation state.
     pub fn overview(&self) -> OverviewData {
-        let (state, statuses) = Self::materialize(&self.log);
-        render::overview(&state, &statuses)
+        overview_from_entries(self.log.iter())
     }
 
     /// Detailed view of a single claim in committed state.
     pub fn claim_detail(&self, claim_id: &ClaimId) -> Option<ClaimDetail> {
-        let (state, statuses) = Self::materialize(&self.log);
+        let (state, statuses) = materialize_entries(self.log.iter());
         render::claim_detail(&state, &statuses, claim_id)
     }
 
@@ -366,8 +365,7 @@ impl ConsensusEngine {
     /// Overview including uncommitted drafts.
     pub fn preview_overview(&self) -> Result<OverviewData, EngineError> {
         let merged = self.merged_entries()?;
-        let (state, statuses) = Self::materialize(&merged);
-        Ok(render::overview(&state, &statuses))
+        Ok(overview_from_entries(merged.iter()))
     }
 
     /// Claim detail including uncommitted drafts.
@@ -377,15 +375,15 @@ impl ConsensusEngine {
     ) -> Result<Option<ClaimDetail>, EngineError> {
         let claim_id = self.resolve_claim_ref_for_preview(claim)?;
         let merged = self.merged_entries()?;
-        let (state, statuses) = Self::materialize(&merged);
+        let (state, statuses) = materialize_entries(merged.iter());
         Ok(render::claim_detail(&state, &statuses, &claim_id))
     }
 
     /// Compare committed state with committed + drafts.
     pub fn impact_analysis(&self) -> Result<ImpactAnalysis, EngineError> {
-        let (committed_state, committed_statuses) = Self::materialize(&self.log);
+        let (committed_state, committed_statuses) = materialize_entries(self.log.iter());
         let merged = self.merged_entries()?;
-        let (preview_state, preview_statuses) = Self::materialize(&merged);
+        let (preview_state, preview_statuses) = materialize_entries(merged.iter());
         Ok(Self::build_impact_analysis(
             &self.drafts,
             &self.draft_author,
@@ -457,15 +455,6 @@ impl ConsensusEngine {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(merged)
-    }
-
-    /// Run the full pipeline: replay → graph → solve → status.
-    fn materialize(entries: &[Entry]) -> (MaterializedState, HashMap<ClaimId, EpistemicStatus>) {
-        let state = replay(entries);
-        let (graph, index) = to_graph(&state);
-        let labels = grounded_labelling(&graph);
-        let statuses = compute_all(&state, &labels, &index);
-        (state, statuses)
     }
 
     fn build_impact_analysis(
@@ -678,6 +667,30 @@ impl ConsensusEngine {
             DraftContent::Comment { claim, .. } => claim.as_ref().is_some_and(references),
         }
     }
+}
+
+/// Run the committed-state pipeline over any entry iterator.
+pub(crate) fn materialize_entries<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> (MaterializedState, HashMap<ClaimId, EpistemicStatus>) {
+    let entries = entries.into_iter().cloned().collect::<Vec<_>>();
+    materialize_owned(&entries)
+}
+
+/// Render overview data from any committed entry iterator.
+pub(crate) fn overview_from_entries<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> OverviewData {
+    let (state, statuses) = materialize_entries(entries);
+    render::overview(&state, &statuses)
+}
+
+fn materialize_owned(entries: &[Entry]) -> (MaterializedState, HashMap<ClaimId, EpistemicStatus>) {
+    let state = replay(entries);
+    let (graph, index) = to_graph(&state);
+    let labels = grounded_labelling(&graph);
+    let statuses = compute_all(&state, &labels, &index);
+    (state, statuses)
 }
 
 #[cfg(test)]

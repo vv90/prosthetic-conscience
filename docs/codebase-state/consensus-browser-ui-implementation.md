@@ -1,12 +1,19 @@
 # Consensus Browser UI Implementation
 
-Snapshot date: 2026-04-04
+Snapshot date: 2026-04-05
 
-Status: planned
+Status: partial
 
 This document describes the intended implementation process for the browser/WASM consensus UI.
 
 It is deliberately not a plan to recreate the terminal REPL in the browser. The browser app should be treated as a fresh interaction layer with its own pure Rust state machine, its own invariants, and only a minimal browser shell in JavaScript.
+
+Current status:
+
+- the pure browser-facing app boundary is implemented in `crates/consensus/src/app.rs`
+- draft-only behavior is separated into `crates/consensus/src/drafts.rs`
+- a thin `wasm-bindgen` wrapper now exists in `crates/consensus-wasm`
+- the browser shell, session bootstrap/join flow, and broader app surface are still planned
 
 Load into session context when working on: browser/WASM architecture, consensus app boundary design, session coordinator integration, JS↔WASM interface design, UI implementation sequencing.
 
@@ -142,26 +149,23 @@ Goal: create the browser-facing pure app boundary without committing to full ses
 
 Introduce the app-layer types in `crates/consensus/`:
 
-- `AppState`
-- `AppInput`
-- `AppEffect`
-- `AppView`
-- `AppTransition { state, effects }`
+- `app::{State, Event, Effect, View, Transition}`
+- `drafts::{State, Event, Effect, View, Notice, Transition}`
 
-The initial `AppInput` set should be intentionally small, for example:
+The app `Event` surface should stay parent-shaped while delegating to child
+reducers where that is already the real ownership boundary. For the current
+slice, that means wrapper variants such as:
 
-- `CreateSessionRequested`
-- `JoinSessionRequested { session_id }`
-- `Connected { session_id }`
-- `ConnectionLost { reason }`
-- `DraftClaimRequested { ... }`
-- `RemoveDraftRequested { draft_id }`
-- `SubmitDraftsRequested`
+- `DraftsEvent { event: drafts::Event }`
+- `CoordinatorEvent { event: coordinator::Event<Entry> }`
 
-The initial `AppEffect` set should also be small:
+Future app-owned events such as create/join/connected/disconnected can still
+exist directly on the parent reducer when no child reducer owns that domain yet.
 
-- `ConnectSession { mode }`
-- `SendEntries { payloads }`
+The initial app `Effect` set should also stay small. When the parent is mainly
+delegating, effects may be wrapped child effects rather than translated:
+
+- `CoordinatorEffect { effect: coordinator::Effect<Entry> }`
 
 The first version does not need to solve every transport edge case.
 
@@ -175,13 +179,55 @@ The first version does not need to solve every transport edge case.
 
 - `APP1` — Local-only app inputs never mutate the committed session log.
 - `APP2` — Removing one draft either leaves the draft set unchanged with an error, or removes exactly one draft while preserving the relative order of the remaining drafts.
-- `APP3` — Every draft ID exposed in `AppView` corresponds to exactly one pending draft in app state; the view does not invent, omit, or duplicate drafts.
+- `APP3` — Every draft ID exposed in `View` corresponds to exactly one pending draft in app state; the view does not invent, omit, or duplicate drafts.
 
 #### Logic
 
 - Define the app state machine skeleton.
 - Thread local draft creation and removal through the app layer.
-- Return a derived `AppView` from Rust, even if initially small.
+- Return a derived `View` from Rust, even if initially small.
+
+#### Concrete first implementation subset
+
+The first shipped increment should be narrower than the full Increment 0 sketch above:
+
+- Add `crates/consensus/src/app.rs` with:
+  - `State { coordinator, drafts }`
+  - `Event::{DraftsEvent { event: drafts::Event }, CoordinatorEvent { event: coordinator::Event<Entry> }}`
+  - `Effect::CoordinatorEffect { effect: coordinator::Effect<Entry> }`
+  - `View { overview, drafts, notice }`
+  - `Transition`
+- Add `crates/consensus/src/drafts.rs` with:
+  - `State`
+  - local `Event::{DraftClaimRequested, RemoveDraftRequested}`
+  - empty local `Effect`
+  - `Notice`
+  - `View { drafts, notice }`
+  - `Transition`
+- Keep this slice narrow:
+  - no session create/join behavior
+  - no submission effects
+  - no browser shell or transport adapter
+- Derive `View` directly from Rust-owned state on every call:
+  - `overview` from the coordinator's contiguous committed prefix
+  - `drafts` from Rust-owned `drafts::State`
+  - `notice` from Rust-owned `drafts::Notice`
+- Delegate parent events structurally:
+  - `DraftsEvent` passes through unchanged to `drafts::reduce()`
+  - `CoordinatorEvent` passes through unchanged to `coordinator::reduce()`
+  - coordinator effects are rewrapped rather than translated into app-shaped fetch variants
+
+#### Enforcement / evidence notes for the first subset
+
+- `APP1`
+  - Structural/type design: local draft events are delegated entirely to `drafts`, while committed entries are delegated entirely to `coordinator`. The app does not expose append/submission APIs.
+  - Test evidence: unit/property tests compare committed log and committed overview before/after local traces.
+- `APP2`
+  - Structural design: draft ordering remains `drafts::State`-owned; the app layer never rebuilds or reorders the draft sequence.
+  - Test evidence: targeted unit tests plus successful-removal property tests.
+- `APP3`
+  - Structural design: `View.drafts` is derived directly from `drafts::view()` with no duplicate app-layer cache.
+  - Test evidence: unit/property tests compare `View.drafts` to draft state after arbitrary local traces.
 
 #### Compatibility / impact
 
@@ -195,7 +241,7 @@ Goal: move local draft and overview interaction fully behind the app boundary.
 
 #### Interface
 
-Expand `AppInput` only for local interaction:
+Expand app `Event` only for local interaction:
 
 - `DraftRelationRequested`
 - `DraftStanceRequested`
@@ -204,7 +250,7 @@ Expand `AppInput` only for local interaction:
 - `ClearDraftsRequested`
 - `SelectClaimRequested`
 
-Expand `AppView` to include:
+Expand app `View` to include:
 
 - overview
 - selected claim detail
@@ -241,7 +287,7 @@ Goal: give the app a pure session-sync core without making JS responsible for co
 
 Add transport-fact inputs such as:
 
-- `SessionEntryObserved { index, payload }`
+- `CoordinatorEvent { event: coordinator::Event::Received { index, entry } }`
 - `SessionWarningObserved { message }`
 - `CatchUpPageObserved { from, entries, total }`
 - `CatchUpCompleteObserved`
@@ -250,7 +296,7 @@ Add transport-fact inputs such as:
 
 Add transport effects such as:
 
-- `FetchEntries { from, limit }`
+- `CoordinatorEffect { effect: coordinator::Effect<Entry> }`
 - `SendSessionMessage { payload }`
 - `DrainQueuedTransportEvents`
 
@@ -313,7 +359,8 @@ Goal: expose the already-pure app to the browser with the thinnest possible wrap
 The JS-facing wasm surface should be opaque and app-level:
 
 - construct app state
-- feed one input
+- read the current view
+- feed one committed entry
 - receive next view and requested effects
 
 The wrapper should not expose engine internals, coordinator internals, or ad hoc helper methods unless proven necessary.
@@ -329,7 +376,8 @@ The wrapper should not expose engine internals, coordinator internals, or ad hoc
 
 #### Logic
 
-- Add the `wasm-bindgen` wrapper only after the pure app boundary is stable enough to wrap.
+- Current implementation: `crates/consensus-wasm` exposes `ConsensusAppHandle::{new, view, receiveEntry}` over the pure app boundary.
+- The wrapper intentionally does not expose generic event dispatch, draft actions, or engine/coordinator internals yet.
 - Keep serialization formats explicit and narrow.
 
 #### Compatibility / impact
@@ -340,12 +388,9 @@ The wrapper should not expose engine internals, coordinator internals, or ad hoc
 
 The next implementation work should proceed in this order:
 
-1. Add the app-layer planning and update the near-term TODO.
-2. Define the new app boundary types in `crates/consensus/`.
-3. Write the first app-layer constraints and correctness properties before broadening functionality.
-4. Implement only the smallest local-only interaction slice.
-5. Expand to session synchronization after the local boundary is stable.
-6. Add the wasm wrapper only after the pure Rust app boundary is coherent.
+1. Expand the app boundary beyond the current receive/render slice to cover more local interaction.
+2. Move session bootstrap, catch-up, and reconnect policy behind the pure app/coordinator boundary.
+3. Build the first minimal browser shell against `crates/consensus-wasm`.
 
 ## Explicit non-goals
 

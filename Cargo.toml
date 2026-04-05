@@ -1,4 +1,8 @@
 [workspace]
-members = ["crates/prosthetic-conscience", "crates/consensus"]
+members = [
+    "crates/prosthetic-conscience",
+    "crates/consensus",
+    "crates/consensus-wasm",
+]
 default-members = ["crates/prosthetic-conscience"]
 resolver = "3"

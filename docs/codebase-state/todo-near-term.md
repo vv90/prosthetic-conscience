@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-04-03
+Snapshot date: 2026-04-05
 
 ## Consensus protocol implementation
 
@@ -91,17 +91,21 @@ Outstanding issues:
 
 ### Phase 6: WASM boundary and browser integration
 
-Core extraction is done: the consensus runtime now lives in `crates/consensus/`, `prosthetic-conscience` depends on it as a workspace crate, and the crate already builds for `wasm32-unknown-unknown`.
+Core extraction is done: the consensus runtime now lives in `crates/consensus/`, `prosthetic-conscience` depends on it as a workspace crate, and both `consensus` and `consensus-wasm` now build for `wasm32-unknown-unknown`.
 
 Implementation process for the browser/WASM layer now lives in [`docs/codebase-state/consensus-browser-ui-implementation.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/consensus-browser-ui-implementation.md). Invariant and testing terminology now lives in [`docs/codebase-state/testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md). Together they are the source of truth for the incremental interface -> constraints/correctness-properties -> logic loop described below.
 
-**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest indexed entry, slot-based gap detection, page-bounded fetch planning (`FetchMissing { from, limit }`), and local `SubmitEntry` emission. 20 tests (13 targeted + 7 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
+**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest indexed entry, slot-based gap detection, and page-bounded fetch planning (`FetchMissing { from, limit }`). 19 tests (13 targeted + 6 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
+
+**WASM wrapper (implemented):** `crates/consensus-wasm` — thin `wasm-bindgen` wrapper over `consensus::app` with JS-facing `new`, `view`, and `receiveEntry` methods. 4 host-side tests plus verified `wasm32-unknown-unknown` build. Does not yet own browser shell concerns, generic event dispatch, or session transport policy.
 
 **Phase 6 implementation order:**
 
 14. Establish the new pure browser-facing app boundary in `crates/consensus/`:
-    `AppState`, `AppInput`, `AppEffect`, `AppView`, `AppTransition`.
+    `app::{State, Event, Effect, View, Transition}` plus a dedicated `drafts` state machine for draft-only behavior.
 15. For that first app slice, write explicit app-layer constraints and correctness properties before expanding behavior.
+    First implementation subset:
+    composed `app.rs` + `drafts.rs` boundary with claim-draft creation, draft removal, incoming committed-entry handling, committed overview rendering from coordinator state, current drafts rendering, and typed local notices. No session create/join flow, submission effects, CLI migration, or wasm wrapper in the first PR.
 16. Implement the smallest local-only interaction slice behind the app boundary:
     local drafts, overview, selected claim detail, impact analysis, explicit submit intent.
 17. Expand the session coordinator into the higher-level pure source of truth for session sync policy:
@@ -110,8 +114,7 @@ Implementation process for the browser/WASM layer now lives in [`docs/codebase-s
 19. Replace the imperative session/submission control flow in `consensus_cli/app.rs` with the higher-level pure app/coordinator loop.
 20. Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
 21. Add bootstrap session metadata so connect handling can receive the latest entry index together with the full latest entry payload, and use that to simplify initial catch-up planning.
-22. Only after the pure app boundary is stable, add a thin `wasm-bindgen` wrapper crate that exposes the app-level interface rather than engine/coordinator internals.
-23. Build the first browser prototype against that wrapper with a minimal JS shell:
+22. Build the first browser prototype against the existing wrapper with a minimal JS shell:
     DOM rendering, websocket/HTTP execution, timers, auth token handling.
 
 **Remaining Phase 6 tasks:**

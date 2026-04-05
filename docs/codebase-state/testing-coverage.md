@@ -167,21 +167,20 @@ Location: `crates/consensus/src/llm_turn.rs` (inline `#[cfg(test)]` module).
 | Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                            |
 | History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                         |
 
-### Coordinator reducer tests (20 tests)
+### Coordinator reducer tests (19 tests)
 
 Location: `crates/consensus/src/coordinator.rs` (inline `#[cfg(test)]` module).
 
-| Area                        | Count | What is tested                                                                                                                                                  |
-| --------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bootstrap and resync        | 7     | `init` empty/latest/error cases, `sync_to_latest` noop, non-shrinking behavior, filling requested latest slot, preserving existing received value              |
-| Entry reception and effects | 6     | Duplicate receive noop, requested-slot fill, future receive emits eager `FetchMissing`, `EntryCreated` emits one submit effect, `next_expected()` semantics, public type shapes |
+| Area                                       | Count | What is tested                                                                                                                                                  |
+| ------------------------------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bootstrap and resync                       | 7     | `init` empty/latest/error cases, `sync_to_latest` noop, non-shrinking behavior, filling requested latest slot, preserving existing received value              |
+| Entry reception, effects, and view access  | 6     | Duplicate receive noop, requested-slot fill, future receive emits eager `FetchMissing`, `next_expected()` semantics, public type shapes, committed-prefix omission of buffered future entries |
 | Property: first writer wins | 1     | Duplicate indices never overwrite the first received value                                                                                                      |
 | Property: hole coverage     | 1     | Future receives cover every newly requested slot below the current upper bound                                                                                  |
 | Property: fetch bounds      | 1     | `FetchMissing` ranges are ascending, non-overlapping, bounded by `page_limit`, and never exceed `slots.len()`                                                 |
 | Property: slot layout       | 1     | `next_expected()` always matches the first requested slot or `slots.len()`                                                                                      |
 | Property: monotonic state   | 1     | `slots.len()` and `next_expected()` never decrease; previously received slots remain unchanged                                                                  |
 | Property: fetch coverage    | 1     | Newly created requested slots are covered by fetch effects; non-extending receives emit no fetches                                                             |
-| Property: submit noop state | 1     | `EntryCreated` never mutates the slot layout                                                                                                                    |
 
 ### Consensus entry buffer tests (3 tests)
 
@@ -193,7 +192,41 @@ Location: `crates/consensus/src/entry_buffer.rs` (inline `#[cfg(test)]` module).
 | Entry buffering       | 1     | Out-of-order entries buffered until gap is closed         |
 | Tool trace formatting | 1     | `format_tool_trace` lists each tool round                 |
 
-### Consensus app tests (1 test)
+### Consensus drafts reducer tests (8 tests)
+
+Location: `crates/consensus/src/drafts.rs` (inline `#[cfg(test)]` module).
+
+| Area                        | Count | What is tested                                                                                       |
+| --------------------------- | ----- | ---------------------------------------------------------------------------------------------------- |
+| Draft transition rules      | 6     | Empty state, claim draft creation, middle removal, unknown removal, referenced-draft failure, invalid parent failure |
+| Property: view fidelity     | 1     | `drafts::View.drafts` matches draft state exactly after arbitrary local traces                       |
+| Property: removal ordering  | 1     | Removing an existing generated draft removes exactly one entry and preserves the relative order       |
+
+### Consensus app reducer tests (12 tests)
+
+Location: `crates/consensus/src/app.rs` (inline `#[cfg(test)]` module).
+
+| Area                                 | Count | What is tested                                                                                                                        |
+| ------------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| App/coordinator composition          | 7     | Empty view, wrapped draft events emit no app effects, committed entry updates overview, future entries stay buffered, fetch requests surface as wrapped coordinator effects, coordinator events preserve existing draft state |
+| Boundary serialization               | 3     | Wrapped drafts event shape, wrapped coordinator event shape, wrapped coordinator effect shape                                         |
+| Property: draft isolation            | 1     | Draft-only traces preserve the coordinator-derived committed overview                                                                  |
+| Property: entry isolation            | 1     | Entry-only traces do not change draft list or draft notice                                                                             |
+
+### Consensus wasm wrapper tests (4 tests)
+
+Location: `crates/consensus-wasm/src/lib.rs` (inline `#[cfg(test)]` module).
+
+| Area                    | Count | What is tested                                                                                              |
+| ----------------------- | ----- | ----------------------------------------------------------------------------------------------------------- |
+| Wrapper view bootstrap  | 1     | Initial handle state produces the same empty `View` shape as the pure app                                   |
+| Wrapper receive path    | 3     | Contiguous receive updates overview, out-of-order receive returns wrapped fetch effect, gap fill catches up |
+
+Build verification:
+
+- `cargo build -p consensus-wasm --target wasm32-unknown-unknown`
+
+### Consensus CLI app tests (1 test)
 
 Location: `crates/prosthetic-conscience/src/consensus_cli/app.rs` (inline `#[cfg(test)]` module).
 
@@ -367,9 +400,12 @@ Test-suite discipline rules and coverage goals:
 - Protocol: strong coverage (14 serde tests).
 - Consensus tool dispatch: strong coverage (23 tests).
 - Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
-- Coordinator reducer: strong coverage (20 tests — 13 targeted + 7 property-based, covers bootstrap from latest entry, slot monotonicity, gap detection, and page-bounded fetch planning).
+- Coordinator reducer: strong coverage (19 tests — 13 targeted + 6 property-based, covers bootstrap from latest entry, slot monotonicity, gap detection, page-bounded fetch planning, and committed-prefix access).
 - Consensus entry buffer: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
-- Consensus app: minimal coverage (1 test — trace formatting).
+- Consensus drafts reducer: strong coverage (8 tests — draft transition rules plus view/removal properties).
+- Consensus app reducer: strong coverage (12 tests — wrapped child-event delegation, wrapped coordinator effects, boundary serialization, and draft/entry isolation properties).
+- Consensus wasm wrapper: adequate coverage (4 tests + wasm32 build verification — empty view bootstrap and receive/render wrapper flow).
+- Consensus CLI app: minimal coverage (1 test — trace formatting).
 - Consensus eval: adequate coverage (3 tests — scoring and context seeding).
 - Integration: 28 tests passing. Includes consensus-specific tests: `consensus_llm_drafts_claim_after_clarification_turn`, `consensus_seed_*` (2), and `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
