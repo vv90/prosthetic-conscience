@@ -1,0 +1,1046 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Consensus Live Viewer</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@700;800&display=swap"
+            rel="stylesheet"
+        />
+        <style>
+            :root {
+                --background: #f4faff;
+                --surface: #f4faff;
+                --surface-low: #e9f6fd;
+                --surface-lowest: #ffffff;
+                --surface-high: #ddeaf2;
+                --primary: #00342b;
+                --primary-container: #004d40;
+                --primary-fixed: #afefdd;
+                --secondary-container: #cfe6f2;
+                --secondary-text: #526772;
+                --on-surface: #111d23;
+                --on-surface-variant: #3f4945;
+                --outline-ghost: rgba(191, 201, 196, 0.35);
+                --attention: #fabd00;
+                --attention-ink: #261a00;
+                --good: #0d6b57;
+                --bad: #8e5b00;
+                --danger: #7f1d1d;
+                --shadow: 0 12px 32px -20px rgba(17, 29, 35, 0.2);
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            html,
+            body {
+                margin: 0;
+                min-height: 100%;
+            }
+
+            body {
+                background:
+                    radial-gradient(circle at top left, rgba(175, 239, 221, 0.35), transparent 28%),
+                    linear-gradient(180deg, rgba(0, 77, 64, 0.04), transparent 18%),
+                    var(--background);
+                color: var(--on-surface);
+                font-family: "Inter", sans-serif;
+            }
+
+            a {
+                color: inherit;
+            }
+
+            .shell {
+                max-width: 1040px;
+                margin: 0 auto;
+                padding: 32px 20px 72px;
+            }
+
+            .hero {
+                display: grid;
+                gap: 16px;
+                margin-bottom: 24px;
+            }
+
+            .eyebrow {
+                margin: 0 0 8px;
+                color: var(--secondary-text);
+                font-size: 0.78rem;
+                font-weight: 700;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+            }
+
+            .hero h1 {
+                margin: 0;
+                color: var(--primary);
+                font-family: "Manrope", sans-serif;
+                font-size: clamp(2.3rem, 7vw, 4.3rem);
+                font-weight: 800;
+                letter-spacing: -0.04em;
+                line-height: 0.95;
+            }
+
+            .lede {
+                margin: 12px 0 0;
+                max-width: 64ch;
+                color: var(--on-surface-variant);
+                font-size: 1rem;
+                line-height: 1.65;
+            }
+
+            .meta-strip {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: center;
+            }
+
+            .chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.74);
+                color: var(--secondary-text);
+                padding: 10px 14px;
+                font-size: 0.77rem;
+                font-weight: 700;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                backdrop-filter: blur(16px);
+                box-shadow: inset 0 0 0 1px var(--outline-ghost);
+            }
+
+            .chip strong {
+                color: var(--primary);
+                font-weight: 800;
+            }
+
+            .chip.status-connecting {
+                background: rgba(207, 230, 242, 0.95);
+                color: var(--primary);
+            }
+
+            .chip.status-syncing {
+                background: rgba(255, 231, 179, 0.92);
+                color: var(--primary);
+            }
+
+            .chip.status-connected {
+                background: rgba(175, 239, 221, 0.85);
+                color: var(--primary);
+            }
+
+            .chip.status-disconnected,
+            .chip.status-error {
+                background: rgba(250, 189, 0, 0.88);
+                color: var(--attention-ink);
+            }
+
+            .blocking-error {
+                background: rgba(255, 255, 255, 0.84);
+                border-radius: 22px;
+                padding: 24px;
+                box-shadow: var(--shadow);
+                backdrop-filter: blur(14px);
+            }
+
+            .blocking-error h2,
+            .section-heading h2,
+            .section-heading h3 {
+                margin: 0;
+                color: var(--primary);
+                font-family: "Manrope", sans-serif;
+                letter-spacing: -0.02em;
+            }
+
+            .blocking-error p,
+            .section-heading p,
+            .inline-message,
+            .empty-state,
+            .claim-meta,
+            .attention-detail,
+            .draft-detail {
+                color: var(--on-surface-variant);
+                line-height: 1.6;
+            }
+
+            .viewer {
+                display: grid;
+                gap: 18px;
+            }
+
+            .card {
+                background: var(--surface-lowest);
+                border-radius: 22px;
+                padding: 22px;
+                box-shadow: var(--shadow);
+            }
+
+            .card.muted {
+                background: var(--surface-low);
+            }
+
+            .section-heading {
+                display: flex;
+                justify-content: space-between;
+                gap: 16px;
+                align-items: flex-start;
+                margin-bottom: 18px;
+            }
+
+            .section-heading p {
+                margin: 6px 0 0;
+                font-size: 0.95rem;
+            }
+
+            .overview-grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 12px;
+                margin-bottom: 18px;
+            }
+
+            .stat {
+                background: linear-gradient(135deg, rgba(0, 77, 64, 0.07), rgba(255, 255, 255, 0.72));
+                border-radius: 18px;
+                padding: 18px;
+            }
+
+            .stat-label {
+                color: var(--secondary-text);
+                font-size: 0.78rem;
+                font-weight: 700;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+            }
+
+            .stat-value {
+                margin-top: 10px;
+                color: var(--primary);
+                font-family: "Manrope", sans-serif;
+                font-size: clamp(1.6rem, 5vw, 2.4rem);
+                font-weight: 800;
+                letter-spacing: -0.04em;
+            }
+
+            .pill-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+
+            .pill {
+                display: inline-flex;
+                align-items: center;
+                border-radius: 999px;
+                background: rgba(0, 77, 64, 0.08);
+                color: var(--primary);
+                padding: 8px 12px;
+                font-size: 0.84rem;
+                font-weight: 600;
+            }
+
+            .attention-list,
+            .claim-list,
+            .draft-list {
+                display: grid;
+                gap: 12px;
+            }
+
+            .attention-item,
+            .claim-item,
+            .draft-item {
+                border-radius: 18px;
+                background: rgba(255, 255, 255, 0.72);
+                padding: 18px;
+                box-shadow: inset 0 0 0 1px rgba(191, 201, 196, 0.18);
+            }
+
+            .attention-item {
+                background: rgba(255, 255, 255, 0.55);
+            }
+
+            .row-top {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+
+            .tag {
+                display: inline-flex;
+                align-items: center;
+                border-radius: 999px;
+                padding: 6px 10px;
+                font-size: 0.72rem;
+                font-weight: 800;
+                letter-spacing: 0.1em;
+                text-transform: uppercase;
+            }
+
+            .tag.kind {
+                background: rgba(0, 77, 64, 0.08);
+                color: var(--primary);
+            }
+
+            .tag.status-established {
+                background: rgba(175, 239, 221, 0.85);
+                color: var(--good);
+            }
+
+            .tag.status-unexamined,
+            .tag.status-contested,
+            .tag.status-unresolved,
+            .tag.attention {
+                background: rgba(250, 189, 0, 0.9);
+                color: var(--attention-ink);
+            }
+
+            .tag.status-defeated {
+                background: rgba(207, 230, 242, 0.95);
+                color: var(--secondary-text);
+            }
+
+            .claim-body,
+            .draft-title {
+                margin: 0;
+                color: var(--on-surface);
+                font-size: 1.02rem;
+                font-weight: 600;
+                line-height: 1.55;
+            }
+
+            .claim-meta,
+            .attention-detail,
+            .draft-detail,
+            .inline-message {
+                margin-top: 10px;
+                font-size: 0.94rem;
+            }
+
+            .claim-meta strong,
+            .attention-detail strong,
+            .draft-detail strong,
+            .inline-message strong {
+                color: var(--primary);
+            }
+
+            .sub-pills {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 12px;
+            }
+
+            .sub-pill {
+                border-radius: 999px;
+                background: rgba(0, 52, 43, 0.06);
+                color: var(--secondary-text);
+                padding: 8px 12px;
+                font-size: 0.82rem;
+                line-height: 1.35;
+            }
+
+            .stack {
+                display: grid;
+                gap: 18px;
+            }
+
+            .empty-state {
+                margin: 0;
+                padding: 6px 0 2px;
+                font-size: 0.96rem;
+            }
+
+            .footer-note {
+                margin-top: 22px;
+                color: var(--secondary-text);
+                font-size: 0.8rem;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+
+            @media (max-width: 760px) {
+                .shell {
+                    padding: 20px 14px 52px;
+                }
+
+                .card {
+                    padding: 18px;
+                    border-radius: 18px;
+                }
+
+                .overview-grid {
+                    grid-template-columns: 1fr;
+                }
+
+                .section-heading {
+                    flex-direction: column;
+                }
+
+                .chip {
+                    width: 100%;
+                    justify-content: space-between;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="shell">
+            <header class="hero">
+                <div>
+                    <p class="eyebrow">Live Consensus Viewer</p>
+                    <h1>Consensus Session</h1>
+                    <p class="lede">
+                        Thin browser shell over the existing wasm view. This page bootstraps from
+                        the latest known session index, catches up missing history, and then stays
+                        subscribed to live entries.
+                    </p>
+                </div>
+                <div class="meta-strip" id="metaStrip"></div>
+            </header>
+
+            <section class="blocking-error" id="blockingError" hidden></section>
+
+            <main class="viewer" id="viewer" hidden>
+                    <section class="card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>Overview</h2>
+                                <p>Current wasm snapshot of the subscribed session view.</p>
+                            </div>
+                        </div>
+                    <div class="overview-grid" id="overviewStats"></div>
+                    <div class="section-heading">
+                        <div>
+                            <h3>Participants</h3>
+                        </div>
+                    </div>
+                    <div class="pill-row" id="participantList"></div>
+                </section>
+
+                <section class="card muted">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Needs Attention</h2>
+                            <p>Directly rendered from <code>view.overview.attention</code>.</p>
+                        </div>
+                    </div>
+                    <div class="attention-list" id="attentionList"></div>
+                </section>
+
+                <section class="stack">
+                    <section class="card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>Items</h2>
+                                <p>Committed item claims visible in the live wasm view.</p>
+                            </div>
+                        </div>
+                        <div class="claim-list" id="itemsList"></div>
+                    </section>
+
+                    <section class="card muted">
+                        <div class="section-heading">
+                            <div>
+                                <h2>Proposals</h2>
+                                <p>Committed proposal claims visible in the live wasm view.</p>
+                            </div>
+                        </div>
+                        <div class="claim-list" id="proposalsList"></div>
+                    </section>
+
+                    <section class="card">
+                        <div class="section-heading">
+                            <div>
+                                <h2>Resolved</h2>
+                                <p>Resolved claims from the current committed view.</p>
+                            </div>
+                        </div>
+                        <div class="claim-list" id="resolvedList"></div>
+                    </section>
+                </section>
+
+                <section class="card muted">
+                    <div class="section-heading">
+                        <div>
+                            <h2>Drafts</h2>
+                            <p>Rendered from the existing wasm view only. No draft actions exist here.</p>
+                        </div>
+                    </div>
+                    <div class="inline-message" id="draftNotice" hidden></div>
+                    <div class="draft-list" id="draftList"></div>
+                    <p class="footer-note">Effects are logged to the console and never executed by JS.</p>
+                </section>
+            </main>
+        </div>
+
+        <script type="module">
+            import init, { ConsensusAppHandle } from "/consensus-assets/consensus_wasm.js";
+
+            const params = new URLSearchParams(window.location.search);
+            const sessionId = params.get("session_id");
+            const participant = params.get("participant") || "browser";
+
+            const state = {
+                participant,
+                sessionId,
+                connection: sessionId ? "loading" : "error",
+                statusDetail: sessionId ? "Loading wasm module" : "Missing session_id query parameter",
+                handle: null,
+                socket: null,
+                view: null,
+                serial: Promise.resolve(),
+            };
+
+            const dom = {
+                metaStrip: document.getElementById("metaStrip"),
+                blockingError: document.getElementById("blockingError"),
+                viewer: document.getElementById("viewer"),
+                overviewStats: document.getElementById("overviewStats"),
+                participantList: document.getElementById("participantList"),
+                attentionList: document.getElementById("attentionList"),
+                itemsList: document.getElementById("itemsList"),
+                proposalsList: document.getElementById("proposalsList"),
+                resolvedList: document.getElementById("resolvedList"),
+                draftNotice: document.getElementById("draftNotice"),
+                draftList: document.getElementById("draftList"),
+            };
+
+            renderMeta();
+
+            if (!sessionId) {
+                renderBlockingError(
+                    "Missing session_id",
+                    "Open this page with a session id in the URL, for example ?session_id=demo.",
+                );
+            } else {
+                start().catch((error) => {
+                    console.error("Failed to start consensus viewer", error);
+                    state.connection = "error";
+                    state.statusDetail = error && error.message ? error.message : String(error);
+                    renderMeta();
+                    renderBlockingError(
+                        "Viewer failed to start",
+                        state.statusDetail || "Unexpected initialization failure.",
+                    );
+                });
+            }
+
+            async function start() {
+                await init();
+                state.handle = new ConsensusAppHandle(state.participant);
+                state.connection = "connecting";
+                state.statusDetail = "Opening websocket subscription";
+                render();
+                openSessionSocket();
+            }
+
+            function enqueue(task) {
+                state.serial = state.serial
+                    .then(task, task)
+                    .catch((error) => {
+                        handleAsyncFailure("Queued session work failed", error);
+                    });
+                return state.serial;
+            }
+
+            function openSessionSocket() {
+                const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+                const socketUrl = `${protocol}//${window.location.host}/v1/sessions`;
+                const socket = new WebSocket(socketUrl);
+                state.socket = socket;
+
+                socket.addEventListener("open", () => {
+                    socket.send(
+                        JSON.stringify({
+                            type: "subscribe",
+                            session_id: state.sessionId,
+                        }),
+                    );
+                });
+
+                socket.addEventListener("message", (event) => {
+                    let message;
+                    try {
+                        message = JSON.parse(event.data);
+                    } catch (error) {
+                        console.error("Failed to parse session message", error, event.data);
+                        state.connection = "error";
+                        state.statusDetail = "Received malformed session message";
+                        render();
+                        return;
+                    }
+
+                    switch (message.type) {
+                        case "subscribed":
+                            enqueue(() => handleSubscribed(message));
+                            break;
+                        case "entry":
+                            enqueue(() => applyEntry(message));
+                            break;
+                        case "subscriber_removed":
+                            state.connection = "disconnected";
+                            state.statusDetail = "Subscription removed by server";
+                            renderMeta();
+                            break;
+                        case "error":
+                            state.connection = "error";
+                            state.statusDetail = message.message || "Session error";
+                            renderMeta();
+                            break;
+                        default:
+                            console.warn("Ignoring unknown session message", message);
+                    }
+                });
+
+                socket.addEventListener("error", () => {
+                    if (state.connection !== "error") {
+                        state.connection = "error";
+                        state.statusDetail = "Websocket error";
+                        renderMeta();
+                    }
+                });
+
+                socket.addEventListener("close", () => {
+                    if (state.connection !== "error") {
+                        state.connection = "disconnected";
+                        state.statusDetail = "Connection closed";
+                        renderMeta();
+                    }
+                });
+            }
+
+            async function handleSubscribed(message) {
+                state.connection = "syncing";
+                state.statusDetail =
+                    message.latest_entry_index == null
+                        ? "Bootstrapping empty session state"
+                        : `Catching up through entry ${message.latest_entry_index}`;
+                render();
+
+                const result = state.handle.bootstrap(message.latest_entry_index);
+                state.view = result.view;
+                render();
+
+                await runEffects(result.effects);
+
+                if (state.connection !== "error" && state.connection !== "disconnected") {
+                    state.connection = "connected";
+                    state.statusDetail = "History synced; live subscription active";
+                    render();
+                }
+            }
+
+            async function applyEntry(message) {
+                try {
+                    const result = state.handle.receiveEntry(message.index, message.payload);
+                    state.view = result.view;
+                    render();
+                    await runEffects(result.effects);
+                } catch (error) {
+                    handleAsyncFailure("Failed to apply entry through wasm", error, message);
+                }
+            }
+
+            async function runEffects(effects) {
+                if (!Array.isArray(effects) || effects.length === 0) {
+                    return;
+                }
+
+                const wasConnected = state.connection === "connected";
+
+                for (const effect of effects) {
+                    if (effect.type !== "coordinator_effect" || !effect.effect) {
+                        console.warn("Ignoring unknown wasm effect", effect);
+                        continue;
+                    }
+
+                    switch (effect.effect.type) {
+                        case "fetch_missing":
+                            await fetchMissing(effect.effect.data);
+                            break;
+                        default:
+                            console.warn("Ignoring unknown coordinator effect", effect);
+                    }
+                }
+
+                if (wasConnected && state.connection === "syncing") {
+                    state.connection = "connected";
+                    state.statusDetail = "Live subscription active";
+                    renderMeta();
+                }
+            }
+
+            async function fetchMissing(data) {
+                const from = Number(data?.from);
+                const limit = Number(data?.limit);
+
+                if (!Number.isInteger(from) || from < 0 || !Number.isInteger(limit) || limit <= 0) {
+                    throw new Error("Invalid fetch_missing effect payload");
+                }
+
+                state.connection = "syncing";
+                state.statusDetail = `Fetching session entries ${from}..${from + limit - 1}`;
+                renderMeta();
+
+                const page = await fetchSessionEntries(from, limit);
+                if (!Array.isArray(page.entries)) {
+                    throw new Error("Session entries response was malformed");
+                }
+
+                for (let offset = 0; offset < page.entries.length; offset += 1) {
+                    await applyEntry({
+                        index: from + offset,
+                        payload: page.entries[offset],
+                    });
+                }
+            }
+
+            async function fetchSessionEntries(after, limit) {
+                const url = new URL(
+                    `/v1/sessions/${encodeURIComponent(state.sessionId)}/entries`,
+                    window.location.origin,
+                );
+                url.searchParams.set("after", String(after));
+                url.searchParams.set("limit", String(limit));
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch session entries (${response.status})`);
+                }
+
+                return response.json();
+            }
+
+            function handleAsyncFailure(message, error, payload) {
+                console.error(message, error, payload);
+                state.connection = "error";
+                state.statusDetail = error && error.message ? error.message : String(error);
+                renderMeta();
+                if (!state.view) {
+                    renderBlockingError("Viewer failed to start", state.statusDetail);
+                }
+            }
+
+            function renderBlockingError(title, detail) {
+                dom.blockingError.hidden = false;
+                dom.viewer.hidden = true;
+                dom.blockingError.innerHTML = `
+                    <h2>${escapeHtml(title)}</h2>
+                    <p>${escapeHtml(detail)}</p>
+                `;
+            }
+
+            function render() {
+                renderMeta();
+                dom.blockingError.hidden = true;
+                dom.viewer.hidden = false;
+
+                const view = state.view || {
+                    overview: {
+                        total_claims: 0,
+                        total_relations: 0,
+                        total_stances: 0,
+                        participants: [],
+                        attention: [],
+                        items: [],
+                        proposals: [],
+                        resolved: [],
+                    },
+                    drafts: [],
+                    notice: null,
+                };
+
+                dom.overviewStats.innerHTML = [
+                    renderStat("Claims", view.overview.total_claims),
+                    renderStat("Relations", view.overview.total_relations),
+                    renderStat("Stances", view.overview.total_stances),
+                ].join("");
+
+                dom.participantList.innerHTML = renderParticipantPills(view.overview.participants);
+                dom.attentionList.innerHTML = renderAttentionList(view.overview.attention);
+                dom.itemsList.innerHTML = renderClaimList(
+                    view.overview.items,
+                    "No item claims are visible in the current session snapshot.",
+                );
+                dom.proposalsList.innerHTML = renderClaimList(
+                    view.overview.proposals,
+                    "No proposal claims are visible in the current session snapshot.",
+                );
+                dom.resolvedList.innerHTML = renderClaimList(
+                    view.overview.resolved,
+                    "No resolved claims are visible in the current session snapshot.",
+                );
+
+                if (view.notice) {
+                    dom.draftNotice.hidden = false;
+                    dom.draftNotice.innerHTML = renderDraftNotice(view.notice);
+                } else {
+                    dom.draftNotice.hidden = true;
+                    dom.draftNotice.innerHTML = "";
+                }
+                dom.draftList.innerHTML = renderDraftList(view.drafts);
+            }
+
+            function renderMeta() {
+                dom.metaStrip.innerHTML = `
+                    <span class="chip"><strong>Session</strong> ${escapeHtml(state.sessionId || "missing")}</span>
+                    <span class="chip"><strong>Participant</strong> ${escapeHtml(state.participant)}</span>
+                    <span class="chip status-${escapeHtml(state.connection)}">
+                        <strong>Status</strong> ${escapeHtml(formatLabel(state.connection))}
+                    </span>
+                    <span class="chip"><strong>Mode</strong> Bootstrap + live</span>
+                    <span class="chip"><strong>Detail</strong> ${escapeHtml(state.statusDetail || "Idle")}</span>
+                `;
+            }
+
+            function renderStat(label, value) {
+                return `
+                    <article class="stat">
+                        <div class="stat-label">${escapeHtml(label)}</div>
+                        <div class="stat-value">${escapeHtml(String(value))}</div>
+                    </article>
+                `;
+            }
+
+            function renderParticipantPills(participants) {
+                if (!Array.isArray(participants) || participants.length === 0) {
+                    return '<p class="empty-state">No participants are visible in the current session snapshot yet.</p>';
+                }
+                return participants
+                    .map((participantName) => `<span class="pill">${escapeHtml(participantName)}</span>`)
+                    .join("");
+            }
+
+            function renderAttentionList(attention) {
+                if (!Array.isArray(attention) || attention.length === 0) {
+                    return '<p class="empty-state">Nothing in the current wasm view is marked as needing attention.</p>';
+                }
+
+                return attention
+                    .map((signal) => {
+                        const normalized = normalizeAttentionSignal(signal);
+                        if (!normalized) {
+                            return `
+                                <article class="attention-item">
+                                    <div class="row-top">
+                                        <span class="tag attention">Unknown signal</span>
+                                    </div>
+                                    <p class="attention-detail">${escapeHtml(JSON.stringify(signal))}</p>
+                                </article>
+                            `;
+                        }
+
+                        switch (normalized.type) {
+                            case "unexamined":
+                                return `
+                                    <article class="attention-item">
+                                        <div class="row-top">
+                                            <span class="tag attention">Unexamined</span>
+                                        </div>
+                                        <p class="claim-body">${escapeHtml(normalized.data.body || "Untitled claim")}</p>
+                                        <p class="attention-detail">
+                                            <strong>Author:</strong> ${escapeHtml(normalized.data.author || "unknown")}
+                                            <br />
+                                            <strong>Claim:</strong> ${escapeHtml(normalized.data.claim_id || "unknown")}
+                                        </p>
+                                    </article>
+                                `;
+                            case "contested":
+                                return `
+                                    <article class="attention-item">
+                                        <div class="row-top">
+                                            <span class="tag attention">Contested</span>
+                                        </div>
+                                        <p class="claim-body">${escapeHtml(normalized.data.body || "Untitled claim")}</p>
+                                        <p class="attention-detail">
+                                            <strong>Claim:</strong> ${escapeHtml(normalized.data.claim_id || "unknown")}
+                                            <br />
+                                            <strong>Blockers:</strong> ${escapeHtml(joinList(normalized.data.blockers))}
+                                        </p>
+                                    </article>
+                                `;
+                            case "unresolved_cycle":
+                                return `
+                                    <article class="attention-item">
+                                        <div class="row-top">
+                                            <span class="tag attention">Unresolved</span>
+                                        </div>
+                                        <p class="attention-detail">
+                                            ${escapeHtml(joinList(normalized.data.claim_ids) || "Cycle reported without claim ids.")}
+                                        </p>
+                                    </article>
+                                `;
+                            default:
+                                return `
+                                    <article class="attention-item">
+                                        <div class="row-top">
+                                            <span class="tag attention">${escapeHtml(formatLabel(normalized.type))}</span>
+                                        </div>
+                                        <p class="attention-detail">${escapeHtml(JSON.stringify(normalized.data))}</p>
+                                    </article>
+                                `;
+                        }
+                    })
+                    .join("");
+            }
+
+            function renderClaimList(claims, emptyText) {
+                if (!Array.isArray(claims) || claims.length === 0) {
+                    return `<p class="empty-state">${escapeHtml(emptyText)}</p>`;
+                }
+                return claims.map((claim) => renderClaim(claim)).join("");
+            }
+
+            function renderClaim(claim) {
+                const resolution = claim.resolution
+                    ? `<div class="sub-pill">Resolution: ${escapeHtml(formatLabel(claim.resolution.outcome))} by ${escapeHtml(claim.resolution.author || "unknown")}</div>`
+                    : "";
+                const stances = Array.isArray(claim.stances) && claim.stances.length > 0
+                    ? `<div class="sub-pills">${claim.stances
+                          .map(
+                              (stance) =>
+                                  `<span class="sub-pill">${escapeHtml(formatLabel(stance.position))}: ${escapeHtml(joinList(stance.authors))}</span>`,
+                          )
+                          .join("")}${resolution}</div>`
+                    : resolution
+                      ? `<div class="sub-pills">${resolution}</div>`
+                      : "";
+                return `
+                    <article class="claim-item">
+                        <div class="row-top">
+                            <span class="tag kind">${escapeHtml(formatLabel(claim.kind || "claim"))}</span>
+                            ${claim.status ? `<span class="tag status-${escapeHtml(claim.status)}">${escapeHtml(formatLabel(claim.status))}</span>` : ""}
+                        </div>
+                        <p class="claim-body">${escapeHtml(claim.body || "Untitled claim")}</p>
+                        <p class="claim-meta">
+                            <strong>Claim:</strong> ${escapeHtml(claim.id || "unknown")}
+                            <br />
+                            <strong>Author:</strong> ${escapeHtml(claim.author || "unknown")}
+                            ${claim.parent_id ? `<br /><strong>Parent:</strong> ${escapeHtml(claim.parent_id)}` : ""}
+                        </p>
+                        ${stances}
+                    </article>
+                `;
+            }
+
+            function renderDraftList(drafts) {
+                if (!Array.isArray(drafts) || drafts.length === 0) {
+                    return '<p class="empty-state">There are no wasm-visible drafts in the current session snapshot.</p>';
+                }
+                return drafts.map((draft) => renderDraft(draft)).join("");
+            }
+
+            function renderDraft(draft) {
+                const entry = draft.entry || {};
+                return `
+                    <article class="draft-item">
+                        <div class="row-top">
+                            <span class="tag kind">${escapeHtml(formatLabel(entry.type || "draft"))}</span>
+                            <span class="tag status-defeated">Draft ${escapeHtml(String(draft.id))}</span>
+                        </div>
+                        <p class="draft-title">${escapeHtml(describeDraft(entry))}</p>
+                        <p class="draft-detail">${escapeHtml(JSON.stringify(entry))}</p>
+                    </article>
+                `;
+            }
+
+            function renderDraftNotice(notice) {
+                switch (notice.type) {
+                    case "draft_not_found":
+                        return `<strong>Draft notice:</strong> draft ${escapeHtml(String(notice.draft_id))} was not found.`;
+                    case "draft_reference_must_target_claim":
+                        return `<strong>Draft notice:</strong> draft ${escapeHtml(String(notice.draft_id))} must reference a claim.`;
+                    case "draft_referenced":
+                        return `<strong>Draft notice:</strong> draft ${escapeHtml(String(notice.draft_id))} is still referenced by draft ${escapeHtml(String(notice.referenced_by))}.`;
+                    default:
+                        return `<strong>Draft notice:</strong> ${escapeHtml(JSON.stringify(notice))}`;
+                }
+            }
+
+            function describeDraft(entry) {
+                switch (entry.type) {
+                    case "claim":
+                        return `${formatLabel(entry.claim_kind || "claim")}: ${entry.body || "Untitled claim"}`;
+                    case "relation":
+                        return `${formatClaimRef(entry.source)} ${formatLabel(entry.kind || "relates")} ${formatClaimRef(entry.target)}`;
+                    case "stance":
+                        return `${formatLabel(entry.position || "stance")} on ${formatClaimRef(entry.target)}`;
+                    case "resolve":
+                        return `${formatLabel(entry.outcome || "resolve")} ${formatClaimRef(entry.claim)}`;
+                    case "comment":
+                        return `Comment: ${entry.body || "Untitled comment"}`;
+                    default:
+                        return "Unknown draft entry";
+                }
+            }
+
+            function formatClaimRef(ref) {
+                if (!ref || typeof ref !== "object") {
+                    return "unknown";
+                }
+                if (ref.claim_id) {
+                    return `claim:${ref.claim_id}`;
+                }
+                if (typeof ref.draft_id !== "undefined") {
+                    return `draft:${ref.draft_id}`;
+                }
+                return "unknown";
+            }
+
+            function normalizeAttentionSignal(signal) {
+                if (!signal || typeof signal !== "object") {
+                    return null;
+                }
+                if (signal.type && typeof signal.type === "string") {
+                    return { type: signal.type, data: signal };
+                }
+                if (signal.Unexamined) {
+                    return { type: "unexamined", data: signal.Unexamined };
+                }
+                if (signal.Contested) {
+                    return { type: "contested", data: signal.Contested };
+                }
+                if (signal.UnresolvedCycle) {
+                    return { type: "unresolved_cycle", data: signal.UnresolvedCycle };
+                }
+                return null;
+            }
+
+            function joinList(values) {
+                return Array.isArray(values) && values.length > 0 ? values.join(", ") : "none";
+            }
+
+            function formatLabel(value) {
+                if (!value) {
+                    return "";
+                }
+                return String(value)
+                    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+                    .replace(/_/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim()
+                    .replace(/^./, (match) => match.toUpperCase());
+            }
+
+            function escapeHtml(value) {
+                return String(value)
+                    .replaceAll("&", "&amp;")
+                    .replaceAll("<", "&lt;")
+                    .replaceAll(">", "&gt;")
+                    .replaceAll('"', "&quot;")
+                    .replaceAll("'", "&#39;");
+            }
+        </script>
+    </body>
+</html>

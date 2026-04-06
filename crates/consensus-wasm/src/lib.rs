@@ -12,6 +12,7 @@ struct DispatchResult {
 
 #[wasm_bindgen]
 pub struct ConsensusAppHandle {
+    participant: String,
     state: Option<app::State>,
 }
 
@@ -20,8 +21,14 @@ impl ConsensusAppHandle {
     #[wasm_bindgen(constructor)]
     pub fn new(participant: String) -> Self {
         Self {
-            state: Some(app::init(participant)),
+            participant,
+            state: None,
         }
+    }
+
+    pub fn bootstrap(&mut self, latest_entry_index: Option<usize>) -> Result<JsValue, JsValue> {
+        let result = self.bootstrap_model(latest_entry_index).map_err(js_error)?;
+        to_js_value(&result)
     }
 
     pub fn view(&self) -> Result<JsValue, JsValue> {
@@ -38,11 +45,25 @@ impl ConsensusAppHandle {
 }
 
 impl ConsensusAppHandle {
+    fn bootstrap_model(
+        &mut self,
+        latest_entry_index: Option<usize>,
+    ) -> Result<DispatchResult, String> {
+        let transition = app::init(self.participant.clone(), latest_entry_index);
+        let view = app::view(&transition.state);
+        self.state = Some(transition.state);
+
+        Ok(DispatchResult {
+            view,
+            effects: transition.effects,
+        })
+    }
+
     fn view_model(&self) -> Result<app::View, String> {
         let state = self
             .state
             .as_ref()
-            .ok_or_else(|| String::from("app state unavailable"))?;
+            .ok_or_else(|| String::from("app state unavailable; call bootstrap first"))?;
         Ok(app::view(state))
     }
 
@@ -54,7 +75,7 @@ impl ConsensusAppHandle {
         let state = self
             .state
             .take()
-            .ok_or_else(|| String::from("app state unavailable"))?;
+            .ok_or_else(|| String::from("app state unavailable; call bootstrap first"))?;
         let transition = app::reduce(
             state,
             app::Event::CoordinatorEvent {
@@ -103,21 +124,46 @@ mod tests {
     }
 
     #[test]
-    fn initial_state_produces_empty_view() {
+    fn view_requires_bootstrap_first() {
         let handle = ConsensusAppHandle::new(String::from("alice"));
-        let view = handle.view_model().unwrap();
+        let error = handle.view_model().unwrap_err();
 
-        assert_eq!(view.overview.total_claims, 0);
-        assert_eq!(view.overview.total_relations, 0);
-        assert_eq!(view.overview.total_stances, 0);
-        assert!(view.overview.attention.is_empty());
-        assert!(view.drafts.is_empty());
-        assert!(view.notice.is_none());
+        assert!(error.contains("bootstrap"));
+    }
+
+    #[test]
+    fn bootstrap_without_latest_entry_index_produces_empty_view() {
+        let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        let result = handle.bootstrap_model(None).unwrap();
+
+        assert!(result.effects.is_empty());
+        assert_eq!(result.view.overview.total_claims, 0);
+        assert_eq!(result.view.overview.total_relations, 0);
+        assert_eq!(result.view.overview.total_stances, 0);
+        assert!(result.view.overview.attention.is_empty());
+        assert!(result.view.drafts.is_empty());
+        assert!(result.view.notice.is_none());
+    }
+
+    #[test]
+    fn bootstrap_with_latest_entry_index_requests_missing_history() {
+        let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        let result = handle.bootstrap_model(Some(3)).unwrap();
+
+        assert_eq!(result.view.overview.total_claims, 0);
+        assert_eq!(result.effects.len(), 1);
+        assert!(matches!(
+            &result.effects[0],
+            app::Effect::CoordinatorEffect {
+                effect: coordinator::Effect::FetchMissing { from, limit, .. }
+            } if *from == 0 && *limit == 4
+        ));
     }
 
     #[test]
     fn contiguous_receive_updates_overview_total_claims() {
         let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        handle.bootstrap_model(None).unwrap();
         let result = handle
             .receive_entry_model(0, claim_entry("c1", "Use JWT"))
             .unwrap();
@@ -129,6 +175,7 @@ mod tests {
     #[test]
     fn out_of_order_receive_keeps_overview_empty_and_requests_fetch() {
         let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        handle.bootstrap_model(None).unwrap();
         let result = handle
             .receive_entry_model(2, claim_entry("c3", "third"))
             .unwrap();
@@ -146,6 +193,7 @@ mod tests {
     #[test]
     fn filling_gap_materializes_all_contiguous_entries_in_overview() {
         let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        handle.bootstrap_model(None).unwrap();
 
         let result = handle
             .receive_entry_model(2, claim_entry("c3", "third"))
@@ -161,5 +209,15 @@ mod tests {
             .receive_entry_model(1, claim_entry("c2", "second"))
             .unwrap();
         assert_eq!(result.view.overview.total_claims, 3);
+    }
+
+    #[test]
+    fn receive_entry_requires_bootstrap_first() {
+        let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        let error = handle
+            .receive_entry_model(0, claim_entry("c1", "Use JWT"))
+            .unwrap_err();
+
+        assert!(error.contains("bootstrap"));
     }
 }

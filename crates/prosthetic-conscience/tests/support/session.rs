@@ -18,6 +18,13 @@ impl MockSessionClient {
     /// Connect to /v1/sessions, send Create, wait for Subscribed.
     /// Returns (client, session_id).
     pub async fn create(addr: SocketAddr) -> (Self, String) {
+        let (client, session_id, _) = Self::create_with_handshake(addr).await;
+        (client, session_id)
+    }
+
+    /// Connect to /v1/sessions, send Create, wait for Subscribed.
+    /// Returns (client, session_id, latest_entry_index).
+    pub async fn create_with_handshake(addr: SocketAddr) -> (Self, String, Option<usize>) {
         let url = format!("ws://{}/v1/sessions", addr);
         let (mut ws, _) = connect_async(url)
             .await
@@ -31,13 +38,26 @@ impl MockSessionClient {
 
         let mut client = Self { ws };
         match client.recv().await {
-            Some(SessionGatewayMessage::Subscribed { session_id }) => (client, session_id),
+            Some(SessionGatewayMessage::Subscribed {
+                session_id,
+                latest_entry_index,
+            }) => (client, session_id, latest_entry_index),
             other => panic!("expected Subscribed, got {:?}", other),
         }
     }
 
     /// Connect to /v1/sessions, send Subscribe, wait for Subscribed.
     pub async fn subscribe(addr: SocketAddr, session_id: &str) -> Self {
+        let (client, _) = Self::subscribe_with_handshake(addr, session_id).await;
+        client
+    }
+
+    /// Connect to /v1/sessions, send Subscribe, wait for Subscribed.
+    /// Returns (client, latest_entry_index).
+    pub async fn subscribe_with_handshake(
+        addr: SocketAddr,
+        session_id: &str,
+    ) -> (Self, Option<usize>) {
         let url = format!("ws://{}/v1/sessions", addr);
         let (mut ws, _) = connect_async(url)
             .await
@@ -53,7 +73,9 @@ impl MockSessionClient {
 
         let mut client = Self { ws };
         match client.recv().await {
-            Some(SessionGatewayMessage::Subscribed { .. }) => client,
+            Some(SessionGatewayMessage::Subscribed {
+                latest_entry_index, ..
+            }) => (client, latest_entry_index),
             other => panic!("expected Subscribed, got {:?}", other),
         }
     }

@@ -95,9 +95,9 @@ Core extraction is done: the consensus runtime now lives in `crates/consensus/`,
 
 Implementation process for the browser/WASM layer now lives in [`docs/codebase-state/consensus-browser-ui-implementation.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/consensus-browser-ui-implementation.md). Invariant and testing terminology now lives in [`docs/codebase-state/testing-methodology-and-invariants.md`](/Users/vladimir/devshells/prosthetic-conscience/docs/codebase-state/testing-methodology-and-invariants.md). Together they are the source of truth for the incremental interface -> constraints/correctness-properties -> logic loop described below.
 
-**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest indexed entry, slot-based gap detection, and page-bounded fetch planning (`FetchMissing { from, limit }`). 19 tests (13 targeted + 6 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
+**Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest entry index, slot-based gap detection, and page-bounded fetch planning (`FetchMissing { from, limit }`). 19 tests (13 targeted + 6 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
 
-**WASM wrapper (implemented):** `crates/consensus-wasm` — thin `wasm-bindgen` wrapper over `consensus::app` with JS-facing `new`, `view`, and `receiveEntry` methods. 4 host-side tests plus verified `wasm32-unknown-unknown` build. Does not yet own browser shell concerns, generic event dispatch, or session transport policy.
+**WASM wrapper (implemented):** `crates/consensus-wasm` — thin `wasm-bindgen` wrapper over `consensus::app` with JS-facing `new`, `bootstrap`, `view`, and `receiveEntry` methods. 7 host-side tests plus verified `wasm32-unknown-unknown` build. Does not yet own browser shell concerns beyond bootstrap/catch-up execution, generic event dispatch, or session transport policy.
 
 **Phase 6 implementation order:**
 
@@ -113,7 +113,7 @@ Implementation process for the browser/WASM layer now lives in [`docs/codebase-s
 18. Treat `EntryBuffer` as transitional. Fold its responsibilities into the higher-level coordinator rather than preserving both as long-term public boundaries.
 19. Replace the imperative session/submission control flow in `consensus_cli/app.rs` with the higher-level pure app/coordinator loop.
 20. Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
-21. Add bootstrap session metadata so connect handling can receive the latest entry index together with the full latest entry payload, and use that to simplify initial catch-up planning.
+21. Bootstrap session metadata now carries `latest_entry_index` on `Subscribed`, and app/bootstrap initialization now uses that upper bound directly instead of requiring a copied latest entry payload.
 22. Build the first browser prototype against the existing wrapper with a minimal JS shell:
     DOM rendering, websocket/HTTP execution, timers, auth token handling.
 

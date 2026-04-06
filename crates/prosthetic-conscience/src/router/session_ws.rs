@@ -54,15 +54,18 @@ async fn session_ws_connection(mut socket: WebSocket, state: AppState) {
                 }
             };
             // Wait for Subscribed from mpsc (sent by SessionCreated effect executor)
-            let session_id = match rx.recv().await {
-                Some(SessionGatewayMessage::Subscribed { session_id }) => {
-                    SessionId(session_id.clone())
-                }
+            let subscribed = match rx.recv().await {
+                Some(SessionGatewayMessage::Subscribed {
+                    session_id,
+                    latest_entry_index,
+                }) => (SessionId(session_id.clone()), latest_entry_index),
                 _ => return,
             };
+            let (session_id, latest_entry_index) = subscribed;
             // Forward Subscribed to client
             let msg = SessionGatewayMessage::Subscribed {
                 session_id: session_id.0.clone(),
+                latest_entry_index,
             };
             if let Ok(json) = serde_json::to_string(&msg)
                 && socket.send(Message::Text(json.into())).await.is_err()
@@ -74,8 +77,8 @@ async fn session_ws_connection(mut socket: WebSocket, state: AppState) {
         }
         SessionClientMessage::Subscribe { session_id } => {
             let sid = SessionId(session_id.clone());
-            let subscriber_id = match state.runtime.session_subscribe(sid.clone(), tx).await {
-                Ok(id) => id,
+            let subscription = match state.runtime.session_subscribe(sid.clone(), tx).await {
+                Ok(subscription) => subscription,
                 Err(err) => {
                     warn!(%err, session_id = %session_id, "failed to subscribe to session");
                     return;
@@ -87,6 +90,7 @@ async fn session_ws_connection(mut socket: WebSocket, state: AppState) {
             // in the connection loop below.
             let msg = SessionGatewayMessage::Subscribed {
                 session_id: session_id.clone(),
+                latest_entry_index: subscription.latest_entry_index,
             };
             if let Ok(json) = serde_json::to_string(&msg)
                 && socket.send(Message::Text(json.into())).await.is_err()
@@ -94,7 +98,7 @@ async fn session_ws_connection(mut socket: WebSocket, state: AppState) {
                 return;
             }
             info!(session_id = %session_id, "subscribed to session");
-            (subscriber_id, sid)
+            (subscription.subscriber_id, sid)
         }
         _ => return, // unreachable given handshake validation above
     };

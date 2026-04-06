@@ -6,6 +6,7 @@ use std::time::Duration;
 use consensus::engine::{ConsensusEngine, DraftContent};
 use consensus::response as response_assembler;
 use consensus::types::{ClaimId, ClaimKind, Entry};
+use consensus::{app as consensus_app, coordinator as consensus_coordinator};
 use prosthetic_conscience::client::gateway_client::GatewayClient;
 use prosthetic_conscience::client::tool_loop;
 use prosthetic_conscience::client::tools::ToolRegistry;
@@ -97,6 +98,21 @@ async fn session_create_and_append() {
 }
 
 #[tokio::test]
+async fn session_create_handshake_reports_null_latest_entry_index() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (_client, session_id, latest_entry_index) =
+            MockSessionClient::create_with_handshake(gw.addr).await;
+
+        assert!(!session_id.is_empty());
+        assert_eq!(latest_entry_index, None);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
 async fn session_subscribe_receives_notifications() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let gw = TestGateway::start().await;
@@ -127,6 +143,26 @@ async fn session_subscribe_receives_notifications() {
         });
         assert_eq!(entry_a2, expected2);
         assert_eq!(entry_b2, expected2);
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
+async fn session_subscribe_handshake_reports_latest_entry_index() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+
+        let (mut writer, session_id) = MockSessionClient::create(gw.addr).await;
+        writer.append(json!({"data": 1})).await;
+        let _ = writer.recv().await;
+        writer.append(json!({"data": 2})).await;
+        let _ = writer.recv().await;
+
+        let (_reader, latest_entry_index) =
+            MockSessionClient::subscribe_with_handshake(gw.addr, &session_id).await;
+
+        assert_eq!(latest_entry_index, Some(1));
     })
     .await
     .expect("test timed out after 5 seconds");
@@ -243,6 +279,69 @@ async fn session_handshake_timeout() {
 }
 
 #[tokio::test]
+async fn consensus_ui_routes_serve_embedded_assets() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let gw = TestGateway::start().await;
+        let client = reqwest::Client::new();
+
+        let html = client
+            .get(format!("http://{}/consensus?session_id=demo", gw.addr))
+            .send()
+            .await
+            .unwrap();
+        assert!(html.status().is_success());
+        assert!(
+            html.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"))
+        );
+        let html_body = html.text().await.unwrap();
+        assert!(html_body.contains("Live Consensus Viewer"));
+        assert!(html_body.contains("/consensus-assets/consensus_wasm.js"));
+
+        let js = client
+            .get(format!(
+                "http://{}/consensus-assets/consensus_wasm.js",
+                gw.addr
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(js.status().is_success());
+        assert!(
+            js.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("javascript"))
+        );
+        let js_body = js.text().await.unwrap();
+        assert!(js_body.contains("export class ConsensusAppHandle"));
+        assert!(js_body.contains("bootstrap("));
+
+        let wasm = client
+            .get(format!(
+                "http://{}/consensus-assets/consensus_wasm_bg.wasm",
+                gw.addr
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(wasm.status().is_success());
+        assert_eq!(
+            wasm.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/wasm")
+        );
+        let bytes = wasm.bytes().await.unwrap();
+        assert!(bytes.starts_with(b"\0asm"));
+    })
+    .await
+    .expect("test timed out after 5 seconds");
+}
+
+#[tokio::test]
 async fn consensus_seed_joins_existing_session_and_persists_fixture_entries() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let gw = TestGateway::start().await;
@@ -279,6 +378,70 @@ async fn consensus_seed_joins_existing_session_and_persists_fixture_entries() {
 
         assert_eq!(page.total, expected.len());
         assert_eq!(page.entries, expected);
+    })
+    .await
+    .expect("test timed out after 10 seconds");
+}
+
+#[tokio::test]
+async fn consensus_bootstrap_from_latest_entry_index_and_fetched_pages_reconstructs_overview() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gw = TestGateway::start().await;
+        let log = authentication_deliberation_log();
+        let (_subscriber, session_id) = MockSessionClient::create(gw.addr).await;
+
+        let seeded = join_and_seed_session(
+            format!("http://{}", gw.addr),
+            None,
+            session_id.clone(),
+            &log.entries,
+        )
+        .await
+        .unwrap();
+
+        let (_bootstrap_client, latest_entry_index) =
+            MockSessionClient::subscribe_with_handshake(gw.addr, &seeded.session_id).await;
+        assert_eq!(latest_entry_index, seeded.total_entries.checked_sub(1),);
+
+        let session = SessionClient::join(
+            format!("http://{}", gw.addr),
+            None,
+            seeded.session_id.clone(),
+        )
+        .await
+        .unwrap();
+        let page = session
+            .fetch_entries(0, seeded.total_entries)
+            .await
+            .unwrap();
+
+        let transition = consensus_app::init(String::from("browser"), latest_entry_index);
+        let mut state = transition.state;
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            &transition.effects[0],
+            consensus_app::Effect::CoordinatorEffect {
+                effect: consensus_coordinator::Effect::FetchMissing { from, limit, .. },
+            } if *from == 0 && *limit == seeded.total_entries
+        ));
+
+        for (index, payload) in page.entries.into_iter().enumerate() {
+            let entry: Entry = serde_json::from_value(payload).unwrap();
+            state = consensus_app::reduce(
+                state,
+                consensus_app::Event::CoordinatorEvent {
+                    event: consensus_coordinator::Event::Received { index, entry },
+                },
+            )
+            .state;
+        }
+
+        let mut expected = ConsensusEngine::new(String::from("browser"));
+        for entry in &log.entries {
+            expected.append(entry.clone());
+        }
+
+        assert_eq!(consensus_app::view(&state).overview, expected.overview());
     })
     .await
     .expect("test timed out after 10 seconds");

@@ -140,14 +140,14 @@ Both the parent kernel's unknown-session cleanup and the P14 test use explicit m
 
 **Transport layer** (done)
 
-- Wire protocol types: `SessionClientMessage` (Create, Subscribe, Append, Heartbeat) and `SessionGatewayMessage` (Subscribed, Entry, SubscriberRemoved, Error) in `protocol.rs`. 20 serde round-trip tests.
+- Wire protocol types: `SessionClientMessage` (Create, Subscribe, Append, Heartbeat) and `SessionGatewayMessage` (Subscribed, Entry, SubscriberRemoved, Error) in `protocol.rs`. `Subscribed` now carries `{ session_id, latest_entry_index }`, where `latest_entry_index` is `None` for empty/new sessions and `Some(n)` for the current committed upper bound. 20 serde round-trip tests.
 - `SubscriberHandle = mpsc::Sender<SessionGatewayMessage>` type alias in `channel_registry.rs`.
 - 5 `RuntimeCommand` variants: `SessionCreate`, `SessionSubscribe`, `SessionAppendEntry`, `SessionSubscriberHeartbeat`, `SessionUnsubscribe`. Each has a handler method on `GatewayRuntime` and a convenience method on `RuntimeHandle`.
-- Effect executors in `spawn_effects`: `SessionCreated` sends `Subscribed` via handle, `NotifySubscribers` fans out `Entry` to all handles, `SubscriberRemoved` sends removal notice and drops handle.
+- Effect executors in `spawn_effects`: `SessionCreated` sends `Subscribed { latest_entry_index: None }` via handle, `NotifySubscribers` fans out `Entry` to all handles, `SubscriberRemoved` sends removal notice and drops handle.
 - WS handler at `/v1/sessions` (`session_ws.rs`): single endpoint with message-based handshake (first message is `Create` or `Subscribe`), connection loop with `tokio::select!` (gateway→client forwarding, client→gateway dispatch, automatic heartbeat tick at 10s), cleanup sends `Unsubscribe` on disconnect. Handshake timeout: 5s.
-- Create flow: WS handler registers subscriber, sends `SessionCreate` command, waits for `Subscribed` from mpsc (sent by `SessionCreated` effect executor), forwards to client.
-- Subscribe flow: WS handler registers subscriber, sends `SessionSubscribe` command, sends `Subscribed` to client immediately. If session doesn't exist, kernel emits `SubscriberRemoved` via P14 defensive cleanup, which arrives through mpsc and closes the connection.
-- 7 integration tests: create+append, subscribe notifications, nonexistent session (P14), subscriber timeout, multiple subscribers, disconnect cleanup, handshake timeout.
+- Create flow: WS handler registers subscriber, sends `SessionCreate` command, waits for `Subscribed` from mpsc (sent by `SessionCreated` effect executor), then forwards that handshake payload to the client unchanged.
+- Subscribe flow: WS handler registers subscriber, sends `SessionSubscribe` command, receives `{ subscriber_id, latest_entry_index }` back from the runtime, and immediately sends `Subscribed` to the client. If the session doesn't exist, the handshake still carries `latest_entry_index: None`, and the kernel emits `SubscriberRemoved` via P14 defensive cleanup, which arrives through mpsc and closes the connection.
+- 9 integration tests: create+append, create handshake metadata, subscribe notifications, subscribe handshake metadata, nonexistent session (P14), subscriber timeout, multiple subscribers, disconnect cleanup, handshake timeout.
 
 ## Known Issues
 

@@ -1,7 +1,7 @@
 //! Pure session coordination reducer.
 //!
 //! This module defines a small reducer-shaped boundary for:
-//! - bootstrapping from the latest known indexed entry
+//! - bootstrapping from the latest known entry index
 //! - receiving live or fetched stream entries
 //! - planning fetches for missing ranges
 //!
@@ -11,13 +11,6 @@
 use std::marker::PhantomData;
 
 use serde::Serialize;
-
-/// A latest known indexed entry used for bootstrap or resync.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LatestEntry<T> {
-    pub index: usize,
-    pub entry: T,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot<T> {
@@ -105,10 +98,10 @@ impl<T> State<T> {
     }
 }
 
-/// Create coordinator state from a page limit and optional latest known entry.
+/// Create coordinator state from a page limit and optional latest known entry index.
 pub fn init<T>(
     page_limit: usize,
-    latest: Option<LatestEntry<T>>,
+    latest_entry_index: Option<usize>,
 ) -> Result<Transition<T>, InitError> {
     if page_limit == 0 {
         return Err(InitError::InvalidPageLimit);
@@ -116,13 +109,13 @@ pub fn init<T>(
 
     let state = State::empty(page_limit);
 
-    Ok(sync_to_latest(state, latest))
+    Ok(sync_to_latest(state, latest_entry_index))
 }
 
-/// Update coordinator state to the latest known entry without shrinking state.
-pub fn sync_to_latest<T>(mut state: State<T>, latest: Option<LatestEntry<T>>) -> Transition<T> {
-    if let Some(latest) = latest {
-        apply_latest(&mut state, latest);
+/// Update coordinator state to the latest known entry index without shrinking state.
+pub fn sync_to_latest<T>(mut state: State<T>, latest_entry_index: Option<usize>) -> Transition<T> {
+    if let Some(latest_entry_index) = latest_entry_index {
+        apply_latest_index(&mut state, latest_entry_index);
         let effects = plan_missing_fetches(&state);
         return Transition { state, effects };
     }
@@ -163,17 +156,11 @@ pub fn reduce<T>(mut state: State<T>, event: Event<T>) -> Transition<T> {
     }
 }
 
-fn apply_latest<T>(state: &mut State<T>, latest: LatestEntry<T>) {
-    if latest.index >= state.slots.len() {
+fn apply_latest_index<T>(state: &mut State<T>, latest_entry_index: usize) {
+    if latest_entry_index >= state.slots.len() {
         state
             .slots
-            .resize_with(latest.index + 1, || Slot::Requested);
-    }
-
-    if matches!(state.slots.get(latest.index), Some(Slot::Requested))
-        && let Some(slot) = state.slots.get_mut(latest.index)
-    {
-        *slot = Slot::Received(latest.entry);
+            .resize_with(latest_entry_index + 1, || Slot::Requested);
     }
 }
 
@@ -218,19 +205,12 @@ mod tests {
     #[derive(Debug, Clone)]
     enum Op {
         Receive { index: usize, value: usize },
-        SyncLatest(Option<(usize, usize)>),
-    }
-
-    fn latest(index: usize, value: usize) -> LatestEntry<Dummy> {
-        LatestEntry {
-            index,
-            entry: Dummy(value),
-        }
+        SyncLatest(Option<usize>),
     }
 
     /// Unwrapping helper for tests — `init` returns Result now.
-    fn test_init(page_limit: usize, latest: Option<LatestEntry<Dummy>>) -> Transition<Dummy> {
-        init(page_limit, latest).unwrap()
+    fn test_init(page_limit: usize, latest_entry_index: Option<usize>) -> Transition<Dummy> {
+        init(page_limit, latest_entry_index).unwrap()
     }
 
     fn fetch_ranges(effects: &[Effect<Dummy>]) -> Vec<(usize, usize)> {
@@ -283,10 +263,7 @@ mod tests {
                     entry: Dummy(value),
                 },
             ),
-            Op::SyncLatest(Some((index, value))) => {
-                sync_to_latest(state, Some(latest(index, value)))
-            }
-            Op::SyncLatest(None) => sync_to_latest(state, None),
+            Op::SyncLatest(latest_entry_index) => sync_to_latest(state, latest_entry_index),
         }
     }
 
@@ -305,8 +282,8 @@ mod tests {
     }
 
     #[test]
-    fn init_with_latest_creates_requested_holes_and_fetches_them() {
-        let transition = test_init(2, Some(latest(3, 30)));
+    fn init_with_latest_entry_index_creates_requested_holes_and_fetches_them() {
+        let transition = test_init(2, Some(3));
 
         assert_eq!(
             transition.state.slots,
@@ -314,21 +291,21 @@ mod tests {
                 Slot::Requested,
                 Slot::Requested,
                 Slot::Requested,
-                Slot::Received(Dummy(30)),
+                Slot::Requested,
             ]
         );
         assert_eq!(transition.state.next_expected(), 0);
         assert_eq!(
             transition.effects,
-            vec![Effect::fetch_missing(0, 2), Effect::fetch_missing(2, 1),]
+            vec![Effect::fetch_missing(0, 2), Effect::fetch_missing(2, 2),]
         );
     }
 
     #[test]
     fn sync_to_latest_none_is_noop() {
-        let initial = test_init(3, Some(latest(2, 20))).state;
+        let initial = test_init(3, Some(2)).state;
 
-        let transition = sync_to_latest(initial.clone(), None::<LatestEntry<Dummy>>);
+        let transition = sync_to_latest(initial.clone(), None);
 
         assert_eq!(transition.state, initial);
         assert!(transition.effects.is_empty());
@@ -336,25 +313,30 @@ mod tests {
 
     #[test]
     fn sync_to_latest_never_shrinks_state() {
-        let initial = test_init(3, Some(latest(5, 50))).state;
+        let initial = test_init(3, Some(5)).state;
 
-        let transition = sync_to_latest(initial.clone(), Some(latest(2, 20)));
+        let transition = sync_to_latest(initial.clone(), Some(2));
 
         assert_eq!(transition.state.slots.len(), initial.slots.len());
-        assert_eq!(transition.state.slots[5], Slot::Received(Dummy(50)));
+        assert_eq!(transition.state.slots[5], Slot::Requested);
     }
 
     #[test]
-    fn sync_to_latest_fills_requested_latest_slot() {
-        let initial = test_init(4, Some(latest(5, 50))).state;
+    fn sync_to_latest_extends_requested_holes_without_shrinking() {
+        let initial = test_init(4, Some(1)).state;
 
-        let transition = sync_to_latest(initial, Some(latest(3, 30)));
+        let transition = sync_to_latest(initial, Some(3));
 
-        assert_eq!(transition.state.slots[3], Slot::Received(Dummy(30)));
         assert_eq!(
-            transition.effects,
-            vec![Effect::fetch_missing(0, 3), Effect::fetch_missing(4, 1),]
+            transition.state.slots,
+            vec![
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Requested,
+                Slot::Requested,
+            ]
         );
+        assert_eq!(transition.effects, vec![Effect::fetch_missing(0, 4),]);
     }
 
     #[test]
@@ -368,7 +350,7 @@ mod tests {
         )
         .state;
 
-        let transition = sync_to_latest(initial, Some(latest(3, 999)));
+        let transition = sync_to_latest(initial, Some(3));
 
         assert_eq!(transition.state.slots[3], Slot::Received(Dummy(30)));
     }
@@ -398,7 +380,7 @@ mod tests {
 
     #[test]
     fn received_requested_slot_fills_without_effects() {
-        let initial = test_init(4, Some(latest(3, 30))).state;
+        let initial = test_init(4, Some(3)).state;
 
         let transition = reduce(
             initial,
@@ -440,7 +422,7 @@ mod tests {
 
     #[test]
     fn next_expected_matches_first_requested_slot_or_len() {
-        let mut state = test_init(4, Some(latest(3, 30))).state;
+        let mut state = test_init(4, Some(3)).state;
         assert_eq!(state.next_expected(), 0);
 
         state = reduce(
@@ -471,15 +453,11 @@ mod tests {
             },
         )
         .state;
-        assert_eq!(state.next_expected(), 4);
+        assert_eq!(state.next_expected(), 3);
     }
 
     #[test]
     fn type_shapes_cover_all_public_variants() {
-        let latest_entry = latest(4, 40);
-        assert_eq!(latest_entry.index, 4);
-        assert_eq!(latest_entry.entry, Dummy(40));
-
         let all_events = vec![Event::Received {
             index: 3,
             entry: Dummy(30),
@@ -592,8 +570,7 @@ mod tests {
             ops in prop::collection::vec(
                 prop_oneof![
                     (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
-                    prop::option::of((0usize..32, 0usize..1000))
-                        .prop_map(Op::SyncLatest),
+                    prop::option::of(0usize..32).prop_map(Op::SyncLatest),
                 ],
                 0..64,
             )
@@ -626,8 +603,7 @@ mod tests {
             ops in prop::collection::vec(
                 prop_oneof![
                     (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
-                    prop::option::of((0usize..32, 0usize..1000))
-                        .prop_map(Op::SyncLatest),
+                    prop::option::of(0usize..32).prop_map(Op::SyncLatest),
                 ],
                 0..64,
             )
@@ -658,8 +634,7 @@ mod tests {
             ops in prop::collection::vec(
                 prop_oneof![
                     (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
-                    prop::option::of((0usize..32, 0usize..1000))
-                        .prop_map(Op::SyncLatest),
+                    prop::option::of(0usize..32).prop_map(Op::SyncLatest),
                 ],
                 0..64,
             )
@@ -711,8 +686,7 @@ mod tests {
             ops in prop::collection::vec(
                 prop_oneof![
                     (0usize..32, 0usize..1000).prop_map(|(index, value)| Op::Receive { index, value }),
-                    prop::option::of((0usize..32, 0usize..1000))
-                        .prop_map(Op::SyncLatest),
+                    prop::option::of(0usize..32).prop_map(Op::SyncLatest),
                 ],
                 0..64,
             )

@@ -30,10 +30,18 @@ pub enum SessionClientMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionGatewayMessage {
-    Subscribed { session_id: String },
-    Entry { index: usize, payload: Value },
+    Subscribed {
+        session_id: String,
+        latest_entry_index: Option<usize>,
+    },
+    Entry {
+        index: usize,
+        payload: Value,
+    },
     SubscriberRemoved,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -134,6 +142,7 @@ mod tests {
     fn session_gateway_subscribed_round_trip() {
         let msg = SessionGatewayMessage::Subscribed {
             session_id: String::from("sess-abc"),
+            latest_entry_index: Some(7),
         };
         let json_str = serde_json::to_string(&msg).unwrap();
         let parsed: SessionGatewayMessage = serde_json::from_str(&json_str).unwrap();
@@ -142,12 +151,26 @@ mod tests {
 
     #[test]
     fn session_gateway_subscribed_from_json() {
-        let input = r#"{"type":"subscribed","session_id":"sess-abc"}"#;
+        let input = r#"{"type":"subscribed","session_id":"sess-abc","latest_entry_index":7}"#;
         let parsed: SessionGatewayMessage = serde_json::from_str(input).unwrap();
         assert_eq!(
             parsed,
             SessionGatewayMessage::Subscribed {
                 session_id: String::from("sess-abc"),
+                latest_entry_index: Some(7),
+            }
+        );
+    }
+
+    #[test]
+    fn session_gateway_subscribed_with_null_latest_entry_index_from_json() {
+        let input = r#"{"type":"subscribed","session_id":"sess-abc","latest_entry_index":null}"#;
+        let parsed: SessionGatewayMessage = serde_json::from_str(input).unwrap();
+        assert_eq!(
+            parsed,
+            SessionGatewayMessage::Subscribed {
+                session_id: String::from("sess-abc"),
+                latest_entry_index: None,
             }
         );
     }

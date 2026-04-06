@@ -83,7 +83,7 @@ impl SessionClient {
     ) -> Result<Self, SessionError> {
         let base_url = normalize_base_url(&base_url);
         let ws_url = session_ws_url(&base_url)?;
-        let (ws, session_id) =
+        let (ws, session_id, _) =
             connect_with_handshake(&ws_url, &auth_token, SessionClientMessage::Create).await?;
         Self::from_connected(base_url, auth_token, session_id, ws)
     }
@@ -98,7 +98,7 @@ impl SessionClient {
         let handshake = SessionClientMessage::Subscribe {
             session_id: session_id.clone(),
         };
-        let (ws, _) = connect_with_handshake(&ws_url, &auth_token, handshake).await?;
+        let (ws, _, _) = connect_with_handshake(&ws_url, &auth_token, handshake).await?;
         Self::from_connected(base_url, auth_token, session_id, ws)
     }
 
@@ -345,7 +345,8 @@ async fn reconnect(
     let handshake = SessionClientMessage::Subscribe {
         session_id: session_id.to_owned(),
     };
-    let (ws, returned_session_id) = connect_with_handshake(ws_url, auth_token, handshake).await?;
+    let (ws, returned_session_id, _) =
+        connect_with_handshake(ws_url, auth_token, handshake).await?;
     if returned_session_id != session_id {
         return Err(SessionError::Protocol(format!(
             "reconnected to unexpected session {returned_session_id}"
@@ -358,7 +359,7 @@ async fn connect_with_handshake(
     ws_url: &str,
     auth_token: &Option<String>,
     handshake: SessionClientMessage,
-) -> Result<(WsStream, String), SessionError> {
+) -> Result<(WsStream, String, Option<usize>), SessionError> {
     let request = build_ws_request(ws_url, auth_token)?;
     let (mut ws, _) = connect_async(request).await.map_err(Box::new)?;
 
@@ -382,8 +383,11 @@ async fn connect_with_handshake(
                         SessionError::Protocol(format!("failed to parse handshake response: {e}"))
                     })?;
                 match gateway_msg {
-                    SessionGatewayMessage::Subscribed { session_id } => {
-                        return Ok((ws, session_id));
+                    SessionGatewayMessage::Subscribed {
+                        session_id,
+                        latest_entry_index,
+                    } => {
+                        return Ok((ws, session_id, latest_entry_index));
                     }
                     SessionGatewayMessage::Error { message } => {
                         return Err(SessionError::Protocol(message));

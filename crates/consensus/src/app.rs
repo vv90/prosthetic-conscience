@@ -47,10 +47,22 @@ pub struct View {
     pub notice: Option<drafts::Notice>,
 }
 
-pub fn init(_participant: String) -> State {
-    State {
-        coordinator: coordinator::State::empty(COORDINATOR_PAGE_LIMIT),
-        drafts: drafts::init(),
+pub fn init(_participant: String, latest_entry_index: Option<usize>) -> Transition {
+    let coordinator = coordinator::sync_to_latest(
+        coordinator::State::empty(COORDINATOR_PAGE_LIMIT),
+        latest_entry_index,
+    );
+
+    Transition {
+        state: State {
+            coordinator: coordinator.state,
+            drafts: drafts::init(),
+        },
+        effects: coordinator
+            .effects
+            .into_iter()
+            .map(|effect| Effect::CoordinatorEffect { effect })
+            .collect(),
     }
 }
 
@@ -180,11 +192,17 @@ mod tests {
         }
     }
 
+    fn init_state() -> State {
+        init(String::from("alice"), None).state
+    }
+
     #[test]
-    fn initial_state_has_empty_view_and_local_reducer_emits_no_effects() {
-        let state = init(String::from("alice"));
+    fn init_without_latest_entry_index_has_empty_view_and_no_effects() {
+        let transition = init(String::from("alice"), None);
+        let state = transition.state;
         let app_view = view(&state);
 
+        assert!(transition.effects.is_empty());
         assert!(app_view.drafts.is_empty());
         assert!(app_view.notice.is_none());
         assert_eq!(app_view.overview.total_claims, 0);
@@ -197,8 +215,21 @@ mod tests {
     }
 
     #[test]
+    fn init_with_latest_entry_index_requests_missing_history() {
+        let transition = init(String::from("alice"), Some(3));
+
+        assert_eq!(
+            transition.effects,
+            vec![Effect::CoordinatorEffect {
+                effect: coordinator::Effect::fetch_missing(0, 4),
+            }]
+        );
+        assert_eq!(view(&transition.state).overview.total_claims, 0);
+    }
+
+    #[test]
     fn session_entry_observed_updates_overview_via_coordinator() {
-        let state = init(String::from("alice"));
+        let state = init_state();
         let transition = reduce(state, received_event(0, claim_entry("c1", "Use JWT")));
 
         assert!(transition.effects.is_empty());
@@ -210,7 +241,7 @@ mod tests {
 
     #[test]
     fn future_out_of_order_entries_do_not_affect_overview_until_gap_is_filled() {
-        let state = init(String::from("alice"));
+        let state = init_state();
         let transition = reduce(state, received_event(2, claim_entry("c3", "third")));
 
         assert_eq!(
@@ -238,7 +269,7 @@ mod tests {
 
     #[test]
     fn coordinator_fetch_requests_surface_as_wrapped_child_effects() {
-        let state = init(String::from("alice"));
+        let state = init_state();
         let transition = reduce(state, received_event(4, claim_entry("c5", "fifth")));
 
         assert_eq!(
@@ -251,7 +282,7 @@ mod tests {
 
     #[test]
     fn drafts_event_changes_only_drafts_state_and_preserves_committed_overview() {
-        let state = init(String::from("alice"));
+        let state = init_state();
         let state = reduce(state, received_event(0, claim_entry("c1", "committed"))).state;
         let overview_before = view(&state).overview;
 
@@ -264,7 +295,7 @@ mod tests {
 
     #[test]
     fn coordinator_event_preserves_existing_draft_notice_and_drafts() {
-        let mut state = init(String::from("alice"));
+        let mut state = init_state();
         state = reduce(state, draft_claim_event("draft", ClaimKind::Fact)).state;
         state = reduce(state, remove_draft_event(DraftId(999))).state;
         let before_view = view(&state);
@@ -354,7 +385,7 @@ mod tests {
         fn draft_only_traces_preserve_coordinator_derived_committed_overview(
             ops in prop::collection::vec(local_op_strategy(), 0..40)
         ) {
-            let mut state = init(String::from("alice"));
+            let mut state = init_state();
             state = reduce(state, received_event(0, claim_entry("c1", "first"))).state;
             state = reduce(state, received_event(1, claim_entry("c2", "second"))).state;
 
@@ -377,7 +408,7 @@ mod tests {
         fn entry_only_traces_do_not_change_draft_list_or_notice(
             events in prop::collection::vec(0usize..24, 0..40)
         ) {
-            let mut state = init(String::from("alice"));
+            let mut state = init_state();
             state = reduce(state, draft_claim_event("draft", ClaimKind::Fact)).state;
             state = reduce(state, remove_draft_event(DraftId(999))).state;
 
@@ -398,7 +429,7 @@ mod tests {
 
     #[test]
     fn entry_only_events_preserve_existing_draft_notice() {
-        let mut state = init(String::from("alice"));
+        let mut state = init_state();
         state = reduce(state, draft_claim_event("draft", ClaimKind::Fact)).state;
         state = reduce(state, remove_draft_event(DraftId(999))).state;
 

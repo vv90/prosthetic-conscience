@@ -376,7 +376,7 @@ The wrapper should not expose engine internals, coordinator internals, or ad hoc
 
 #### Logic
 
-- Current implementation: `crates/consensus-wasm` exposes `ConsensusAppHandle::{new, view, receiveEntry}` over the pure app boundary.
+- Current implementation: `crates/consensus-wasm` exposes `ConsensusAppHandle::{new, bootstrap, view, receiveEntry}` over the pure app boundary.
 - The wrapper intentionally does not expose generic event dispatch, draft actions, or engine/coordinator internals yet.
 - Keep serialization formats explicit and narrow.
 

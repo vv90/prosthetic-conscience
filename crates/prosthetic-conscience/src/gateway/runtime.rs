@@ -54,6 +54,12 @@ pub struct SessionEntriesQuery {
 }
 
 #[derive(Debug, Clone)]
+pub struct SessionSubscription {
+    pub subscriber_id: SubscriberId,
+    pub latest_entry_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StateSnapshot {
     pub tick: u64,
     pub available_workers: usize,
@@ -115,7 +121,7 @@ pub enum RuntimeCommand {
     SessionSubscribe {
         session_id: SessionId,
         handle: SubscriberHandle,
-        reply_tx: oneshot::Sender<SubscriberId>,
+        reply_tx: oneshot::Sender<SessionSubscription>,
     },
     SessionAppendEntry {
         session_id: SessionId,
@@ -268,7 +274,7 @@ impl RuntimeHandle {
         &self,
         session_id: SessionId,
         handle: SubscriberHandle,
-    ) -> Result<SubscriberId, RegisterError> {
+    ) -> Result<SessionSubscription, RegisterError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_command(RuntimeCommand::SessionSubscribe {
             session_id,
@@ -276,8 +282,8 @@ impl RuntimeHandle {
             reply_tx,
         })
         .await?;
-        let subscriber_id = reply_rx.await?;
-        Ok(subscriber_id)
+        let subscription = reply_rx.await?;
+        Ok(subscription)
     }
 
     pub async fn session_append_entry(
@@ -435,10 +441,18 @@ impl GatewayRuntime {
         mut self,
         session_id: SessionId,
         handle: SubscriberHandle,
-        reply_tx: oneshot::Sender<SubscriberId>,
+        reply_tx: oneshot::Sender<SessionSubscription>,
     ) -> (Self, Vec<KernelEffect>) {
+        let latest_entry_index = self
+            .state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.entries.len().checked_sub(1));
         let subscriber_id = self.registry.register_subscriber(handle);
-        let _ = reply_tx.send(subscriber_id.clone());
+        let _ = reply_tx.send(SessionSubscription {
+            subscriber_id: subscriber_id.clone(),
+            latest_entry_index,
+        });
         let tick = self.state.tick;
         self.apply_event(Event::SessionEvent {
             session_id,
@@ -778,6 +792,7 @@ fn spawn_effects(effects: Vec<ResolvedEffect>, runtime: &RuntimeHandle) {
                     let _ = handle
                         .send(SessionGatewayMessage::Subscribed {
                             session_id: session_id.0,
+                            latest_entry_index: None,
                         })
                         .await;
                 }

@@ -128,17 +128,18 @@ Location: `crates/prosthetic-conscience/src/protocol.rs` (inline `#[cfg(test)]` 
 | `GatewayToWorker` | 2     | Round-trip for Job, wire format matches legacy `json!()` output                                                       |
 | `ChatRequest`     | 4     | stream=true, stream=false, stream absent, all fields preserved in payload                                             |
 
-### Integration tests (28 tests)
+### Integration tests (32 tests)
 
 Location: `crates/prosthetic-conscience/tests/integration.rs` with helpers in `crates/prosthetic-conscience/tests/support/`.
 
-| Test group                          | Count | What it proves                                                                                                                                               |
-| ----------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Session websocket flows             | 7     | Session create/append, subscribe notifications, nonexistent sessions, subscriber timeout, multi-subscriber fanout, disconnect cleanup, and handshake timeout |
-| Consensus seed and bootstrap        | 3     | Seeding fixture logs into a live session, rejecting unknown sessions, and `ConsensusApp::join()` bootstrapping from committed entries                        |
-| Transcription routing               | 5     | Transcription happy path, no-worker error, worker error propagation, capability isolation, and mixed chat/transcription worker pools                         |
-| Client tool loop and gateway client | 4     | Generic tool loop re-requesting, consensus clarification-then-draft flow, SSE assembly, and graceful no-worker error handling                                |
-| Chat streaming and lifecycle        | 9     | Happy path chat streaming, no-worker rejection, worker error relay, re-registration, concurrency isolation, state draining, timeout, disconnect, heartbeats  |
+| Test group                          | Count | What it proves                                                                                                                                                                                       |
+| ----------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session websocket flows             | 9     | Session create/append, create-handshake metadata, subscribe notifications, subscribe-handshake metadata, nonexistent sessions, subscriber timeout, multi-subscriber fanout, disconnect cleanup, and handshake timeout |
+| Consensus UI routes/assets          | 1     | The embedded browser shell HTML, JS wrapper, and wasm binary are served with the expected content types and payloads                                                                              |
+| Consensus seed and bootstrap        | 4     | Seeding fixture logs into a live session, reconstructing overview state from `latest_entry_index` plus fetched pages, rejecting unknown sessions, and `ConsensusApp::join()` bootstrapping from committed entries |
+| Transcription routing               | 5     | Transcription happy path, no-worker error, worker error propagation, capability isolation, and mixed chat/transcription worker pools                                                             |
+| Client tool loop and gateway client | 4     | Generic tool loop re-requesting, consensus clarification-then-draft flow, SSE assembly, and graceful no-worker error handling                                                                    |
+| Chat streaming and lifecycle        | 9     | Happy path chat streaming, no-worker rejection, worker error relay, re-registration, concurrency isolation, state draining, timeout, disconnect, heartbeats                                      |
 
 Test harness components:
 
@@ -202,25 +203,25 @@ Location: `crates/consensus/src/drafts.rs` (inline `#[cfg(test)]` module).
 | Property: view fidelity     | 1     | `drafts::View.drafts` matches draft state exactly after arbitrary local traces                       |
 | Property: removal ordering  | 1     | Removing an existing generated draft removes exactly one entry and preserves the relative order       |
 
-### Consensus app reducer tests (12 tests)
+### Consensus app reducer tests (13 tests)
 
 Location: `crates/consensus/src/app.rs` (inline `#[cfg(test)]` module).
 
-| Area                                 | Count | What is tested                                                                                                                        |
-| ------------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| App/coordinator composition          | 7     | Empty view, wrapped draft events emit no app effects, committed entry updates overview, future entries stay buffered, fetch requests surface as wrapped coordinator effects, coordinator events preserve existing draft state |
-| Boundary serialization               | 3     | Wrapped drafts event shape, wrapped coordinator event shape, wrapped coordinator effect shape                                         |
-| Property: draft isolation            | 1     | Draft-only traces preserve the coordinator-derived committed overview                                                                  |
-| Property: entry isolation            | 1     | Entry-only traces do not change draft list or draft notice                                                                             |
+| Area                                 | Count | What is tested                                                                                                                                                 |
+| ------------------------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App/coordinator composition          | 8     | Empty init, index-based bootstrap fetch planning, wrapped draft events emit no app effects, committed entry updates overview, future entries stay buffered, fetch requests surface as wrapped coordinator effects, coordinator events preserve existing draft state |
+| Boundary serialization               | 3     | Wrapped drafts event shape, wrapped coordinator event shape, wrapped coordinator effect shape                                                                  |
+| Property: draft isolation            | 1     | Draft-only traces preserve the coordinator-derived committed overview                                                                                           |
+| Property: entry isolation            | 1     | Entry-only traces do not change draft list or draft notice                                                                                                      |
 
-### Consensus wasm wrapper tests (4 tests)
+### Consensus wasm wrapper tests (7 tests)
 
 Location: `crates/consensus-wasm/src/lib.rs` (inline `#[cfg(test)]` module).
 
-| Area                    | Count | What is tested                                                                                              |
-| ----------------------- | ----- | ----------------------------------------------------------------------------------------------------------- |
-| Wrapper view bootstrap  | 1     | Initial handle state produces the same empty `View` shape as the pure app                                   |
-| Wrapper receive path    | 3     | Contiguous receive updates overview, out-of-order receive returns wrapped fetch effect, gap fill catches up |
+| Area                         | Count | What is tested                                                                                                                           |
+| ---------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Bootstrap and guardrails     | 4     | `view()` requires bootstrap, `receiveEntry()` requires bootstrap, empty bootstrap returns empty view/no effects, index bootstrap returns wrapped fetch effect |
+| Wrapper receive path         | 3     | Contiguous receive updates overview, out-of-order receive returns wrapped fetch effect, gap fill catches up                              |
 
 Build verification:
 
@@ -400,14 +401,14 @@ Test-suite discipline rules and coverage goals:
 - Protocol: strong coverage (14 serde tests).
 - Consensus tool dispatch: strong coverage (23 tests).
 - Consensus LLM: adequate coverage (7 tests — prompt content, request payload, history truncation).
-- Coordinator reducer: strong coverage (19 tests — 13 targeted + 6 property-based, covers bootstrap from latest entry, slot monotonicity, gap detection, page-bounded fetch planning, and committed-prefix access).
+- Coordinator reducer: strong coverage (19 tests — 13 targeted + 6 property-based, covers bootstrap from latest entry index, slot monotonicity, gap detection, page-bounded fetch planning, and committed-prefix access).
 - Consensus entry buffer: adequate coverage (3 tests — submission tracking, entry buffering, trace formatting).
 - Consensus drafts reducer: strong coverage (8 tests — draft transition rules plus view/removal properties).
-- Consensus app reducer: strong coverage (12 tests — wrapped child-event delegation, wrapped coordinator effects, boundary serialization, and draft/entry isolation properties).
-- Consensus wasm wrapper: adequate coverage (4 tests + wasm32 build verification — empty view bootstrap and receive/render wrapper flow).
+- Consensus app reducer: strong coverage (13 tests — index-based bootstrap planning, wrapped child-event delegation, wrapped coordinator effects, boundary serialization, and draft/entry isolation properties).
+- Consensus wasm wrapper: adequate coverage (7 tests + wasm32 build verification — bootstrap guardrails, empty/index bootstrap, and receive/render wrapper flow).
 - Consensus CLI app: minimal coverage (1 test — trace formatting).
 - Consensus eval: adequate coverage (3 tests — scoring and context seeding).
-- Integration: 28 tests passing. Includes consensus-specific tests: `consensus_llm_drafts_claim_after_clarification_turn`, `consensus_seed_*` (2), and `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
+- Integration: 32 tests passing. Includes consensus-specific tests: `consensus_ui_routes_serve_embedded_assets`, `consensus_llm_drafts_claim_after_clarification_turn`, `consensus_seed_*` (2), `consensus_bootstrap_from_latest_entry_index_and_fetched_pages_reconstructs_overview`, and `consensus_app_join_bootstraps_from_existing_session`. Remaining: `stream=false` rejection, client disconnect, malformed messages, dispatch failure, rapid churn, channel close propagation, performance tests.
 
 ## Load into context when
 

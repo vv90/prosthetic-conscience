@@ -18,7 +18,7 @@ use self::auth::require_auth;
 use self::chat_completions::chat_completions;
 use self::session_entries::get_entries;
 use self::session_ws::session_ws_upgrade;
-use self::ui::transcribe_ui;
+use self::ui::{consensus_ui, consensus_wasm_bg_wasm, consensus_wasm_js, transcribe_ui};
 use self::worker_ws_upgrade::worker_ws_upgrade;
 
 pub use state::AppState;
@@ -52,6 +52,15 @@ async fn list_models() -> Json<ModelList> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(transcribe_ui))
+        .route("/consensus", get(consensus_ui))
+        .route(
+            "/consensus-assets/consensus_wasm.js",
+            get(consensus_wasm_js),
+        )
+        .route(
+            "/consensus-assets/consensus_wasm_bg.wasm",
+            get(consensus_wasm_bg_wasm),
+        )
         .route("/ws/worker", get(worker_ws_upgrade))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
