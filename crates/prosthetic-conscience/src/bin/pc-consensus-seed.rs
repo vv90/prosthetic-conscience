@@ -72,7 +72,7 @@ async fn main() {
 
     let base_url = args.gateway_url.trim_end_matches('/');
     let entries_url = format!(
-        "{base_url}/v1/sessions/{}/entries?after=0&limit={}",
+        "{base_url}/v1/sessions/{}/entries?from=0&limit={}",
         result.session_id, result.total_entries
     );
 

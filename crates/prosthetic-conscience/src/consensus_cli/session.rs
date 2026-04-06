@@ -152,7 +152,7 @@ impl SessionClient {
         limit: usize,
     ) -> Result<SessionEntriesPage, SessionError> {
         let url = format!(
-            "{}/v1/sessions/{}/entries?after={start_index}&limit={limit}",
+            "{}/v1/sessions/{}/entries?from={start_index}&limit={limit}",
             self.base_url, self.session_id
         );
 

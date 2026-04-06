@@ -110,7 +110,7 @@ pub enum RuntimeCommand {
     },
     QuerySessionEntries {
         session_id: SessionId,
-        after: usize,
+        from: usize,
         limit: usize,
         reply_tx: oneshot::Sender<Option<SessionEntriesQuery>>,
     },
@@ -245,13 +245,13 @@ impl RuntimeHandle {
     pub async fn query_session_entries(
         &self,
         session_id: SessionId,
-        after: usize,
+        from: usize,
         limit: usize,
     ) -> Result<Option<SessionEntriesQuery>, RuntimeSendError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.submit_command(RuntimeCommand::QuerySessionEntries {
             session_id,
-            after,
+            from,
             limit,
             reply_tx,
         })
@@ -674,13 +674,13 @@ impl GatewayRuntime {
                     }
                     RuntimeCommand::QuerySessionEntries {
                         session_id,
-                        after,
+                        from,
                         limit,
                         reply_tx,
                     } => {
                         let result = self.state.sessions.get(&session_id).map(|session| {
                             SessionEntriesQuery {
-                                entries: session.entries.slice(after, limit).to_vec(),
+                                entries: session.entries.slice(from, limit).to_vec(),
                                 total: session.entries.len(),
                             }
                         });

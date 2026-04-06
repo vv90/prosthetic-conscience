@@ -706,12 +706,12 @@
                 }
             }
 
-            async function fetchSessionEntries(after, limit) {
+            async function fetchSessionEntries(from, limit) {
                 const url = new URL(
                     `/v1/sessions/${encodeURIComponent(state.sessionId)}/entries`,
                     window.location.origin,
                 );
-                url.searchParams.set("after", String(after));
+                url.searchParams.set("from", String(from));
                 url.searchParams.set("limit", String(limit));
 
                 const response = await fetch(url);

@@ -49,8 +49,8 @@ impl AppendLog {
         self.entries
     }
 
-    pub fn slice(&self, after: usize, limit: usize) -> &[Value] {
-        let start = after.min(self.entries.len());
+    pub fn slice(&self, from: usize, limit: usize) -> &[Value] {
+        let start = from.min(self.entries.len());
         let end = (start + limit).min(self.entries.len());
         self.entries.get(start..end).unwrap_or(&[])
     }
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn slice_after_exceeds_len() {
+    fn slice_from_exceeds_len() {
         let log = log_with_entries(3);
         assert_eq!(log.slice(10, 5), &[] as &[Value]);
     }

@@ -162,7 +162,7 @@ A similar (less severe) issue exists for chat streams: if `register_stream` succ
 Key behaviors:
 
 - **Reconnect with backoff**: on WS disconnect, the background task reconnects with exponential backoff (1s → 30s cap). Commands received during disconnect get `SessionError::Disconnected`.
-- **Catch-up via HTTP**: after connect/reconnect, the app fetches missing entries via `GET /v1/sessions/:id/entries?after={next_index}&limit=1000` and replays them through the consensus engine.
+- **Catch-up via HTTP**: after connect/reconnect, the app fetches missing entries via `GET /v1/sessions/:id/entries?from={next_index}&limit=1000` and replays them through the consensus engine.
 - **Out-of-order buffering**: entries arriving out of order (index > next_index) are buffered in a `BTreeMap` and drained when the gap is filled.
 - **No heartbeat yet**: the client does not send WS ping/pong or application-level heartbeat messages. Dead connections are only detected on the next send attempt.
 

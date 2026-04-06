@@ -11,7 +11,7 @@ use crate::router::state::AppState;
 #[derive(Deserialize)]
 pub(crate) struct Params {
     #[serde(default)]
-    after: usize,
+    from: usize,
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -37,7 +37,7 @@ pub(crate) async fn get_entries(
 
     let result = state
         .runtime
-        .query_session_entries(SessionId(session_id), params.after, limit)
+        .query_session_entries(SessionId(session_id), params.from, limit)
         .await;
 
     match result {

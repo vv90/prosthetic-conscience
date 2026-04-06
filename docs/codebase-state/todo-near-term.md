@@ -112,9 +112,8 @@ Implementation process for the browser/WASM layer now lives in [`docs/codebase-s
     reconnect/catch-up, append gating, submission resume, queued-event draining.
 18. Treat `EntryBuffer` as transitional. Fold its responsibilities into the higher-level coordinator rather than preserving both as long-term public boundaries.
 19. Replace the imperative session/submission control flow in `consensus_cli/app.rs` with the higher-level pure app/coordinator loop.
-20. Rename the session entry-fetch cursor from `after` to `from` across request types and related code paths.
-21. Bootstrap session metadata now carries `latest_entry_index` on `Subscribed`, and app/bootstrap initialization now uses that upper bound directly instead of requiring a copied latest entry payload.
-22. Build the first browser prototype against the existing wrapper with a minimal JS shell:
+20. Bootstrap session metadata now carries `latest_entry_index` on `Subscribed`, and app/bootstrap initialization now uses that upper bound directly instead of requiring a copied latest entry payload.
+21. Build the first browser prototype against the existing wrapper with a minimal JS shell:
     DOM rendering, websocket/HTTP execution, timers, auth token handling.
 
 **Remaining Phase 6 tasks:**
