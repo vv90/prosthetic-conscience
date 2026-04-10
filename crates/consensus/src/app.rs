@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 
+use crate::conversation;
 use crate::coordinator;
 use crate::drafts;
 use crate::engine::{DraftEntry, overview_from_entries};
@@ -16,6 +17,8 @@ const COORDINATOR_PAGE_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
+    participant: String,
+    conversation: conversation::State,
     coordinator: coordinator::State<Entry>,
     drafts: drafts::State,
 }
@@ -23,6 +26,7 @@ pub struct State {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    ConversationEvent { event: conversation::Event },
     DraftsEvent { event: drafts::Event },
     CoordinatorEvent { event: coordinator::Event<Entry> },
 }
@@ -30,6 +34,7 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
+    ConversationEffect { effect: conversation::Effect },
     CoordinatorEffect { effect: coordinator::Effect<Entry> },
 }
 
@@ -47,7 +52,7 @@ pub struct View {
     pub notice: Option<drafts::Notice>,
 }
 
-pub fn init(_participant: String, latest_entry_index: Option<usize>) -> Transition {
+pub fn init(participant: String, latest_entry_index: Option<usize>) -> Transition {
     let coordinator = coordinator::sync_to_latest(
         coordinator::State::empty(COORDINATOR_PAGE_LIMIT),
         latest_entry_index,
@@ -55,6 +60,8 @@ pub fn init(_participant: String, latest_entry_index: Option<usize>) -> Transiti
 
     Transition {
         state: State {
+            participant,
+            conversation: conversation::init(),
             coordinator: coordinator.state,
             drafts: drafts::init(),
         },
@@ -68,9 +75,14 @@ pub fn init(_participant: String, latest_entry_index: Option<usize>) -> Transiti
 
 pub fn reduce(state: State, event: Event) -> Transition {
     match event {
+        Event::ConversationEvent { event } => reduce_conversation_event(state, event),
         Event::DraftsEvent { event } => reduce_drafts_event(state, event),
         Event::CoordinatorEvent { event } => reduce_coordinator_event(state, event),
     }
+}
+
+pub fn participant(state: &State) -> &str {
+    &state.participant
 }
 
 pub fn view(state: &State) -> View {
@@ -94,10 +106,26 @@ fn reduce_drafts_event(state: State, event: drafts::Event) -> Transition {
 
     Transition {
         state: State {
+            participant: state.participant,
+            conversation: state.conversation,
             coordinator: state.coordinator,
             drafts: transition.state,
         },
         effects: map_draft_effects(transition.effects),
+    }
+}
+
+fn reduce_conversation_event(state: State, event: conversation::Event) -> Transition {
+    let transition = conversation::reduce(state.conversation, event);
+
+    Transition {
+        state: State {
+            participant: state.participant,
+            conversation: transition.state,
+            coordinator: state.coordinator,
+            drafts: state.drafts,
+        },
+        effects: map_conversation_effects(transition.effects),
     }
 }
 
@@ -106,6 +134,8 @@ fn reduce_coordinator_event(state: State, event: coordinator::Event<Entry>) -> T
 
     Transition {
         state: State {
+            participant: state.participant,
+            conversation: state.conversation,
             coordinator: transition.state,
             drafts: state.drafts,
         },
@@ -121,12 +151,17 @@ fn map_draft_effects(effects: Vec<drafts::Effect>) -> Vec<Effect> {
     effects.into_iter().map(|effect| match effect {}).collect()
 }
 
+fn map_conversation_effects(effects: Vec<conversation::Effect>) -> Vec<Effect> {
+    effects.into_iter().map(|effect| match effect {}).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
+    use crate::conversation;
     use crate::drafts::Notice;
     use crate::engine::{ClaimRef, DraftId};
     use crate::types::{ClaimId, ClaimKind};
@@ -135,6 +170,12 @@ mod tests {
     enum LocalOp {
         Add { body: String, claim_kind: ClaimKind },
         Remove { draft_id: u8 },
+    }
+
+    #[derive(Debug, Clone)]
+    enum AppOp {
+        Local(LocalOp),
+        Receive { index: usize },
     }
 
     fn body_strategy() -> impl Strategy<Value = String> {
@@ -157,6 +198,13 @@ mod tests {
             (body_strategy(), claim_kind_strategy())
                 .prop_map(|(body, claim_kind)| LocalOp::Add { body, claim_kind }),
             any::<u8>().prop_map(|draft_id| LocalOp::Remove { draft_id }),
+        ]
+    }
+
+    fn app_op_strategy() -> impl Strategy<Value = AppOp> {
+        prop_oneof![
+            local_op_strategy().prop_map(AppOp::Local),
+            (0usize..24).prop_map(|index| AppOp::Receive { index }),
         ]
     }
 
@@ -203,6 +251,8 @@ mod tests {
         let app_view = view(&state);
 
         assert!(transition.effects.is_empty());
+        assert_eq!(participant(&state), "alice");
+        assert!(conversation::view(&state.conversation).history.is_empty());
         assert!(app_view.drafts.is_empty());
         assert!(app_view.notice.is_none());
         assert_eq!(app_view.overview.total_claims, 0);
@@ -212,6 +262,18 @@ mod tests {
 
         let transition = reduce(state, remove_draft_event(DraftId(0)));
         assert!(transition.effects.is_empty());
+    }
+
+    #[test]
+    fn draft_and_coordinator_events_preserve_conversation_state() {
+        let state = init_state();
+        let conversation_before = conversation::view(&state.conversation);
+
+        let state = reduce(state, draft_claim_event("local draft", ClaimKind::Proposal)).state;
+        assert_eq!(conversation::view(&state.conversation), conversation_before);
+
+        let state = reduce(state, received_event(0, claim_entry("c1", "committed"))).state;
+        assert_eq!(conversation::view(&state.conversation), conversation_before);
     }
 
     #[test]
@@ -381,6 +443,32 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn mixed_reducer_traces_preserve_participant(
+            participant_name in body_strategy(),
+            ops in prop::collection::vec(app_op_strategy(), 0..40)
+        ) {
+            let mut state = init(participant_name.clone(), None).state;
+            prop_assert_eq!(participant(&state), participant_name.as_str());
+
+            for (step, op) in ops.into_iter().enumerate() {
+                let event = match op {
+                    AppOp::Local(LocalOp::Add { body, claim_kind }) => {
+                        draft_claim_event(body, claim_kind)
+                    }
+                    AppOp::Local(LocalOp::Remove { draft_id }) => {
+                        remove_draft_event(DraftId(u64::from(draft_id)))
+                    }
+                    AppOp::Receive { index } => {
+                        received_event(index, claim_entry(&format!("c{step}"), &format!("body{step}")))
+                    }
+                };
+
+                state = reduce(state, event).state;
+                prop_assert_eq!(participant(&state), participant_name.as_str());
+            }
+        }
+
         #[test]
         fn draft_only_traces_preserve_coordinator_derived_committed_overview(
             ops in prop::collection::vec(local_op_strategy(), 0..40)

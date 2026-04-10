@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod backoff;
+pub mod conversation;
 pub mod coordinator;
 pub mod drafts;
 pub mod engine;
