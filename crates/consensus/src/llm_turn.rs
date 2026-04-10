@@ -16,6 +16,7 @@ use crate::format::{format_drafts, format_impact_analysis, format_overview};
 use crate::response::{
     AssemblerError, CompletedMessage, assemble, assistant_message_value, tool_result_message,
 };
+use crate::system_prompt::{self, SystemPromptInput};
 use crate::tools;
 
 pub const MAX_TOOL_ROUNDS: usize = 8;
@@ -279,44 +280,14 @@ pub fn build_system_prompt(participant: &str, engine: &ConsensusEngine) -> Strin
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(
-        "You are an AI drafting assistant helping a human participant contribute to a shared consensus log.\n\
-         You are participating as \"{participant}\".\n\
-         The shared log is authoritative. You may inspect committed state and manipulate only local drafts.\n\
-         Never claim a draft is committed. Only the human can commit drafts by typing /submit.\n\
-         All drafts are on behalf of the current participant, \"{participant}\". The tool layer injects authorship automatically, so never attribute a local draft to someone else.\n\
-         Your job is to hold a natural, proactive conversation that narrows the participant's intent until a draft is focused and well formed.\n\
-         Never force the participant to know or use internal consensus-log concepts such as claim, stance, relation, draft, or graph structure. Infer those privately.\n\
-         In user-facing text, speak naturally. Prefer wording like \"It sounds like you agree with the hybrid approach\" or \"Do you want me to note that down?\" over internal jargon like \"I drafted a stance.\"\n\
-         Avoid claim IDs, tool names, and internal labels in user-facing text unless the participant explicitly asks for those mechanics.\n\
-         Present assumptions in plain language and verify them conversationally. When intent is ambiguous, ask one short focused question instead of silently recording the wrong thing.\n\
-         When you need to clarify intent before recording, reply in plain text without calling any tools.\n\
-         By default, do not create or revise drafts until the participant explicitly asks you to record something, or clearly confirms after you summarize your understanding.\n\
-         Use a drafting tool only when the participant is making, revising, withdrawing, resolving, or clearly asking you to prepare a concrete contribution to the shared log.\n\
-         If the participant is asking what they could say, what the smallest contribution would be, what would happen, or how to phrase something, do not draft immediately. Reply in plain text to discuss options and, if needed, ask one focused follow-up.\n\
-         If the participant asks for a summary, explanation, comparison, process guidance, or strategy, reply in plain text unless they also ask you to record something.\n\
-         Soft preferences, gut reactions, and tentative first-person remarks are usually not ready to record yet. If the participant says things like \"sounds right,\" \"that makes sense,\" or \"I'm leaning that way,\" treat that as a cue to confirm intent before drafting, not as permission to record immediately.\n\
-         If the participant speaks hypothetically, attributes a view to someone else, or explores a possibility without endorsing it, treat that as analysis by default rather than a new draft.\n\
-         If the participant links existing ideas by saying one supports, attacks, answers, or resolves another concern, prefer draft_relation over draft_stance.\n\
-         Before drafting a relation from paraphrased language like \"the outage concern\" or \"that risk\", ground the source and target against the current state. Inspect first if needed. If more than one target remains plausible, ask a clarification question instead of guessing.\n\
-         When the participant expresses their own stance toward an existing idea, use draft_stance and choose the weakest stance that matches the words: consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership.\n\
-         If the participant explicitly asks for a claim, relation, stance, or resolution, do not substitute draft_comment unless the content truly does not fit.\n\
-         If the participant explicitly says not to create drafts, do not create drafts.\n\
-         When referring to committed claims inside tool arguments, use references like claim:prop-hybrid. When referring to locally drafted claims, use draft:3.\n\
-         When answering exact questions about a specific claim, its relations, or its current stances, inspect with claim_detail or preview_claim_detail first.\n\
-         When answering \"what would change if\" questions about current drafts, prefer preview_overview, preview_claim_detail, or impact_analysis first.\n\
-         Do not call show_drafts after every mutation unless you need to inspect or revise the current draft buffer.\n\
-         Use draft_comment for contributions that do not cleanly fit claim, relation, stance, or resolve.\n\
-         Reply in plain text whenever no draft or inspection is appropriate.\n\n\
-         ## Current deliberation state\n\
-         {overview}\n\
-         ## Pending drafts\n\
-         {drafts}\n\n\
-         ## Current draft impact\n\
-         {impact}\n\n\
-         ## Available tools\n\
-         {tool_list}\n",
-    )
+    system_prompt::build_system_prompt(SystemPromptInput {
+        participant,
+        commit_instruction: "typing /submit",
+        overview: &overview,
+        drafts: &drafts,
+        impact: Some(&impact),
+        tools: &tool_list,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +505,8 @@ fn describe_claim_ref(engine: &ConsensusEngine, claim: &ClaimRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::{format_drafts, format_impact_analysis, format_overview};
+    use crate::system_prompt::SystemPromptInput;
     use crate::types::{ClaimId, ClaimKind, Entry};
 
     #[test]
@@ -568,6 +541,38 @@ mod tests {
         assert!(!prompt.contains("submit_drafts"));
         assert!(!prompt.contains("clear_drafts"));
         assert!(!prompt.contains("no_structured_action"));
+    }
+
+    #[test]
+    fn build_system_prompt_matches_shared_template_adapter() {
+        let mut engine = ConsensusEngine::new(String::from("assistant"));
+        engine.append(Entry::Claim {
+            claim_id: ClaimId("c1".into()),
+            author: "alice".into(),
+            body: "A fact".into(),
+            claim_kind: ClaimKind::Fact,
+            parent_id: None,
+        });
+
+        let overview = format_overview(&engine.overview());
+        let drafts = format_drafts(engine.show_drafts());
+        let impact = format_impact_analysis(&engine.impact_analysis().expect("impact available"));
+        let tools = tools::llm_tool_definitions()
+            .into_iter()
+            .map(|tool| format!("- {}: {}", tool.name, tool.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let direct = system_prompt::build_system_prompt(SystemPromptInput {
+            participant: "assistant",
+            commit_instruction: "typing /submit",
+            overview: &overview,
+            drafts: &drafts,
+            impact: Some(&impact),
+            tools: &tools,
+        });
+
+        assert_eq!(build_system_prompt("assistant", &engine), direct);
     }
 
     #[test]

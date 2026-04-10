@@ -18,5 +18,6 @@ pub mod render;
 pub mod response;
 pub mod solver;
 pub mod status;
+pub mod system_prompt;
 pub mod tools;
 pub mod types;
