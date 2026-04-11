@@ -1,6 +1,6 @@
 # Testing Coverage and Methodology
 
-Snapshot date: 2026-04-03
+Snapshot date: 2026-04-11
 
 ## Overview
 
@@ -53,21 +53,16 @@ Location: `crates/prosthetic-conscience/src/gateway/channel_registry.rs` (inline
 | `take_stream`              | Removes entry                      |
 | Property test              | All registered handles retrievable |
 
-### Response assembler tests (11 unit + 4 property = 15 tests)
+### Consensus response assembler tests (12 unit tests)
 
-Location: `crates/prosthetic-conscience/src/client/response_assembler.rs` (inline `#[cfg(test)]` module).
+Location: `crates/consensus/src/response.rs` (inline `#[cfg(test)]` module).
 
-| Area             | Count | What is tested                                                                                       |
-| ---------------- | ----- | ---------------------------------------------------------------------------------------------------- |
-| Content assembly | 2     | Single chunk, multiple chunks concatenation                                                          |
-| Tool calls       | 3     | Single-chunk llama-server style, fragmented arguments OpenAI style, multiple concurrent tool calls   |
-| Mixed            | 1     | Content + tool calls in same response                                                                |
-| Edge cases       | 3     | Empty delta chunks, missing finish_reason, empty input                                               |
-| Error paths      | 2     | Missing `choices` array, empty `choices` array                                                       |
-| Property: P1     | 1     | Content concatenation is split-invariant (any string split into N fragments reassembles identically) |
-| Property: P2     | 1     | Arguments concatenation is split-invariant                                                           |
-| Property: P3     | 1     | Tool call count is preserved regardless of delta interleaving                                        |
-| Property: P4     | 1     | Finish reason captured from whichever chunk has one                                                  |
+| Area                     | Count | What is tested                                                                                                  |
+| ------------------------ | ----- | --------------------------------------------------------------------------------------------------------------- |
+| Content assembly         | 3     | Single chunk, multiple chunks concatenation, missing role still assembles as assistant                         |
+| Tool calls               | 2     | Single-chunk llama-server style and fragmented-argument OpenAI style                                           |
+| Role validation          | 2     | Explicit assistant role accepted, non-assistant role rejected                                                  |
+| Finish reason typing     | 5     | Additional finish-reason cases beyond the core `stop`/`tool_calls` paths: `length`, `content_filter`, `function_call`, unknown fallback, and missing |
 
 ### Tool trait and registry tests (5 tests)
 
@@ -168,6 +163,16 @@ Location: `crates/consensus/src/llm_turn.rs` (inline `#[cfg(test)]` module).
 | Request payload    | 1     | Includes `tool_choice: "auto"` and `max_tokens`                                                                                                            |
 | History truncation | 5     | Under-limit noop, drops oldest, preserves tool-call/result pairs, skips tool results at cut, noop when no safe cut                                         |
 
+### Consensus conversation reducer tests (14 tests)
+
+Location: `crates/consensus/src/conversation.rs` (inline `#[cfg(test)]` module).
+
+| Area                        | Count | What is tested                                                                                                                      |
+| --------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Typed message serde         | 5     | `User`, `Assistant`, and `Tool` message shapes round-trip correctly, including assistant tool-call payloads                        |
+| History/view basics         | 3     | Empty init, empty view, and view fidelity for arbitrary seeded typed history                                                       |
+| Completed-response handling | 6     | Appending assistant text, appending assistant tool calls, preserving existing prefix history, decode-failure path, non-assistant role rejection, and event/effect serde |
+
 ### Coordinator reducer tests (19 tests)
 
 Location: `crates/consensus/src/coordinator.rs` (inline `#[cfg(test)]` module).
@@ -203,16 +208,35 @@ Location: `crates/consensus/src/drafts.rs` (inline `#[cfg(test)]` module).
 | Property: view fidelity     | 1     | `drafts::View.drafts` matches draft state exactly after arbitrary local traces                       |
 | Property: removal ordering  | 1     | Removing an existing generated draft removes exactly one entry and preserves the relative order       |
 
-### Consensus app reducer tests (13 tests)
+### Consensus app tool tests (6 tests)
+
+Location: `crates/consensus/src/app_tools.rs` (inline `#[cfg(test)]` module).
+
+| Area                     | Count | What is tested                                                                                                                   |
+| ------------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Tool definitions / args  | 2     | Exact read-only tool set is exposed, and claim-query parameter schemas match the CLI read-tool argument shapes                 |
+| Dispatch                 | 4     | Query dispatch for `overview`, `show_drafts`, `claim_detail`, `preview_overview`, `preview_claim_detail`, and `impact_analysis` |
+
+### Shared preview/query tests (3 tests)
+
+Location: `crates/consensus/src/preview.rs` (inline `#[cfg(test)]` module).
+
+| Area                  | Count | What is tested                                                                 |
+| --------------------- | ----- | ------------------------------------------------------------------------------ |
+| Preview materializer  | 3     | Draft claim materialization, preview claim-ref resolution, and impact-analysis diffing |
+
+### Consensus app reducer tests (24 tests)
 
 Location: `crates/consensus/src/app.rs` (inline `#[cfg(test)]` module).
 
-| Area                                 | Count | What is tested                                                                                                                                                 |
-| ------------------------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| App/coordinator composition          | 8     | Empty init, index-based bootstrap fetch planning, wrapped draft events emit no app effects, committed entry updates overview, future entries stay buffered, fetch requests surface as wrapped coordinator effects, coordinator events preserve existing draft state |
-| Boundary serialization               | 3     | Wrapped drafts event shape, wrapped coordinator event shape, wrapped coordinator effect shape                                                                  |
-| Property: draft isolation            | 1     | Draft-only traces preserve the coordinator-derived committed overview                                                                                           |
-| Property: entry isolation            | 1     | Entry-only traces do not change draft list or draft notice                                                                                                      |
+| Area                                      | Count | What is tested                                                                                                                                                                                                 |
+| ----------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App/coordinator/conversation composition  | 11    | Empty init, participant retention, conversation preservation across non-conversation events, index-based bootstrap fetch planning, wrapped draft events emit no app effects, committed entry updates overview, future entries stay buffered, fetch requests surface as wrapped coordinator effects, coordinator events preserve existing draft state, completed chat responses only change conversation history, and conversation decode failures surface as wrapped app effects |
+| Pure app queries                          | 6     | Direct `overview`, `show_drafts`, `claim_detail`, `preview_overview`, `preview_claim_detail`, and `impact_analysis` queries over `app::State`, plus app/engine preview equivalence                         |
+| Boundary serialization                    | 4     | Wrapped drafts event shape, wrapped coordinator event shape, wrapped coordinator effect shape, wrapped conversation effect shape                                                                            |
+| Property: participant preservation        | 1     | Mixed local/receive traces never change the top-level participant                                                                                                                                             |
+| Property: draft isolation                 | 1     | Draft-only traces preserve the coordinator-derived committed overview                                                                                                                                         |
+| Property: entry isolation                 | 1     | Entry-only traces do not change draft list or draft notice                                                                                                                                                    |
 
 ### Consensus wasm wrapper tests (7 tests)
 
@@ -421,7 +445,8 @@ Test-suite discipline rules and coverage goals:
 
 - `crates/prosthetic-conscience/src/gateway/kernel.rs` (unit + property tests)
 - `crates/prosthetic-conscience/src/gateway/channel_registry.rs` (registry tests)
-- `crates/prosthetic-conscience/src/client/response_assembler.rs` (assembler unit + property tests)
+- `crates/consensus/src/response.rs` (assistant-response assembly tests)
+- `crates/consensus/src/conversation.rs` (conversation reducer tests)
 - `crates/consensus/src/tools.rs` (tool dispatch tests)
 - `crates/consensus/src/llm_turn.rs` (LLM turn loop tests)
 - `crates/consensus/src/coordinator.rs` (coordinator reducer tests)

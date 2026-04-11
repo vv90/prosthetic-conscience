@@ -1,6 +1,6 @@
 # Near-Term TODO
 
-Snapshot date: 2026-04-05
+Snapshot date: 2026-04-11
 
 ## Consensus protocol implementation
 
@@ -55,8 +55,8 @@ Separate binary (`pc-consensus`), not an extension of `pc-client`. Uses the engi
 
 Shared infrastructure extracted during Phase 5:
 
-- `crates/prosthetic-conscience/src/chat_gateway/` module: `GatewayClient` (HTTP/SSE) and `response_assembler` (delta chunk assembly) extracted from the app-side client code. Shared by both `pc-client` and `pc-consensus`. `assistant_message_value` and `tool_result_message` helpers live here.
-- `crates/prosthetic-conscience/src/client/gateway_client.rs` and `crates/prosthetic-conscience/src/client/response_assembler.rs` are re-export shims (`pub use crate::chat_gateway::*`) for backward compatibility with `pc-client` and existing tests.
+- `crates/prosthetic-conscience/src/chat_gateway/` module: `GatewayClient` (HTTP/SSE transport) extracted from the app-side client code and shared by both `pc-client` and `pc-consensus`.
+- Consensus-specific streamed assistant assembly now lives in `crates/consensus/src/response.rs`, which owns `assemble()`, `assistant_message_value()`, and `tool_result_message()` for the consensus conversation/tool loop.
 
 Additional features added during Phase 5 (continued):
 
@@ -71,7 +71,7 @@ Additional features added during Phase 5 (continued):
 - `LlmTurnTrace` round-by-round tracing: each LLM round captures request sizes, response chunk counts, assistant message, and tool execution traces (arguments, parse results, dispatch results). Used by both `--debug-tool-trace` in `pc-consensus` and the eval harness.
 - `--debug-tool-trace` CLI flag on `pc-consensus`: prints compact per-round tool traces for each LLM turn.
 - `MAX_COMPLETION_TOKENS` constant (512) is passed to the backend as `max_tokens`.
-- `CompletedMessage` and `CompletedToolCall` derive `Serialize` for trace serialization.
+- `CompletedAssistantMessage`, `CompletedToolCall`, and `FinishReason` now derive `Serialize` for trace serialization and typed finish-reason handling.
 
 Eval harness (new):
 
@@ -97,6 +97,14 @@ Implementation process for the browser/WASM layer now lives in [`docs/codebase-s
 
 **Coordinator reducer (implemented):** `crates/consensus/src/coordinator.rs` — pure reducer for bootstrap from an optional latest entry index, slot-based gap detection, and page-bounded fetch planning (`FetchMissing { from, limit }`). 19 tests (13 targeted + 6 property-based). Does not yet own `EntryBuffer`, connection state, fetch lifecycle, or submission tracking.
 
+**Conversation reducer (implemented):** `crates/consensus/src/conversation.rs` — pure local conversation state with typed `Message` history, assistant-only chat-completion ingestion via `ChatCompletionReceived { chunks }`, and typed decode-failure effects. Does not yet build requests, append tool results, or execute tools.
+
+**Shared prompt / app tools (implemented):**
+
+- `crates/consensus/src/system_prompt.rs` now owns the shared drafting-assistant system prompt template used by the CLI and future app/browser request builders.
+- `crates/consensus/src/app_tools.rs` now exposes an app-owned read-only tool surface over `app::State`: `overview`, `claim_detail`, `show_drafts`, `preview_overview`, `preview_claim_detail`, `impact_analysis`.
+- `crates/consensus/src/preview.rs` now holds shared pure preview/impact logic used by both app queries and `ConsensusEngine`.
+
 **WASM wrapper (implemented):** `crates/consensus-wasm` — thin `wasm-bindgen` wrapper over `consensus::app` with JS-facing `new`, `bootstrap`, `view`, and `receiveEntry` methods. 7 host-side tests plus verified `wasm32-unknown-unknown` build. Does not yet own browser shell concerns beyond bootstrap/catch-up execution, generic event dispatch, or session transport policy.
 
 **Phase 6 implementation order:**
@@ -118,6 +126,18 @@ Implementation process for the browser/WASM layer now lives in [`docs/codebase-s
 
 **Remaining Phase 6 tasks:**
 
+- Build pure app-side prompt/request payload generation from:
+  `app::State`, `conversation` history, `system_prompt`, and app-owned tool definitions.
+- Add a stateful app tool execution API that returns:
+  updated app state, tool-result JSON, and whether a successful mutation occurred.
+- Implement mutating app tools, starting with `draft_claim` and `remove_draft`, without routing mutation semantics through JS.
+- Extend conversation/app orchestration to append `Message::Tool` results after assistant tool calls.
+- Distinguish the three conversation outcomes explicitly:
+  no tool calls => final assistant reply,
+  read-only/error tool round => another prompt payload,
+  successful mutation => deterministic local confirmation and end of turn.
+- Keep tool execution app-owned:
+  JS should buffer chat chunks, dispatch completed responses, execute emitted effects, and render views only.
 - Do not recreate the terminal REPL in the browser; build the browser interaction model from the app boundary outward.
 - Keep JavaScript thin: JS executes effects and renders view data, while Rust owns decisions and state transitions.
 - Add browser-facing functionality in small increments, and for each increment:
@@ -141,7 +161,7 @@ These concerns apply once consensus logic runs in distributed browser clients. S
 - `amend` entry type: add when needed (body-text update, stance invalidation semantics TBD).
 - BAF support edge propagation: `supported_by` field exists in solver graph, semantics undecided.
 - Incremental state update: full replay is sufficient at deliberation scale.
-- Web UI: browser-side WASM module + JS for WS/LLM/DOM. Architecture decided, implementation deferred.
+- Voice interaction and transcription for consensus UI.
 
 ## Integration testing (remaining)
 

@@ -1,6 +1,6 @@
 # Consensus Browser UI Implementation
 
-Snapshot date: 2026-04-05
+Snapshot date: 2026-04-11
 
 Status: partial
 
@@ -12,8 +12,13 @@ Current status:
 
 - the pure browser-facing app boundary is implemented in `crates/consensus/src/app.rs`
 - draft-only behavior is separated into `crates/consensus/src/drafts.rs`
+- `app::State` now owns `participant`, `conversation`, `coordinator`, and `drafts`
+- `crates/consensus/src/conversation.rs` now stores typed message history and accepts completed chat-completion batches via `ChatCompletionReceived`
+- `crates/consensus/src/app_tools.rs` now exposes an app-owned read-only tool surface over `app::State`
+- the shared system prompt template now lives in `crates/consensus/src/system_prompt.rs`
+- `crates/consensus/src/response.rs` now assembles assistant-only chat-completion responses and types `finish_reason`
 - a thin `wasm-bindgen` wrapper now exists in `crates/consensus-wasm`
-- the browser shell, session bootstrap/join flow, and broader app surface are still planned
+- app-side prompt/request building, tool execution orchestration, mutating app tools, and the browser shell are still planned
 
 Load into session context when working on: browser/WASM architecture, consensus app boundary design, session coordinator integration, JS↔WASM interface design, UI implementation sequencing.
 
@@ -67,11 +72,17 @@ Conceptually:
     - next pure state
     - derived view model
     - requested browser-side effects
+- `Conversation`
+  - Owns typed local message history and assistant-response ingestion.
+  - Should remain responsible for conversation-state bookkeeping, not app-state mutation policy.
 - `SessionCoordinator`
   - Owns session sync policy, catch-up, reconnect recovery, append gating, and submission progress.
   - Long-term target: subsume the responsibilities currently split between the coordinator reducer and `EntryBuffer`.
 - `ConsensusEngine`
   - Owns deliberation semantics, draft semantics, preview, impact analysis, and rendering data.
+- `AppTools`
+  - Owns the app-truthful tool surface over `app::State`.
+  - Read-only queries are now implemented; mutating tools remain to be added.
 - JS shell
   - Executes requested effects and feeds resulting facts back into the pure app.
 
@@ -116,8 +127,17 @@ Out of scope for the first slice:
 
 - voice interaction
 - transcription
-- LLM-mediated conversation
+- full browser-side LLM tool loop execution
 - attempt to preserve REPL commands or terminal affordances
+
+Pure groundwork for LLM conversation is now implemented in Rust:
+
+- typed conversation history
+- assistant-response assembly from completed chat-completion batches
+- app-owned read-only tools
+- shared prompt template extraction
+
+What remains out of scope for the first browser-visible slice is the end-to-end browser tool loop and transport wiring for that conversation path.
 
 ## Incremental implementation loop
 
@@ -388,15 +408,19 @@ The wrapper should not expose engine internals, coordinator internals, or ad hoc
 
 The next implementation work should proceed in this order:
 
-1. Expand the app boundary beyond the current receive/render slice to cover more local interaction.
-2. Move session bootstrap, catch-up, and reconnect policy behind the pure app/coordinator boundary.
-3. Build the first minimal browser shell against `crates/consensus-wasm`.
+1. Build pure app-side prompt/request payload generation from app state, conversation history, shared prompt data, and app-owned tool definitions.
+2. Add app-owned tool execution orchestration:
+   append `Message::Tool` history entries, run read-only tools through another model round, and terminate successful mutation rounds with deterministic local confirmation.
+3. Add stateful mutating app tools, starting with `draft_claim` and `remove_draft`, without moving mutation policy into JS.
+4. Move session bootstrap, catch-up, and reconnect policy further behind the pure app/coordinator boundary.
+5. Build the first minimal browser shell against `crates/consensus-wasm`.
 
 ## Explicit non-goals
 
 - Do not start from terminal commands and port them one-for-one into buttons.
 - Do not let JS accumulate coordination logic "temporarily" without documenting which constraint or correctness property would be violated.
-- Do not make the initial browser prototype depend on LLM conversation or voice.
+- Do not put prompt construction, tool execution, or mutation semantics in JS.
+- Do not make the first browser-visible prototype depend on voice.
 - Do not expose a large wasm API just because lower-level Rust methods already exist.
 
 ## Related documents

@@ -1,6 +1,6 @@
 # Entrypoint Behavior
 
-Snapshot date: 2026-04-02
+Snapshot date: 2026-04-11
 
 ## Binaries
 
@@ -91,7 +91,7 @@ Snapshot date: 2026-04-02
 - `crates/prosthetic-conscience/src/router/state.rs`
 - `static/transcribe.html`
 - `crates/prosthetic-conscience/src/client/gateway_client.rs`
-- `crates/prosthetic-conscience/src/client/response_assembler.rs`
+- `crates/consensus/src/response.rs`
 - `crates/prosthetic-conscience/src/client/tool_loop.rs`
 - `crates/prosthetic-conscience/src/client/tools/mod.rs`
 - `crates/prosthetic-conscience/src/client/tools/current_time.rs`
