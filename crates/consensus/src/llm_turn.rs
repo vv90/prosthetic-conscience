@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use crate::engine::{ClaimRef, ConsensusEngine};
 use crate::format::{format_drafts, format_impact_analysis, format_overview};
 use crate::response::{
-    AssemblerError, CompletedMessage, assemble, assistant_message_value, tool_result_message,
+    AssemblerError, CompletedAssistantMessage, assemble, assistant_message_value,
+    tool_result_message,
 };
 use crate::system_prompt::{self, SystemPromptInput};
 use crate::tools;
@@ -29,7 +30,7 @@ pub const MAX_COMPLETION_TOKENS: u64 = 512;
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LlmTurnTrace {
     pub rounds: Vec<LlmRoundTrace>,
-    pub final_message: Option<CompletedMessage>,
+    pub final_message: Option<CompletedAssistantMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,7 +39,7 @@ pub struct LlmRoundTrace {
     pub request_history_messages: usize,
     pub request_messages: usize,
     pub response_chunks: usize,
-    pub assistant_message: Option<CompletedMessage>,
+    pub assistant_message: Option<CompletedAssistantMessage>,
     pub tool_results: Vec<ToolExecutionTrace>,
     pub error: Option<String>,
 }
@@ -64,7 +65,7 @@ pub enum TurnStep {
     /// draft mutation was detected and a deterministic confirmation was
     /// synthesized). The turn is complete.
     Final {
-        message: CompletedMessage,
+        message: CompletedAssistantMessage,
         round_trace: LlmRoundTrace,
     },
     /// The model made tool calls that did not mutate drafts (e.g. inspection
@@ -99,7 +100,7 @@ pub struct TurnConfig<'a> {
 /// Process the SSE chunks from one inference call and advance the turn.
 ///
 /// This is the pure core of the tool loop. It:
-/// 1. Assembles chunks into a `CompletedMessage`
+/// 1. Assembles chunks into a `CompletedAssistantMessage`
 /// 2. Appends the assistant message to history
 /// 3. If no tool calls → returns `TurnStep::Final`
 /// 4. If max rounds exceeded → returns `TurnStep::MaxRoundsExceeded`
@@ -373,7 +374,7 @@ pub fn is_draft_mutation_tool(function_name: &str) -> bool {
 pub fn synthesize_mutation_follow_up(
     engine: &ConsensusEngine,
     tool_results: &[ToolExecutionTrace],
-) -> CompletedMessage {
+) -> CompletedAssistantMessage {
     let content = tool_results
         .iter()
         .rev()
@@ -387,8 +388,7 @@ pub fn synthesize_mutation_follow_up(
             )
         });
 
-    CompletedMessage {
-        role: "assistant".into(),
+    CompletedAssistantMessage {
         content: Some(content),
         tool_calls: vec![],
         finish_reason: Some("stop".into()),

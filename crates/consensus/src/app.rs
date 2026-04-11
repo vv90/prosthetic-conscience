@@ -195,7 +195,10 @@ fn map_draft_effects(effects: Vec<drafts::Effect>) -> Vec<Effect> {
 }
 
 fn map_conversation_effects(effects: Vec<conversation::Effect>) -> Vec<Effect> {
-    effects.into_iter().map(|effect| match effect {}).collect()
+    effects
+        .into_iter()
+        .map(|effect| Effect::ConversationEffect { effect })
+        .collect()
 }
 
 #[cfg(test)]
@@ -298,10 +301,24 @@ mod tests {
         }
     }
 
+    fn chat_completion_received_event(chunks: Vec<serde_json::Value>) -> Event {
+        Event::ConversationEvent {
+            event: conversation::Event::ChatCompletionReceived { chunks },
+        }
+    }
+
     fn received_event(index: usize, entry: Entry) -> Event {
         Event::CoordinatorEvent {
             event: coordinator::Event::Received { index, entry },
         }
+    }
+
+    fn role_chunk() -> serde_json::Value {
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]})
+    }
+
+    fn content_chunk(content: &str) -> serde_json::Value {
+        json!({"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}]})
     }
 
     fn init_state() -> State {
@@ -349,6 +366,62 @@ mod tests {
 
         let state = reduce(state, received_event(0, claim_entry("c1", "committed"))).state;
         assert_eq!(conversation::view(&state.conversation), conversation_before);
+    }
+
+    #[test]
+    fn chat_completion_received_changes_only_conversation_history() {
+        let mut state = init_state();
+        state = reduce(state, draft_claim_event("local draft", ClaimKind::Proposal)).state;
+        state = reduce(state, received_event(0, claim_entry("c1", "committed"))).state;
+
+        let participant_before = state.participant.clone();
+        let coordinator_before = state.coordinator.clone();
+        let drafts_before = state.drafts.clone();
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![
+                role_chunk(),
+                content_chunk("hello"),
+                content_chunk(" world"),
+            ]),
+        );
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(transition.state.participant, participant_before);
+        assert_eq!(transition.state.coordinator, coordinator_before);
+        assert_eq!(transition.state.drafts, drafts_before);
+        assert_eq!(
+            conversation::view(&transition.state.conversation).history,
+            vec![conversation::Message::Assistant {
+                content: Some(String::from("hello world")),
+                tool_calls: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn chat_completion_decode_failure_surfaces_as_wrapped_conversation_effect() {
+        let state = init_state();
+        let participant_before = state.participant.clone();
+        let coordinator_before = state.coordinator.clone();
+        let drafts_before = state.drafts.clone();
+        let conversation_before = state.conversation.clone();
+
+        let transition = reduce(state, chat_completion_received_event(vec![]));
+
+        assert_eq!(transition.state.participant, participant_before);
+        assert_eq!(transition.state.coordinator, coordinator_before);
+        assert_eq!(transition.state.drafts, drafts_before);
+        assert_eq!(transition.state.conversation, conversation_before);
+        assert_eq!(
+            transition.effects,
+            vec![Effect::ConversationEffect {
+                effect: conversation::Effect::ChatCompletionDecodeFailed {
+                    error: String::from("no chunks to assemble"),
+                },
+            }]
+        );
     }
 
     #[test]
@@ -632,6 +705,27 @@ mod tests {
                     "body": "Use JWT",
                     "claim_kind": "proposal",
                     "parent": { "claim_id": "root" }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn wrapped_conversation_effect_serde_shape() {
+        let value = serde_json::to_value(Effect::ConversationEffect {
+            effect: conversation::Effect::ChatCompletionDecodeFailed {
+                error: String::from("no chunks to assemble"),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "conversation_effect",
+                "effect": {
+                    "type": "chat_completion_decode_failed",
+                    "error": "no chunks to assemble"
                 }
             })
         );

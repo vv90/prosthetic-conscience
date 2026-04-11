@@ -8,8 +8,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct CompletedMessage {
-    pub role: String,
+pub struct CompletedAssistantMessage {
     pub content: Option<String>,
     pub tool_calls: Vec<CompletedToolCall>,
     pub finish_reason: Option<String>,
@@ -31,6 +30,8 @@ pub enum AssemblerError {
     MissingChoices { index: usize },
     #[error("chunk {index} has empty 'choices' array")]
     EmptyChoices { index: usize },
+    #[error("unexpected role in chat completion response: {role}")]
+    UnexpectedRole { role: String },
 }
 
 /// Assemble a sequence of streamed chat completion chunk values into a
@@ -40,7 +41,7 @@ pub enum AssemblerError {
 /// (the JSON payload from an SSE `data:` line).
 ///
 /// This is a pure function with no side effects.
-pub fn assemble(chunks: &[Value]) -> Result<CompletedMessage, AssemblerError> {
+pub fn assemble(chunks: &[Value]) -> Result<CompletedAssistantMessage, AssemblerError> {
     if chunks.is_empty() {
         return Err(AssemblerError::Empty);
     }
@@ -128,8 +129,8 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedMessage, AssemblerError> {
         }
     }
 
-    if role.is_empty() {
-        role.push_str("assistant");
+    if !role.is_empty() && role != "assistant" {
+        return Err(AssemblerError::UnexpectedRole { role });
     }
 
     let completed_tool_calls: Vec<CompletedToolCall> = tool_calls
@@ -142,8 +143,7 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedMessage, AssemblerError> {
         })
         .collect();
 
-    Ok(CompletedMessage {
-        role,
+    Ok(CompletedAssistantMessage {
         content,
         tool_calls: completed_tool_calls,
         finish_reason,
@@ -154,7 +154,7 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedMessage, AssemblerError> {
 ///
 /// If the message has tool calls, they are included so the model sees its own
 /// prior tool calls when processing the follow-up request.
-pub fn assistant_message_value(msg: &CompletedMessage) -> Value {
+pub fn assistant_message_value(msg: &CompletedAssistantMessage) -> Value {
     if msg.tool_calls.is_empty() {
         json!({
             "role": "assistant",
@@ -244,7 +244,6 @@ mod tests {
             json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]}),
         ];
         let msg = assemble(&chunks).expect("should assemble");
-        assert_eq!(msg.role, "assistant");
         assert_eq!(msg.content, Some("hello".to_owned()));
         assert!(msg.tool_calls.is_empty());
         assert_eq!(msg.finish_reason, Some("stop".to_owned()));
@@ -297,5 +296,42 @@ mod tests {
         assert_eq!(msg.tool_calls[0].function_name, "exec_code");
         assert_eq!(msg.tool_calls[0].arguments_json, "{\"lang\": \"python\"}");
         assert_eq!(msg.finish_reason, Some("tool_calls".to_owned()));
+    }
+
+    #[test]
+    fn test_missing_role_is_accepted_as_assistant_response() {
+        let chunks = vec![content_chunk("hello"), finish_chunk("stop")];
+
+        let msg = assemble(&chunks).expect("missing role should still assemble");
+
+        assert_eq!(msg.content, Some("hello".to_owned()));
+        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+    }
+
+    #[test]
+    fn test_assistant_role_is_accepted() {
+        let chunks = vec![role_chunk(), content_chunk("hello"), finish_chunk("stop")];
+
+        let msg = assemble(&chunks).expect("assistant role should assemble");
+
+        assert_eq!(msg.content, Some("hello".to_owned()));
+        assert!(msg.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_non_assistant_role_is_rejected() {
+        let chunks = vec![
+            json!({"choices": [{"index": 0, "delta": {"role": "user", "content": "hello"}, "finish_reason": "stop"}]}),
+        ];
+
+        let error = assemble(&chunks).unwrap_err();
+
+        assert_eq!(
+            error,
+            AssemblerError::UnexpectedRole {
+                role: String::from("user"),
+            }
+        );
     }
 }
