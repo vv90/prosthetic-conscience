@@ -130,6 +130,28 @@ pub fn view(state: &State) -> View {
     }
 }
 
+pub fn show_drafts(state: &State) -> &[DraftEntry] {
+    &state.drafts
+}
+
+pub fn notice(state: &State) -> Option<&Notice> {
+    state.last_notice.as_ref()
+}
+
+#[cfg(test)]
+pub(crate) fn state_with_drafts(drafts: Vec<DraftEntry>) -> State {
+    let next_draft_id = drafts
+        .iter()
+        .map(|draft| draft.id.0)
+        .max()
+        .map_or(0, |id| id + 1);
+    State {
+        drafts,
+        next_draft_id,
+        last_notice: None,
+    }
+}
+
 fn alloc_draft_id(state: &mut State) -> DraftId {
     let id = DraftId(state.next_draft_id);
     state.next_draft_id += 1;

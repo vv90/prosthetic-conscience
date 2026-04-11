@@ -4,6 +4,7 @@
 //! consensus modules so the logic can be compiled and verified independently.
 
 pub mod app;
+pub mod app_tools;
 pub mod backoff;
 pub mod conversation;
 pub mod coordinator;
@@ -12,6 +13,7 @@ pub mod engine;
 pub mod entry_buffer;
 pub mod format;
 pub mod llm_turn;
+pub(crate) mod preview;
 pub mod protocol;
 pub mod reducer;
 pub mod render;

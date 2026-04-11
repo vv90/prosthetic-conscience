@@ -9,9 +9,12 @@ use serde::Serialize;
 use crate::conversation;
 use crate::coordinator;
 use crate::drafts;
-use crate::engine::{DraftEntry, overview_from_entries};
-use crate::render::OverviewData;
-use crate::types::Entry;
+use crate::engine::{
+    ClaimRef, DraftEntry, EngineError, ImpactAnalysis, materialize_entries, overview_from_entries,
+};
+use crate::preview;
+use crate::render::{ClaimDetail, OverviewData, claim_detail as render_claim_detail};
+use crate::types::{ClaimId, Entry};
 
 const COORDINATOR_PAGE_LIMIT: usize = 1000;
 
@@ -85,12 +88,52 @@ pub fn participant(state: &State) -> &str {
     &state.participant
 }
 
+pub fn overview(state: &State) -> OverviewData {
+    overview_from_entries(state.coordinator.committed_prefix())
+}
+
+pub fn show_drafts(state: &State) -> Vec<DraftEntry> {
+    drafts::show_drafts(&state.drafts).to_vec()
+}
+
+pub fn claim_detail(state: &State, claim_id: &ClaimId) -> Option<ClaimDetail> {
+    let (materialized, statuses) = materialize_entries(state.coordinator.committed_prefix());
+    render_claim_detail(&materialized, &statuses, claim_id)
+}
+
+pub fn preview_overview(state: &State) -> Result<OverviewData, EngineError> {
+    preview::preview_overview(
+        state.coordinator.committed_prefix(),
+        drafts::show_drafts(&state.drafts),
+        &state.participant,
+    )
+}
+
+pub fn preview_claim_detail(
+    state: &State,
+    claim: &ClaimRef,
+) -> Result<Option<ClaimDetail>, EngineError> {
+    preview::preview_claim_detail(
+        state.coordinator.committed_prefix(),
+        drafts::show_drafts(&state.drafts),
+        &state.participant,
+        claim,
+    )
+}
+
+pub fn impact_analysis(state: &State) -> Result<ImpactAnalysis, EngineError> {
+    preview::impact_analysis(
+        state.coordinator.committed_prefix(),
+        drafts::show_drafts(&state.drafts),
+        &state.participant,
+    )
+}
+
 pub fn view(state: &State) -> View {
-    let draft_view = drafts::view(&state.drafts);
     View {
-        overview: overview_from_entries(state.coordinator.committed_prefix()),
-        drafts: draft_view.drafts,
-        notice: draft_view.notice,
+        overview: overview(state),
+        drafts: show_drafts(state),
+        notice: drafts::notice(&state.drafts).cloned(),
     }
 }
 
@@ -156,6 +199,26 @@ fn map_conversation_effects(effects: Vec<conversation::Effect>) -> Vec<Effect> {
 }
 
 #[cfg(test)]
+pub(crate) fn state_for_tests(
+    participant: &str,
+    committed_entries: Vec<Entry>,
+    draft_entries: Vec<DraftEntry>,
+) -> State {
+    let mut state = init(participant.to_owned(), None).state;
+    for (index, entry) in committed_entries.into_iter().enumerate() {
+        state = reduce(
+            state,
+            Event::CoordinatorEvent {
+                event: coordinator::Event::Received { index, entry },
+            },
+        )
+        .state;
+    }
+    state.drafts = drafts::state_with_drafts(draft_entries);
+    state
+}
+
+#[cfg(test)]
 mod tests {
     use proptest::prelude::*;
     use serde_json::json;
@@ -163,8 +226,9 @@ mod tests {
     use super::*;
     use crate::conversation;
     use crate::drafts::Notice;
-    use crate::engine::{ClaimRef, DraftId};
-    use crate::types::{ClaimId, ClaimKind};
+    use crate::engine::{ClaimRef, DraftContent, DraftId};
+    use crate::status::EpistemicStatus;
+    use crate::types::{ClaimId, ClaimKind, RelationKind};
 
     #[derive(Debug, Clone)]
     enum LocalOp {
@@ -242,6 +306,17 @@ mod tests {
 
     fn init_state() -> State {
         init(String::from("alice"), None).state
+    }
+
+    fn draft_claim_entry(id: u64, body: &str, claim_kind: ClaimKind) -> DraftEntry {
+        DraftEntry {
+            id: DraftId(id),
+            entry: DraftContent::Claim {
+                body: body.to_owned(),
+                claim_kind,
+                parent: None,
+            },
+        }
     }
 
     #[test]
@@ -368,6 +443,173 @@ mod tests {
         assert_eq!(after_view.drafts, before_view.drafts);
         assert_eq!(after_view.notice, before_view.notice);
         assert_eq!(after_view.overview.total_claims, 1);
+    }
+
+    #[test]
+    fn overview_query_reads_committed_state_only() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+
+        let query = overview(&state);
+
+        assert_eq!(query.total_claims, 1);
+        assert!(query.proposals.is_empty());
+    }
+
+    #[test]
+    fn show_drafts_query_reads_local_drafts_directly() {
+        let state = state_for_tests(
+            "alice",
+            vec![],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+
+        let drafts = show_drafts(&state);
+
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, DraftId(0));
+    }
+
+    #[test]
+    fn claim_detail_query_reads_committed_materialized_state() {
+        let state = state_for_tests("alice", vec![claim_entry("c1", "committed")], vec![]);
+
+        let detail = claim_detail(&state, &ClaimId("c1".into())).unwrap();
+
+        assert_eq!(detail.claim.id, ClaimId("c1".into()));
+        assert_eq!(detail.claim.body, "committed");
+    }
+
+    #[test]
+    fn preview_queries_include_local_drafts() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+
+        let overview = preview_overview(&state).unwrap();
+        let detail = preview_claim_detail(&state, &ClaimRef::Draft(DraftId(0)))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(overview.total_claims, 2);
+        assert_eq!(detail.claim.id, ClaimId("draft-0".into()));
+    }
+
+    #[test]
+    fn impact_analysis_query_matches_engine_preview_behavior() {
+        let state = state_for_tests(
+            "assistant",
+            vec![
+                Entry::Claim {
+                    claim_id: ClaimId("c1".into()),
+                    author: "alice".into(),
+                    body: "Target".into(),
+                    claim_kind: ClaimKind::Fact,
+                    parent_id: None,
+                },
+                Entry::Claim {
+                    claim_id: ClaimId("c2".into()),
+                    author: "bob".into(),
+                    body: "Attacker".into(),
+                    claim_kind: ClaimKind::Fact,
+                    parent_id: None,
+                },
+            ],
+            vec![
+                draft_claim_entry(0, "Draft proposal", ClaimKind::Proposal),
+                DraftEntry {
+                    id: DraftId(1),
+                    entry: DraftContent::Relation {
+                        source: ClaimRef::Committed(ClaimId("c2".into())),
+                        target: ClaimRef::Committed(ClaimId("c1".into())),
+                        kind: RelationKind::Attacks,
+                    },
+                },
+            ],
+        );
+
+        let impact = impact_analysis(&state).unwrap();
+
+        assert_eq!(impact.new_claims.len(), 1);
+        assert_eq!(impact.new_claims[0].draft_id, DraftId(0));
+        assert_eq!(impact.status_changes.len(), 1);
+        assert_eq!(impact.status_changes[0].claim_id, ClaimId("c1".into()));
+        assert_eq!(
+            impact.status_changes[0].before,
+            Some(EpistemicStatus::Unexamined)
+        );
+        assert_eq!(
+            impact.status_changes[0].after,
+            Some(EpistemicStatus::Defeated)
+        );
+    }
+
+    #[test]
+    fn app_preview_queries_match_engine_preview_methods_for_same_state() {
+        let committed = vec![
+            Entry::Claim {
+                claim_id: ClaimId("c1".into()),
+                author: "alice".into(),
+                body: "Target".into(),
+                claim_kind: ClaimKind::Fact,
+                parent_id: None,
+            },
+            Entry::Claim {
+                claim_id: ClaimId("c2".into()),
+                author: "bob".into(),
+                body: "Attacker".into(),
+                claim_kind: ClaimKind::Fact,
+                parent_id: None,
+            },
+        ];
+        let drafts = vec![
+            draft_claim_entry(0, "Draft proposal", ClaimKind::Proposal),
+            DraftEntry {
+                id: DraftId(1),
+                entry: DraftContent::Relation {
+                    source: ClaimRef::Committed(ClaimId("c2".into())),
+                    target: ClaimRef::Committed(ClaimId("c1".into())),
+                    kind: RelationKind::Attacks,
+                },
+            },
+        ];
+        let state = state_for_tests("assistant", committed.clone(), drafts.clone());
+
+        let mut engine = crate::engine::ConsensusEngine::new(String::from("assistant"));
+        for entry in committed {
+            engine.append(entry);
+        }
+        engine
+            .draft_claim("Draft proposal".into(), ClaimKind::Proposal, None)
+            .unwrap();
+        engine
+            .draft_relation(
+                ClaimRef::Committed(ClaimId("c2".into())),
+                ClaimRef::Committed(ClaimId("c1".into())),
+                RelationKind::Attacks,
+            )
+            .unwrap();
+
+        assert_eq!(
+            preview_overview(&state).unwrap(),
+            engine.preview_overview().unwrap()
+        );
+        assert_eq!(
+            preview_claim_detail(&state, &ClaimRef::Committed(ClaimId("c1".into()))).unwrap(),
+            engine
+                .preview_claim_detail(&ClaimRef::Committed(ClaimId("c1".into())))
+                .unwrap()
+        );
+        assert_eq!(
+            impact_analysis(&state).unwrap(),
+            engine.impact_analysis().unwrap()
+        );
+        assert_eq!(show_drafts(&state), drafts);
     }
 
     #[test]
