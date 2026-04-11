@@ -7,11 +7,21 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ContentFilter,
+    ToolCalls,
+    FunctionCall,
+    Unknown(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedAssistantMessage {
     pub content: Option<String>,
     pub tool_calls: Vec<CompletedToolCall>,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -48,7 +58,7 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedAssistantMessage, Assembler
 
     let mut role = String::new();
     let mut content: Option<String> = None;
-    let mut finish_reason: Option<String> = None;
+    let mut finish_reason: Option<FinishReason> = None;
 
     // Tool calls accumulate by index. We use a BTreeMap so the final
     // Vec is sorted by index.
@@ -125,7 +135,7 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedAssistantMessage, Assembler
 
         // Finish reason — take last non-null.
         if let Some(fr) = choice.get("finish_reason").and_then(Value::as_str) {
-            finish_reason = Some(fr.to_owned());
+            finish_reason = Some(parse_finish_reason(fr));
         }
     }
 
@@ -148,6 +158,17 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedAssistantMessage, Assembler
         tool_calls: completed_tool_calls,
         finish_reason,
     })
+}
+
+fn parse_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "content_filter" => FinishReason::ContentFilter,
+        "tool_calls" => FinishReason::ToolCalls,
+        "function_call" => FinishReason::FunctionCall,
+        other => FinishReason::Unknown(other.to_owned()),
+    }
 }
 
 /// Build the JSON representation of an assistant message for conversation history.
@@ -246,7 +267,7 @@ mod tests {
         let msg = assemble(&chunks).expect("should assemble");
         assert_eq!(msg.content, Some("hello".to_owned()));
         assert!(msg.tool_calls.is_empty());
-        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert_eq!(msg.finish_reason, Some(FinishReason::Stop));
     }
 
     #[test]
@@ -260,7 +281,7 @@ mod tests {
         ];
         let msg = assemble(&chunks).expect("should assemble");
         assert_eq!(msg.content, Some("Hello world".to_owned()));
-        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert_eq!(msg.finish_reason, Some(FinishReason::Stop));
         assert!(msg.tool_calls.is_empty());
     }
 
@@ -271,7 +292,7 @@ mod tests {
             finish_chunk("tool_calls"),
         ];
         let msg = assemble(&chunks).expect("should assemble");
-        assert_eq!(msg.finish_reason, Some("tool_calls".to_owned()));
+        assert_eq!(msg.finish_reason, Some(FinishReason::ToolCalls));
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.tool_calls[0].id, "call_abc");
         assert_eq!(msg.tool_calls[0].call_type, "function");
@@ -295,7 +316,7 @@ mod tests {
         assert_eq!(msg.tool_calls[0].id, "call_abc");
         assert_eq!(msg.tool_calls[0].function_name, "exec_code");
         assert_eq!(msg.tool_calls[0].arguments_json, "{\"lang\": \"python\"}");
-        assert_eq!(msg.finish_reason, Some("tool_calls".to_owned()));
+        assert_eq!(msg.finish_reason, Some(FinishReason::ToolCalls));
     }
 
     #[test]
@@ -306,7 +327,7 @@ mod tests {
 
         assert_eq!(msg.content, Some("hello".to_owned()));
         assert!(msg.tool_calls.is_empty());
-        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert_eq!(msg.finish_reason, Some(FinishReason::Stop));
     }
 
     #[test]
@@ -333,5 +354,82 @@ mod tests {
                 role: String::from("user"),
             }
         );
+    }
+
+    #[test]
+    fn test_length_finish_reason_is_typed() {
+        let chunks = vec![json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "hello"},
+                "finish_reason": "length"
+            }]
+        })];
+
+        let msg = assemble(&chunks).expect("length finish reason should assemble");
+
+        assert_eq!(msg.finish_reason, Some(FinishReason::Length));
+    }
+
+    #[test]
+    fn test_content_filter_finish_reason_is_typed() {
+        let chunks = vec![json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": "content_filter"
+            }]
+        })];
+
+        let msg = assemble(&chunks).expect("content_filter finish reason should assemble");
+
+        assert_eq!(msg.finish_reason, Some(FinishReason::ContentFilter));
+    }
+
+    #[test]
+    fn test_function_call_finish_reason_is_typed() {
+        let chunks = vec![json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": "function_call"
+            }]
+        })];
+
+        let msg = assemble(&chunks).expect("function_call finish reason should assemble");
+
+        assert_eq!(msg.finish_reason, Some(FinishReason::FunctionCall));
+    }
+
+    #[test]
+    fn test_unknown_finish_reason_is_preserved() {
+        let chunks = vec![json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": "provider_custom"
+            }]
+        })];
+
+        let msg = assemble(&chunks).expect("unknown finish reason should assemble");
+
+        assert_eq!(
+            msg.finish_reason,
+            Some(FinishReason::Unknown(String::from("provider_custom")))
+        );
+    }
+
+    #[test]
+    fn test_missing_finish_reason_remains_none() {
+        let chunks = vec![json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": "hello"}
+            }]
+        })];
+
+        let msg = assemble(&chunks).expect("missing finish reason should assemble");
+
+        assert_eq!(msg.finish_reason, None);
     }
 }

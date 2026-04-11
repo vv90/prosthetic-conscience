@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::engine::{ClaimRef, ConsensusEngine};
 use crate::format::{format_drafts, format_impact_analysis, format_overview};
 use crate::response::{
-    AssemblerError, CompletedAssistantMessage, assemble, assistant_message_value,
+    AssemblerError, CompletedAssistantMessage, FinishReason, assemble, assistant_message_value,
     tool_result_message,
 };
 use crate::system_prompt::{self, SystemPromptInput};
@@ -391,7 +391,7 @@ pub fn synthesize_mutation_follow_up(
     CompletedAssistantMessage {
         content: Some(content),
         tool_calls: vec![],
-        finish_reason: Some("stop".into()),
+        finish_reason: Some(FinishReason::Stop),
     }
 }
 
