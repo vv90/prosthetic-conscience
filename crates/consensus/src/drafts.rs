@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::engine::{ClaimRef, DraftContent, DraftEntry, DraftId, EngineError};
-use crate::types::{ClaimKind, Entry};
+use crate::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
 
 /// Read-only committed context available to draft decisions.
 ///
@@ -147,6 +147,76 @@ pub(crate) fn remove_draft(
     Ok(state)
 }
 
+pub(crate) fn draft_relation(
+    mut state: State,
+    source: ClaimRef,
+    target: ClaimRef,
+    kind: RelationKind,
+    context: Context<'_>,
+) -> Result<(State, DraftId), EngineError> {
+    let _ = context.committed_entries;
+    validate_claim_ref(&state, &source)?;
+    validate_claim_ref(&state, &target)?;
+    let id = alloc_draft_id(&mut state);
+    state.drafts.push(DraftEntry {
+        id,
+        entry: DraftContent::Relation {
+            source,
+            target,
+            kind,
+        },
+    });
+    Ok((state, id))
+}
+
+pub(crate) fn draft_stance(
+    mut state: State,
+    target: ClaimRef,
+    position: Position,
+    context: Context<'_>,
+) -> Result<(State, DraftId), EngineError> {
+    let _ = context.committed_entries;
+    validate_claim_ref(&state, &target)?;
+    let id = alloc_draft_id(&mut state);
+    state.drafts.push(DraftEntry {
+        id,
+        entry: DraftContent::Stance { target, position },
+    });
+    Ok((state, id))
+}
+
+pub(crate) fn draft_resolve(
+    mut state: State,
+    claim: ClaimRef,
+    outcome: Outcome,
+    context: Context<'_>,
+) -> Result<(State, DraftId), EngineError> {
+    let _ = context.committed_entries;
+    validate_claim_ref(&state, &claim)?;
+    let id = alloc_draft_id(&mut state);
+    state.drafts.push(DraftEntry {
+        id,
+        entry: DraftContent::Resolve { claim, outcome },
+    });
+    Ok((state, id))
+}
+
+pub(crate) fn draft_comment(
+    mut state: State,
+    body: String,
+    claim: Option<ClaimRef>,
+    context: Context<'_>,
+) -> Result<(State, DraftId), EngineError> {
+    let _ = context.committed_entries;
+    validate_optional_claim_ref(&state, claim.as_ref())?;
+    let id = alloc_draft_id(&mut state);
+    state.drafts.push(DraftEntry {
+        id,
+        entry: DraftContent::Comment { claim, body },
+    });
+    Ok((state, id))
+}
+
 pub fn view(state: &State) -> View {
     View {
         drafts: state.drafts.clone(),
@@ -270,7 +340,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::types::Position;
+    use crate::types::{Outcome, Position, RelationKind};
 
     #[derive(Debug, Clone)]
     enum LocalOp {
@@ -390,6 +460,180 @@ mod tests {
             })
         );
         assert_eq!(state.drafts.len(), 1);
+    }
+
+    #[test]
+    fn notice_free_draft_relation_preserves_notice_and_returns_new_id() {
+        let mut state = init();
+        let source = alloc_draft_id(&mut state);
+        state.drafts.push(DraftEntry {
+            id: source,
+            entry: DraftContent::Claim {
+                body: String::from("Source"),
+                claim_kind: ClaimKind::Fact,
+                parent: None,
+            },
+        });
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let (state, draft_id) = draft_relation(
+            state,
+            ClaimRef::Draft(source),
+            ClaimRef::Committed(crate::types::ClaimId(String::from("target"))),
+            RelationKind::Supports,
+            Context::default(),
+        )
+        .unwrap();
+
+        assert_eq!(draft_id, DraftId(1));
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
+        );
+        assert!(matches!(
+            &state.drafts[1],
+            DraftEntry {
+                entry: DraftContent::Relation {
+                    source: ClaimRef::Draft(id),
+                    target: ClaimRef::Committed(_),
+                    kind: RelationKind::Supports,
+                },
+                ..
+            } if *id == source
+        ));
+    }
+
+    #[test]
+    fn notice_free_draft_stance_preserves_notice_and_returns_new_id() {
+        let mut state = init();
+        let target = alloc_draft_id(&mut state);
+        state.drafts.push(DraftEntry {
+            id: target,
+            entry: DraftContent::Claim {
+                body: String::from("Target"),
+                claim_kind: ClaimKind::Fact,
+                parent: None,
+            },
+        });
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let (state, draft_id) = draft_stance(
+            state,
+            ClaimRef::Draft(target),
+            Position::Support,
+            Context::default(),
+        )
+        .unwrap();
+
+        assert_eq!(draft_id, DraftId(1));
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
+        );
+        assert!(matches!(
+            &state.drafts[1],
+            DraftEntry {
+                entry: DraftContent::Stance {
+                    target: ClaimRef::Draft(id),
+                    position: Position::Support,
+                },
+                ..
+            } if *id == target
+        ));
+    }
+
+    #[test]
+    fn notice_free_draft_resolve_preserves_notice_and_returns_new_id() {
+        let mut state = init();
+        let claim = alloc_draft_id(&mut state);
+        state.drafts.push(DraftEntry {
+            id: claim,
+            entry: DraftContent::Claim {
+                body: String::from("Proposal"),
+                claim_kind: ClaimKind::Proposal,
+                parent: None,
+            },
+        });
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let (state, draft_id) = draft_resolve(
+            state,
+            ClaimRef::Draft(claim),
+            Outcome::Accepted,
+            Context::default(),
+        )
+        .unwrap();
+
+        assert_eq!(draft_id, DraftId(1));
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
+        );
+        assert!(matches!(
+            &state.drafts[1],
+            DraftEntry {
+                entry: DraftContent::Resolve {
+                    claim: ClaimRef::Draft(id),
+                    outcome: Outcome::Accepted,
+                },
+                ..
+            } if *id == claim
+        ));
+    }
+
+    #[test]
+    fn notice_free_draft_comment_preserves_notice_and_returns_new_id() {
+        let mut state = init();
+        let claim = alloc_draft_id(&mut state);
+        state.drafts.push(DraftEntry {
+            id: claim,
+            entry: DraftContent::Claim {
+                body: String::from("Proposal"),
+                claim_kind: ClaimKind::Proposal,
+                parent: None,
+            },
+        });
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let (state, draft_id) = draft_comment(
+            state,
+            String::from("Looks good"),
+            Some(ClaimRef::Draft(claim)),
+            Context::default(),
+        )
+        .unwrap();
+
+        assert_eq!(draft_id, DraftId(1));
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
+        );
+        assert!(matches!(
+            &state.drafts[1],
+            DraftEntry {
+                entry: DraftContent::Comment {
+                    claim: Some(ClaimRef::Draft(id)),
+                    body,
+                },
+                ..
+            } if *id == claim && body == "Looks good"
+        ));
     }
 
     #[test]
@@ -600,6 +844,81 @@ mod tests {
         );
         assert_eq!(
             remove_draft(state.clone(), DraftId(999), Context::default()),
+            Err(EngineError::DraftNotFound(DraftId(999)))
+        );
+        assert_eq!(
+            draft_relation(
+                state.clone(),
+                ClaimRef::Draft(comment_draft),
+                ClaimRef::Committed(crate::types::ClaimId(String::from("c1"))),
+                RelationKind::Supports,
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            draft_stance(
+                state.clone(),
+                ClaimRef::Draft(comment_draft),
+                Position::Support,
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            draft_resolve(
+                state.clone(),
+                ClaimRef::Draft(comment_draft),
+                Outcome::Accepted,
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            draft_relation(
+                state.clone(),
+                ClaimRef::Committed(crate::types::ClaimId(String::from("c1"))),
+                ClaimRef::Draft(comment_draft),
+                RelationKind::Supports,
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            draft_comment(
+                state.clone(),
+                String::from("note"),
+                Some(ClaimRef::Draft(comment_draft)),
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            draft_relation(
+                state.clone(),
+                ClaimRef::Draft(DraftId(999)),
+                ClaimRef::Committed(crate::types::ClaimId(String::from("c1"))),
+                RelationKind::Supports,
+                Context::default(),
+            ),
+            Err(EngineError::DraftNotFound(DraftId(999)))
+        );
+        assert_eq!(
+            draft_stance(
+                state.clone(),
+                ClaimRef::Draft(DraftId(999)),
+                Position::Support,
+                Context::default(),
+            ),
+            Err(EngineError::DraftNotFound(DraftId(999)))
+        );
+        assert_eq!(
+            draft_comment(
+                state.clone(),
+                String::from("note"),
+                Some(ClaimRef::Draft(DraftId(999))),
+                Context::default(),
+            ),
             Err(EngineError::DraftNotFound(DraftId(999)))
         );
         assert_eq!(state, original);

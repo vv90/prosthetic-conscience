@@ -86,6 +86,10 @@ pub enum ToolOutput {
     PreviewClaimDetail(Option<ClaimDetail>),
     ImpactAnalysis(ImpactAnalysis),
     DraftClaim { draft_id: DraftId },
+    DraftRelation { draft_id: DraftId },
+    DraftStance { draft_id: DraftId },
+    DraftResolve { draft_id: DraftId },
+    DraftComment { draft_id: DraftId },
     RemoveDraft { removed: DraftId },
 }
 
@@ -278,6 +282,63 @@ fn execute_tool(
             )?;
             state.drafts = next_drafts;
             Ok((state, ToolOutput::DraftClaim { draft_id }, true))
+        }
+        app_tools::AppTool::DraftRelation {
+            source,
+            target,
+            kind,
+        } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            let (next_drafts, draft_id) = drafts::draft_relation(
+                state.drafts,
+                source.clone(),
+                target.clone(),
+                *kind,
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            state.drafts = next_drafts;
+            Ok((state, ToolOutput::DraftRelation { draft_id }, true))
+        }
+        app_tools::AppTool::DraftStance { target, position } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            let (next_drafts, draft_id) = drafts::draft_stance(
+                state.drafts,
+                target.clone(),
+                *position,
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            state.drafts = next_drafts;
+            Ok((state, ToolOutput::DraftStance { draft_id }, true))
+        }
+        app_tools::AppTool::DraftResolve { claim, outcome } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            let (next_drafts, draft_id) = drafts::draft_resolve(
+                state.drafts,
+                claim.clone(),
+                *outcome,
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            state.drafts = next_drafts;
+            Ok((state, ToolOutput::DraftResolve { draft_id }, true))
+        }
+        app_tools::AppTool::DraftComment { body, claim } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            let (next_drafts, draft_id) = drafts::draft_comment(
+                state.drafts,
+                body.clone(),
+                claim.clone(),
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            state.drafts = next_drafts;
+            Ok((state, ToolOutput::DraftComment { draft_id }, true))
         }
         app_tools::AppTool::RemoveDraft { draft_id } => {
             let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
@@ -938,6 +999,150 @@ mod tests {
     }
 
     #[test]
+    fn execute_tool_calls_draft_relation_updates_only_drafts_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call(
+                "call_1",
+                "draft_relation",
+                "{\"source\":\"claim:c1\",\"target\":\"draft:0\",\"kind\":\"supports\"}",
+            )],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert_eq!(show_drafts(&execution.state).len(), 2);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftRelation {
+                    draft_id: DraftId(1),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_draft_stance_updates_only_drafts_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call(
+                "call_1",
+                "draft_stance",
+                "{\"target\":\"draft:0\",\"position\":\"support\"}",
+            )],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert_eq!(show_drafts(&execution.state).len(), 2);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftStance {
+                    draft_id: DraftId(1),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_draft_resolve_updates_only_drafts_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call(
+                "call_1",
+                "draft_resolve",
+                "{\"claim\":\"draft:0\",\"outcome\":\"accepted\"}",
+            )],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert_eq!(show_drafts(&execution.state).len(), 2);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftResolve {
+                    draft_id: DraftId(1),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_draft_comment_updates_only_drafts_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call(
+                "call_1",
+                "draft_comment",
+                "{\"body\":\"Looks good\",\"claim\":\"draft:0\"}",
+            )],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert_eq!(show_drafts(&execution.state).len(), 2);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftComment {
+                    draft_id: DraftId(1),
+                }),
+            }]
+        );
+    }
+
+    #[test]
     fn execute_tool_calls_turns_decode_errors_into_typed_outcomes() {
         let state = state_for_tests("alice", vec![], vec![]);
         let original = state.clone();
@@ -1010,6 +1215,62 @@ mod tests {
                 call_id: String::from("call_1"),
                 outcome: ToolCallOutcome::Success(ToolOutput::DraftClaim {
                     draft_id: DraftId(0),
+                }),
+            }
+        );
+        assert_eq!(
+            execution.outcomes[1],
+            ToolExecution {
+                call_id: String::from("call_2"),
+                outcome: ToolCallOutcome::Error(ToolCallError::Execution(
+                    EngineError::DraftNotFound(DraftId(999)),
+                )),
+            }
+        );
+        assert_eq!(
+            execution.outcomes[2],
+            ToolExecution {
+                call_id: String::from("call_3"),
+                outcome: ToolCallOutcome::Success(ToolOutput::ShowDrafts(show_drafts(
+                    &execution.state
+                ))),
+            }
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_with_new_mutation_preserves_earlier_success_when_later_call_fails() {
+        let state = state_for_tests(
+            "alice",
+            vec![],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+
+        let execution = execute_tool_calls(
+            state,
+            &[
+                tool_call(
+                    "call_1",
+                    "draft_comment",
+                    "{\"body\":\"Looks good\",\"claim\":\"draft:0\"}",
+                ),
+                tool_call(
+                    "call_2",
+                    "draft_stance",
+                    "{\"target\":\"draft:999\",\"position\":\"support\"}",
+                ),
+                tool_call("call_3", "show_drafts", "{}"),
+            ],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(show_drafts(&execution.state).len(), 2);
+        assert_eq!(
+            execution.outcomes[0],
+            ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftComment {
+                    draft_id: DraftId(1),
                 }),
             }
         );

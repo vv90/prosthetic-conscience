@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::engine::{ClaimRef, DraftId};
 use crate::response::RawToolCall;
 use crate::tools::ToolDef;
-use crate::types::{ClaimId, ClaimKind};
+use crate::types::{ClaimId, ClaimKind, Outcome, Position, RelationKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppTool {
@@ -23,6 +23,23 @@ pub enum AppTool {
         body: String,
         kind: ClaimKind,
         parent: Option<ClaimRef>,
+    },
+    DraftRelation {
+        source: ClaimRef,
+        target: ClaimRef,
+        kind: RelationKind,
+    },
+    DraftStance {
+        target: ClaimRef,
+        position: Position,
+    },
+    DraftResolve {
+        claim: ClaimRef,
+        outcome: Outcome,
+    },
+    DraftComment {
+        body: String,
+        claim: Option<ClaimRef>,
     },
     RemoveDraft {
         draft_id: DraftId,
@@ -75,6 +92,23 @@ pub fn decode_tool_call(raw: &RawToolCall) -> Result<AppTool, ToolDecodeError> {
             kind: require_claim_kind(&args, "kind")?,
             parent: optional_claim_ref(&args, "parent")?,
         }),
+        "draft_relation" => Ok(AppTool::DraftRelation {
+            source: require_claim_ref(&args, "source")?,
+            target: require_claim_ref(&args, "target")?,
+            kind: require_relation_kind(&args, "kind")?,
+        }),
+        "draft_stance" => Ok(AppTool::DraftStance {
+            target: require_claim_ref(&args, "target")?,
+            position: require_position(&args, "position")?,
+        }),
+        "draft_resolve" => Ok(AppTool::DraftResolve {
+            claim: require_claim_ref(&args, "claim")?,
+            outcome: require_outcome(&args, "outcome")?,
+        }),
+        "draft_comment" => Ok(AppTool::DraftComment {
+            body: require_string(&args, "body")?.to_owned(),
+            claim: optional_claim_ref(&args, "claim")?,
+        }),
         "remove_draft" => Ok(AppTool::RemoveDraft {
             draft_id: DraftId(require_u64(&args, "draft_id")?),
         }),
@@ -108,6 +142,55 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "parent": claim_ref_param("Optional parent claim reference. Use claim:<id> for committed claims or draft:<id> for a locally drafted claim.")
                 },
                 "required": ["body", "kind"]
+            }),
+        },
+        ToolDef {
+            name: "draft_relation",
+            description: "Record that one idea supports or attacks another on behalf of the current participant. References may target either committed claims or locally drafted claims. In conversation, explain the connection naturally rather than talking about graph edges or relation objects. If the participant refers to a concern or risk indirectly, inspect or clarify before choosing source and target.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "source": claim_ref_param("The claim making the attack/support. Use claim:<id> or draft:<id>."),
+                    "target": claim_ref_param("The claim being attacked/supported. Use claim:<id> or draft:<id>."),
+                    "kind": {"type": "string", "enum": ["attacks", "supports"], "description": "Relation type"}
+                },
+                "required": ["source", "target", "kind"]
+            }),
+        },
+        ToolDef {
+            name: "draft_stance",
+            description: "Record the participant's own degree of agreement or disagreement with an idea, but only when they clearly want that view noted down now rather than merely thinking out loud. Use the weakest matching stance: consent for simple agreement, support for positive support without ownership, champion only for strong advocacy or leadership. In conversation, phrase this naturally, for example as noting agreement or objection.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "target": claim_ref_param("The claim to take a stance on. Use claim:<id> or draft:<id>."),
+                    "position": {"type": "string", "enum": ["block", "object", "stand_aside", "abstain", "consent", "support", "champion"], "description": "Position on the claim: consent=simple agreement, support=positive support, champion=strong advocacy/leadership, object/block=disagreement"}
+                },
+                "required": ["target", "position"]
+            }),
+        },
+        ToolDef {
+            name: "draft_resolve",
+            description: "Record a proposed resolution for an idea on behalf of the current participant. In conversation, describe the decision plainly rather than using internal workflow jargon unless the participant asks for it.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "claim": claim_ref_param("The proposal to resolve. Use claim:<id> or draft:<id>."),
+                    "outcome": {"type": "string", "enum": ["accepted", "rejected", "tabled", "withdrawn"], "description": "Resolution outcome"}
+                },
+                "required": ["claim", "outcome"]
+            }),
+        },
+        ToolDef {
+            name: "draft_comment",
+            description: "Record a concrete freeform note for the shared log on behalf of the current participant, optionally attached to a specific claim. Do not use this for advice, hypotheticals, or as a placeholder when the user is still exploring what they mean.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string", "description": "Comment text"},
+                    "claim": claim_ref_param("Optional related claim reference. Use claim:<id> or draft:<id>.")
+                },
+                "required": ["body"]
             }),
         },
         ToolDef {
@@ -245,6 +328,49 @@ fn require_claim_kind(args: &Value, field: &'static str) -> Result<ClaimKind, To
     }
 }
 
+fn require_relation_kind(
+    args: &Value,
+    field: &'static str,
+) -> Result<RelationKind, ToolDecodeError> {
+    match require_string(args, field)? {
+        "attacks" => Ok(RelationKind::Attacks),
+        "supports" => Ok(RelationKind::Supports),
+        other => Err(ToolDecodeError {
+            kind: ToolDecodeErrorKind::InvalidArgumentValue,
+            message: format!("{field}: unknown relation kind '{other}'"),
+        }),
+    }
+}
+
+fn require_position(args: &Value, field: &'static str) -> Result<Position, ToolDecodeError> {
+    match require_string(args, field)? {
+        "block" => Ok(Position::Block),
+        "object" => Ok(Position::Object),
+        "stand_aside" => Ok(Position::StandAside),
+        "abstain" => Ok(Position::Abstain),
+        "consent" => Ok(Position::Consent),
+        "support" => Ok(Position::Support),
+        "champion" => Ok(Position::Champion),
+        other => Err(ToolDecodeError {
+            kind: ToolDecodeErrorKind::InvalidArgumentValue,
+            message: format!("{field}: unknown position '{other}'"),
+        }),
+    }
+}
+
+fn require_outcome(args: &Value, field: &'static str) -> Result<Outcome, ToolDecodeError> {
+    match require_string(args, field)? {
+        "accepted" => Ok(Outcome::Accepted),
+        "rejected" => Ok(Outcome::Rejected),
+        "tabled" => Ok(Outcome::Tabled),
+        "withdrawn" => Ok(Outcome::Withdrawn),
+        other => Err(ToolDecodeError {
+            kind: ToolDecodeErrorKind::InvalidArgumentValue,
+            message: format!("{field}: unknown outcome '{other}'"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -264,6 +390,10 @@ mod tests {
                 "overview",
                 "claim_detail",
                 "draft_claim",
+                "draft_relation",
+                "draft_stance",
+                "draft_resolve",
+                "draft_comment",
                 "show_drafts",
                 "remove_draft",
                 "preview_overview",
@@ -280,6 +410,22 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "draft_claim")
             .expect("draft_claim definition");
+        let draft_relation = defs
+            .iter()
+            .find(|tool| tool.name == "draft_relation")
+            .expect("draft_relation definition");
+        let draft_stance = defs
+            .iter()
+            .find(|tool| tool.name == "draft_stance")
+            .expect("draft_stance definition");
+        let draft_resolve = defs
+            .iter()
+            .find(|tool| tool.name == "draft_resolve")
+            .expect("draft_resolve definition");
+        let draft_comment = defs
+            .iter()
+            .find(|tool| tool.name == "draft_comment")
+            .expect("draft_comment definition");
         let remove_draft = defs
             .iter()
             .find(|tool| tool.name == "remove_draft")
@@ -300,6 +446,76 @@ mod tests {
                     }
                 },
                 "required": ["body", "kind"]
+            })
+        );
+        assert_eq!(
+            draft_relation.parameters,
+            json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "The claim making the attack/support. Use claim:<id> or draft:<id>.",
+                        "examples": ["claim:prop-hybrid", "draft:7"],
+                        "default": "claim:example-claim"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "The claim being attacked/supported. Use claim:<id> or draft:<id>.",
+                        "examples": ["claim:prop-hybrid", "draft:7"],
+                        "default": "claim:example-claim"
+                    },
+                    "kind": {"type": "string", "enum": ["attacks", "supports"], "description": "Relation type"}
+                },
+                "required": ["source", "target", "kind"]
+            })
+        );
+        assert_eq!(
+            draft_stance.parameters,
+            json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "The claim to take a stance on. Use claim:<id> or draft:<id>.",
+                        "examples": ["claim:prop-hybrid", "draft:7"],
+                        "default": "claim:example-claim"
+                    },
+                    "position": {"type": "string", "enum": ["block", "object", "stand_aside", "abstain", "consent", "support", "champion"], "description": "Position on the claim: consent=simple agreement, support=positive support, champion=strong advocacy/leadership, object/block=disagreement"}
+                },
+                "required": ["target", "position"]
+            })
+        );
+        assert_eq!(
+            draft_resolve.parameters,
+            json!({
+                "type": "object",
+                "properties": {
+                    "claim": {
+                        "type": "string",
+                        "description": "The proposal to resolve. Use claim:<id> or draft:<id>.",
+                        "examples": ["claim:prop-hybrid", "draft:7"],
+                        "default": "claim:example-claim"
+                    },
+                    "outcome": {"type": "string", "enum": ["accepted", "rejected", "tabled", "withdrawn"], "description": "Resolution outcome"}
+                },
+                "required": ["claim", "outcome"]
+            })
+        );
+        assert_eq!(
+            draft_comment.parameters,
+            json!({
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string", "description": "Comment text"},
+                    "claim": {
+                        "type": "string",
+                        "description": "Optional related claim reference. Use claim:<id> or draft:<id>.",
+                        "examples": ["claim:prop-hybrid", "draft:7"],
+                        "default": "claim:example-claim"
+                    }
+                },
+                "required": ["body"]
             })
         );
         assert_eq!(
@@ -339,6 +555,28 @@ mod tests {
                 String::from("remove_draft"),
                 String::from("{\"draft_id\":7}"),
             ),
+            RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_relation"),
+                String::from(
+                    "{\"source\":\"claim:c1\",\"target\":\"draft:7\",\"kind\":\"supports\"}",
+                ),
+            ),
+            RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_stance"),
+                String::from("{\"target\":\"claim:c1\",\"position\":\"support\"}"),
+            ),
+            RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_resolve"),
+                String::from("{\"claim\":\"claim:c1\",\"outcome\":\"accepted\"}"),
+            ),
+            RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_comment"),
+                String::from("{\"body\":\"Looks good\",\"claim\":\"draft:7\"}"),
+            ),
         ];
 
         assert_eq!(decode_tool_call(&calls[0]), Ok(AppTool::Overview));
@@ -360,6 +598,35 @@ mod tests {
             decode_tool_call(&calls[3]),
             Ok(AppTool::RemoveDraft {
                 draft_id: DraftId(7),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&calls[4]),
+            Ok(AppTool::DraftRelation {
+                source: ClaimRef::Committed(ClaimId(String::from("c1"))),
+                target: ClaimRef::Draft(DraftId(7)),
+                kind: RelationKind::Supports,
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&calls[5]),
+            Ok(AppTool::DraftStance {
+                target: ClaimRef::Committed(ClaimId(String::from("c1"))),
+                position: Position::Support,
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&calls[6]),
+            Ok(AppTool::DraftResolve {
+                claim: ClaimRef::Committed(ClaimId(String::from("c1"))),
+                outcome: Outcome::Accepted,
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&calls[7]),
+            Ok(AppTool::DraftComment {
+                body: String::from("Looks good"),
+                claim: Some(ClaimRef::Draft(DraftId(7))),
             })
         );
     }
@@ -390,6 +657,36 @@ mod tests {
             String::from("call_1"),
             String::from("preview_claim_detail"),
             String::from("{\"claim\":{\"claim_id\":\"c1\",\"draft_id\":1}}"),
+        );
+        let invalid_relation_kind = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_relation"),
+            String::from("{\"source\":\"claim:c1\",\"target\":\"claim:c2\",\"kind\":\"depends\"}"),
+        );
+        let invalid_position = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_stance"),
+            String::from("{\"target\":\"claim:c1\",\"position\":\"agree\"}"),
+        );
+        let invalid_outcome = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_resolve"),
+            String::from("{\"claim\":\"claim:c1\",\"outcome\":\"merged\"}"),
+        );
+        let invalid_source = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_relation"),
+            String::from("{\"source\":{},\"target\":\"claim:c2\",\"kind\":\"supports\"}"),
+        );
+        let invalid_target = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_stance"),
+            String::from("{\"target\":{},\"position\":\"support\"}"),
+        );
+        let invalid_claim = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_comment"),
+            String::from("{\"body\":\"note\",\"claim\":{}}"),
         );
 
         assert_eq!(
@@ -424,6 +721,54 @@ mod tests {
         );
         assert_eq!(
             decode_tool_call(&invalid_ref),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from(
+                    "claim: expected a claim reference string (claim:<id>, draft:<n>, #<n>) or an object with exactly one of claim_id or draft_id"
+                ),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_relation_kind),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from("kind: unknown relation kind 'depends'"),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_position),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from("position: unknown position 'agree'"),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_outcome),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from("outcome: unknown outcome 'merged'"),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_source),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from(
+                    "source: expected a claim reference string (claim:<id>, draft:<n>, #<n>) or an object with exactly one of claim_id or draft_id"
+                ),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_target),
+            Err(ToolDecodeError {
+                kind: ToolDecodeErrorKind::InvalidArgumentValue,
+                message: String::from(
+                    "target: expected a claim reference string (claim:<id>, draft:<n>, #<n>) or an object with exactly one of claim_id or draft_id"
+                ),
+            })
+        );
+        assert_eq!(
+            decode_tool_call(&invalid_claim),
             Err(ToolDecodeError {
                 kind: ToolDecodeErrorKind::InvalidArgumentValue,
                 message: String::from(
