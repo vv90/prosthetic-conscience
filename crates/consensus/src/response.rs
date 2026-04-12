@@ -4,7 +4,7 @@
 //! Handles both fragmented deltas (OpenAI style, where tool call arguments
 //! arrive across many chunks) and single-chunk tool calls (llama-server style).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -20,16 +20,44 @@ pub enum FinishReason {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompletedAssistantMessage {
     pub content: Option<String>,
-    pub tool_calls: Vec<CompletedToolCall>,
+    pub tool_calls: Vec<RawToolCall>,
     pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct CompletedToolCall {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawToolCall {
     pub id: String,
+    #[serde(rename = "type")]
     pub call_type: String,
-    pub function_name: String,
-    pub arguments_json: String,
+    pub function: RawToolFunction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawToolFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+impl RawToolCall {
+    pub fn new(id: String, function_name: String, arguments: String) -> Self {
+        Self::new_with_type(id, String::from("function"), function_name, arguments)
+    }
+
+    pub fn new_with_type(
+        id: String,
+        call_type: String,
+        function_name: String,
+        arguments: String,
+    ) -> Self {
+        Self {
+            id,
+            call_type,
+            function: RawToolFunction {
+                name: function_name,
+                arguments,
+            },
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -143,13 +171,10 @@ pub fn assemble(chunks: &[Value]) -> Result<CompletedAssistantMessage, Assembler
         return Err(AssemblerError::UnexpectedRole { role });
     }
 
-    let completed_tool_calls: Vec<CompletedToolCall> = tool_calls
+    let completed_tool_calls: Vec<RawToolCall> = tool_calls
         .into_values()
-        .map(|acc| CompletedToolCall {
-            id: acc.id,
-            call_type: acc.call_type,
-            function_name: acc.function_name,
-            arguments_json: acc.arguments_json,
+        .map(|acc| {
+            RawToolCall::new_with_type(acc.id, acc.call_type, acc.function_name, acc.arguments_json)
         })
         .collect();
 
@@ -190,8 +215,8 @@ pub fn assistant_message_value(msg: &CompletedAssistantMessage) -> Value {
                     "id": tc.id,
                     "type": tc.call_type,
                     "function": {
-                        "name": tc.function_name,
-                        "arguments": tc.arguments_json,
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
                     }
                 })
             })
@@ -296,8 +321,11 @@ mod tests {
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.tool_calls[0].id, "call_abc");
         assert_eq!(msg.tool_calls[0].call_type, "function");
-        assert_eq!(msg.tool_calls[0].function_name, "exec_code");
-        assert_eq!(msg.tool_calls[0].arguments_json, "{\"lang\":\"python\"}");
+        assert_eq!(msg.tool_calls[0].function.name, "exec_code");
+        assert_eq!(
+            msg.tool_calls[0].function.arguments,
+            "{\"lang\":\"python\"}"
+        );
     }
 
     #[test]
@@ -314,9 +342,37 @@ mod tests {
         let msg = assemble(&chunks).expect("should assemble");
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.tool_calls[0].id, "call_abc");
-        assert_eq!(msg.tool_calls[0].function_name, "exec_code");
-        assert_eq!(msg.tool_calls[0].arguments_json, "{\"lang\": \"python\"}");
+        assert_eq!(msg.tool_calls[0].function.name, "exec_code");
+        assert_eq!(
+            msg.tool_calls[0].function.arguments,
+            "{\"lang\": \"python\"}"
+        );
         assert_eq!(msg.finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn raw_tool_call_serde_round_trips_openai_shape() {
+        let tool_call = RawToolCall::new(
+            String::from("call_1"),
+            String::from("draft_claim"),
+            String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
+        );
+
+        let value = serde_json::to_value(&tool_call).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "draft_claim",
+                    "arguments": "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"
+                }
+            })
+        );
+
+        let round_trip: RawToolCall = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip, tool_call);
     }
 
     #[test]

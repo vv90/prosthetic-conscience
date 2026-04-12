@@ -6,14 +6,17 @@
 
 use serde::Serialize;
 
+use crate::app_tools;
 use crate::conversation;
 use crate::coordinator;
 use crate::drafts;
 use crate::engine::{
-    ClaimRef, DraftEntry, EngineError, ImpactAnalysis, materialize_entries, overview_from_entries,
+    ClaimRef, DraftEntry, DraftId, EngineError, ImpactAnalysis, materialize_entries,
+    overview_from_entries,
 };
 use crate::preview;
 use crate::render::{ClaimDetail, OverviewData, claim_detail as render_claim_detail};
+use crate::response::RawToolCall;
 use crate::types::{ClaimId, Entry};
 
 const COORDINATOR_PAGE_LIMIT: usize = 1000;
@@ -53,6 +56,43 @@ pub struct View {
     pub drafts: Vec<DraftEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<drafts::Notice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolBatchExecution {
+    pub state: State,
+    pub outcomes: Vec<ToolExecution>,
+    pub domain_mutated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolExecution {
+    pub call_id: String,
+    pub outcome: ToolCallOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallOutcome {
+    Success(ToolOutput),
+    Error(ToolCallError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOutput {
+    Overview(OverviewData),
+    ClaimDetail(Option<ClaimDetail>),
+    ShowDrafts(Vec<DraftEntry>),
+    PreviewOverview(OverviewData),
+    PreviewClaimDetail(Option<ClaimDetail>),
+    ImpactAnalysis(ImpactAnalysis),
+    DraftClaim { draft_id: DraftId },
+    RemoveDraft { removed: DraftId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallError {
+    Decode(app_tools::ToolDecodeError),
+    Execution(EngineError),
 }
 
 pub fn init(participant: String, latest_entry_index: Option<usize>) -> Transition {
@@ -137,6 +177,40 @@ pub fn view(state: &State) -> View {
     }
 }
 
+pub fn execute_tool_calls(mut state: State, calls: &[RawToolCall]) -> ToolBatchExecution {
+    let mut outcomes = Vec::with_capacity(calls.len());
+    let mut domain_mutated = false;
+
+    for call in calls {
+        match app_tools::decode_tool_call(call) {
+            Ok(tool) => match execute_tool(state.clone(), &tool) {
+                Ok((next_state, output, mutated)) => {
+                    state = next_state;
+                    domain_mutated |= mutated;
+                    outcomes.push(ToolExecution {
+                        call_id: call.id.clone(),
+                        outcome: ToolCallOutcome::Success(output),
+                    });
+                }
+                Err(error) => outcomes.push(ToolExecution {
+                    call_id: call.id.clone(),
+                    outcome: ToolCallOutcome::Error(ToolCallError::Execution(error)),
+                }),
+            },
+            Err(error) => outcomes.push(ToolExecution {
+                call_id: call.id.clone(),
+                outcome: ToolCallOutcome::Error(ToolCallError::Decode(error)),
+            }),
+        }
+    }
+
+    ToolBatchExecution {
+        state,
+        outcomes,
+        domain_mutated,
+    }
+}
+
 fn reduce_drafts_event(state: State, event: drafts::Event) -> Transition {
     let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
     let transition = drafts::reduce(
@@ -155,6 +229,67 @@ fn reduce_drafts_event(state: State, event: drafts::Event) -> Transition {
             drafts: transition.state,
         },
         effects: map_draft_effects(transition.effects),
+    }
+}
+
+fn execute_tool(
+    mut state: State,
+    tool: &app_tools::AppTool,
+) -> Result<(State, ToolOutput, bool), EngineError> {
+    match tool {
+        app_tools::AppTool::Overview => {
+            Ok((state.clone(), ToolOutput::Overview(overview(&state)), false))
+        }
+        app_tools::AppTool::ClaimDetail { claim_id } => Ok((
+            state.clone(),
+            ToolOutput::ClaimDetail(claim_detail(&state, claim_id)),
+            false,
+        )),
+        app_tools::AppTool::ShowDrafts => Ok((
+            state.clone(),
+            ToolOutput::ShowDrafts(show_drafts(&state)),
+            false,
+        )),
+        app_tools::AppTool::PreviewOverview => Ok((
+            state.clone(),
+            ToolOutput::PreviewOverview(preview_overview(&state)?),
+            false,
+        )),
+        app_tools::AppTool::PreviewClaimDetail { claim } => Ok((
+            state.clone(),
+            ToolOutput::PreviewClaimDetail(preview_claim_detail(&state, claim)?),
+            false,
+        )),
+        app_tools::AppTool::ImpactAnalysis => Ok((
+            state.clone(),
+            ToolOutput::ImpactAnalysis(impact_analysis(&state)?),
+            false,
+        )),
+        app_tools::AppTool::DraftClaim { body, kind, parent } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            let (next_drafts, draft_id) = drafts::draft_claim(
+                state.drafts,
+                body.clone(),
+                *kind,
+                parent.clone(),
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            state.drafts = next_drafts;
+            Ok((state, ToolOutput::DraftClaim { draft_id }, true))
+        }
+        app_tools::AppTool::RemoveDraft { draft_id } => {
+            let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
+            state.drafts = drafts::remove_draft(
+                state.drafts,
+                *draft_id,
+                drafts::Context {
+                    committed_entries: &committed_entries,
+                },
+            )?;
+            Ok((state, ToolOutput::RemoveDraft { removed: *draft_id }, true))
+        }
     }
 }
 
@@ -227,6 +362,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::app_tools;
     use crate::conversation;
     use crate::drafts::Notice;
     use crate::engine::{ClaimRef, DraftContent, DraftId};
@@ -334,6 +470,14 @@ mod tests {
                 parent: None,
             },
         }
+    }
+
+    fn tool_call(call_id: &str, function_name: &str, arguments_json: &str) -> RawToolCall {
+        RawToolCall::new(
+            call_id.to_owned(),
+            function_name.to_owned(),
+            arguments_json.to_owned(),
+        )
     }
 
     #[test]
@@ -683,6 +827,210 @@ mod tests {
             engine.impact_analysis().unwrap()
         );
         assert_eq!(show_drafts(&state), drafts);
+    }
+
+    #[test]
+    fn execute_tool_calls_reads_without_mutating_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let original = state.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[
+                tool_call("call_1", "overview", "{}"),
+                tool_call("call_2", "show_drafts", "{}"),
+                tool_call("call_3", "claim_detail", "{\"claim_id\":\"c1\"}"),
+            ],
+        );
+
+        assert!(!execution.domain_mutated);
+        assert_eq!(execution.state, original);
+        assert_eq!(
+            execution.outcomes,
+            vec![
+                ToolExecution {
+                    call_id: String::from("call_1"),
+                    outcome: ToolCallOutcome::Success(ToolOutput::Overview(overview(&original))),
+                },
+                ToolExecution {
+                    call_id: String::from("call_2"),
+                    outcome: ToolCallOutcome::Success(ToolOutput::ShowDrafts(show_drafts(
+                        &original
+                    ))),
+                },
+                ToolExecution {
+                    call_id: String::from("call_3"),
+                    outcome: ToolCallOutcome::Success(ToolOutput::ClaimDetail(claim_detail(
+                        &original,
+                        &ClaimId(String::from("c1"))
+                    ))),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_mutates_only_draft_domain_state() {
+        let state = state_for_tests("alice", vec![claim_entry("c1", "committed")], vec![]);
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call(
+                "call_1",
+                "draft_claim",
+                "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}",
+            )],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert_eq!(show_drafts(&execution.state).len(), 1);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftClaim {
+                    draft_id: DraftId(0),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_remove_draft_updates_only_drafts_state() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(7, "draft", ClaimKind::Proposal)],
+        );
+        let participant_before = participant(&state).to_owned();
+        let coordinator_before = state.coordinator.clone();
+        let conversation_before = state.conversation.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call("call_1", "remove_draft", "{\"draft_id\":7}")],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(participant(&execution.state), participant_before);
+        assert_eq!(execution.state.coordinator, coordinator_before);
+        assert_eq!(execution.state.conversation, conversation_before);
+        assert!(show_drafts(&execution.state).is_empty());
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::RemoveDraft {
+                    removed: DraftId(7),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_turns_decode_errors_into_typed_outcomes() {
+        let state = state_for_tests("alice", vec![], vec![]);
+        let original = state.clone();
+        let invalid = tool_call("call_1", "draft_claim", "{\"body\"");
+
+        let execution = execute_tool_calls(state, &[invalid.clone()]);
+
+        assert!(!execution.domain_mutated);
+        assert_eq!(execution.state, original);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Error(ToolCallError::Decode(
+                    app_tools::decode_tool_call(&invalid).unwrap_err(),
+                )),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_turns_execution_failures_into_typed_outcomes_without_notice_changes() {
+        let mut state = state_for_tests("alice", vec![], vec![]);
+        state = reduce(state, remove_draft_event(DraftId(999))).state;
+        let notice_before = view(&state).notice;
+        let original = state.clone();
+
+        let execution = execute_tool_calls(
+            state,
+            &[tool_call("call_1", "remove_draft", "{\"draft_id\":123}")],
+        );
+
+        assert!(!execution.domain_mutated);
+        assert_eq!(execution.state, original);
+        assert_eq!(view(&execution.state).notice, notice_before);
+        assert_eq!(
+            execution.outcomes,
+            vec![ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Error(ToolCallError::Execution(
+                    EngineError::DraftNotFound(DraftId(123)),
+                )),
+            }]
+        );
+    }
+
+    #[test]
+    fn execute_tool_calls_preserves_order_and_keeps_earlier_successes() {
+        let state = state_for_tests("alice", vec![], vec![]);
+
+        let execution = execute_tool_calls(
+            state,
+            &[
+                tool_call(
+                    "call_1",
+                    "draft_claim",
+                    "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}",
+                ),
+                tool_call("call_2", "remove_draft", "{\"draft_id\":999}"),
+                tool_call("call_3", "show_drafts", "{}"),
+            ],
+        );
+
+        assert!(execution.domain_mutated);
+        assert_eq!(show_drafts(&execution.state).len(), 1);
+        assert_eq!(execution.outcomes.len(), 3);
+        assert_eq!(
+            execution.outcomes[0],
+            ToolExecution {
+                call_id: String::from("call_1"),
+                outcome: ToolCallOutcome::Success(ToolOutput::DraftClaim {
+                    draft_id: DraftId(0),
+                }),
+            }
+        );
+        assert_eq!(
+            execution.outcomes[1],
+            ToolExecution {
+                call_id: String::from("call_2"),
+                outcome: ToolCallOutcome::Error(ToolCallError::Execution(
+                    EngineError::DraftNotFound(DraftId(999)),
+                )),
+            }
+        );
+        assert_eq!(
+            execution.outcomes[2],
+            ToolExecution {
+                call_id: String::from("call_3"),
+                outcome: ToolCallOutcome::Success(ToolOutput::ShowDrafts(show_drafts(
+                    &execution.state
+                ))),
+            }
+        );
     }
 
     #[test]

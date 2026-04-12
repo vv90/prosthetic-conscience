@@ -13,7 +13,7 @@ use consensus::engine::{ClaimRef, ConsensusEngine, DraftContent, DraftEntry};
 use consensus::llm_turn::{LlmTurnTrace, ToolExecutionTrace};
 use consensus::render::OverviewData;
 use consensus::response::{
-    CompletedMessage, CompletedToolCall, assistant_message_value, tool_result_message,
+    CompletedAssistantMessage, RawToolCall, assistant_message_value, tool_result_message,
 };
 use consensus::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
 
@@ -362,16 +362,14 @@ fn build_synthetic_history(engine: &ConsensusEngine, turns: usize) -> Vec<Value>
         }));
 
         let call_id = format!("seed_overview_{}", turn + 1);
-        history.push(assistant_message_value(&CompletedMessage {
-            role: String::from("assistant"),
+        history.push(assistant_message_value(&CompletedAssistantMessage {
             content: None,
-            tool_calls: vec![CompletedToolCall {
-                id: call_id.clone(),
-                call_type: String::from("function"),
-                function_name: String::from("overview"),
-                arguments_json: String::from("{}"),
-            }],
-            finish_reason: Some(String::from("tool_calls")),
+            tool_calls: vec![RawToolCall::new(
+                call_id.clone(),
+                String::from("overview"),
+                String::from("{}"),
+            )],
+            finish_reason: Some(consensus::response::FinishReason::ToolCalls),
         }));
         history.push(tool_result_message(&call_id, &tool_content));
         history.push(json!({
@@ -898,20 +896,18 @@ mod tests {
                 request_history_messages: 1,
                 request_messages: 2,
                 response_chunks: 1,
-                assistant_message: Some(CompletedMessage {
-                    role: String::from("assistant"),
+                assistant_message: Some(CompletedAssistantMessage {
                     content: Some(String::from("Use /submit to commit pending drafts.")),
                     tool_calls: vec![],
-                    finish_reason: Some(String::from("stop")),
+                    finish_reason: Some(consensus::response::FinishReason::Stop),
                 }),
                 tool_results: vec![],
                 error: None,
             }],
-            final_message: Some(CompletedMessage {
-                role: String::from("assistant"),
+            final_message: Some(CompletedAssistantMessage {
                 content: Some(String::from("Use /submit to commit pending drafts.")),
                 tool_calls: vec![],
-                finish_reason: Some(String::from("stop")),
+                finish_reason: Some(consensus::response::FinishReason::Stop),
             }),
         };
 

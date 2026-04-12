@@ -5,7 +5,7 @@ use consensus::engine::ConsensusEngine;
 use consensus::llm_turn::{
     self, LlmRoundTrace, LlmTurnTrace, ProcessResponseError, TurnConfig, TurnStep,
 };
-use consensus::response::CompletedMessage;
+use consensus::response::CompletedAssistantMessage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -52,7 +52,7 @@ impl ConsensusLlm {
         &self,
         engine: &mut ConsensusEngine,
         history: &mut Vec<Value>,
-    ) -> Result<CompletedMessage, LlmError> {
+    ) -> Result<CompletedAssistantMessage, LlmError> {
         let trace = self
             .run_turn_with_trace(engine, history)
             .await

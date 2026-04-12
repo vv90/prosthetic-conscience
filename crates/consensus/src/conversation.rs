@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::response::{CompletedAssistantMessage, CompletedToolCall, assemble};
+use crate::response::{CompletedAssistantMessage, RawToolCall, assemble};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
@@ -37,26 +37,12 @@ pub enum Message {
     Assistant {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<ToolCall>,
+        tool_calls: Vec<RawToolCall>,
     },
     Tool {
         tool_call_id: String,
         content: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub call_type: String,
-    pub function: ToolFunction,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolFunction {
-    pub name: String,
-    pub arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -103,18 +89,7 @@ fn reduce_event(mut state: State, event: Event) -> Transition {
 fn map_assistant_message(message: CompletedAssistantMessage) -> Message {
     Message::Assistant {
         content: message.content,
-        tool_calls: message.tool_calls.into_iter().map(map_tool_call).collect(),
-    }
-}
-
-fn map_tool_call(tool_call: CompletedToolCall) -> ToolCall {
-    ToolCall {
-        id: tool_call.id,
-        call_type: tool_call.call_type,
-        function: ToolFunction {
-            name: tool_call.function_name,
-            arguments: tool_call.arguments_json,
-        },
+        tool_calls: message.tool_calls,
     }
 }
 
@@ -147,14 +122,11 @@ mod tests {
                 },
                 Message::Assistant {
                     content: None,
-                    tool_calls: vec![ToolCall {
-                        id: String::from("call_1"),
-                        call_type: String::from("function"),
-                        function: ToolFunction {
-                            name: String::from("draft_claim"),
-                            arguments: String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
-                        },
-                    }],
+                    tool_calls: vec![RawToolCall::new(
+                        String::from("call_1"),
+                        String::from("draft_claim"),
+                        String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
+                    )],
                 },
                 Message::Tool {
                     tool_call_id: String::from("call_1"),
@@ -211,14 +183,11 @@ mod tests {
     fn assistant_tool_call_message_serde_round_trip() {
         let message = Message::Assistant {
             content: None,
-            tool_calls: vec![ToolCall {
-                id: String::from("call_1"),
-                call_type: String::from("function"),
-                function: ToolFunction {
-                    name: String::from("draft_claim"),
-                    arguments: String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
-                },
-            }],
+            tool_calls: vec![RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_claim"),
+                String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
+            )],
         };
 
         let value = serde_json::to_value(&message).unwrap();
@@ -359,14 +328,40 @@ mod tests {
             transition.state.history,
             vec![Message::Assistant {
                 content: None,
-                tool_calls: vec![ToolCall {
-                    id: String::from("call_1"),
-                    call_type: String::from("function"),
-                    function: ToolFunction {
-                        name: String::from("overview"),
-                        arguments: String::from("{\"claim\":\"draft:0\"}"),
-                    },
-                }],
+                tool_calls: vec![RawToolCall::new(
+                    String::from("call_1"),
+                    String::from("overview"),
+                    String::from("{\"claim\":\"draft:0\"}"),
+                )],
+            }]
+        );
+    }
+
+    #[test]
+    fn chat_completion_received_keeps_assistant_message_when_tool_args_fail_to_decode() {
+        let state = init();
+
+        let transition = reduce(
+            state,
+            Event::ChatCompletionReceived {
+                chunks: vec![
+                    role_chunk(),
+                    tool_call_start_chunk(0, "call_1", "draft_claim", "{\"body\""),
+                    finish_chunk("tool_calls"),
+                ],
+            },
+        );
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(
+            transition.state.history,
+            vec![Message::Assistant {
+                content: None,
+                tool_calls: vec![RawToolCall::new(
+                    String::from("call_1"),
+                    String::from("draft_claim"),
+                    String::from("{\"body\""),
+                )],
             }]
         );
     }

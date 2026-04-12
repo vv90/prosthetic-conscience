@@ -151,13 +151,13 @@ pub fn process_llm_response(
     let mut round_mutated_drafts = false;
     for tool_call in &msg.tool_calls {
         let (parsed_arguments, argument_parse_error) =
-            match serde_json::from_str::<Value>(&tool_call.arguments_json) {
+            match serde_json::from_str::<Value>(&tool_call.function.arguments) {
                 Ok(arguments) => (Some(arguments), None),
                 Err(error) => (None, Some(error.to_string())),
             };
 
         let (content, dispatch_error) = match parsed_arguments.clone() {
-            Some(arguments) => match tools::dispatch(engine, &tool_call.function_name, arguments) {
+            Some(arguments) => match tools::dispatch(engine, &tool_call.function.name, arguments) {
                 Ok(value) => (
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| {
                         String::from("{\"error\":\"failed to serialize tool result\"}")
@@ -183,8 +183,8 @@ pub fn process_llm_response(
         let dispatch_succeeded = dispatch_error.is_none();
         round_trace.tool_results.push(ToolExecutionTrace {
             call_id: tool_call.id.clone(),
-            function_name: tool_call.function_name.clone(),
-            arguments_json: tool_call.arguments_json.clone(),
+            function_name: tool_call.function.name.clone(),
+            arguments_json: tool_call.function.arguments.clone(),
             parsed_arguments,
             argument_parse_error,
             tool_result_content: content.clone(),
@@ -192,7 +192,7 @@ pub fn process_llm_response(
         });
         history.push(tool_result_message(&tool_call.id, &content));
 
-        if dispatch_succeeded && is_draft_mutation_tool(&tool_call.function_name) {
+        if dispatch_succeeded && is_draft_mutation_tool(&tool_call.function.name) {
             round_mutated_drafts = true;
         }
     }

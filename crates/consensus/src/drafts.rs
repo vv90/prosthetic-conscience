@@ -83,44 +83,68 @@ pub fn init() -> State {
 }
 
 pub fn reduce(mut state: State, event: Event, context: Context<'_>) -> Transition {
-    let _ = context.committed_entries;
-
     match event {
         Event::DraftClaimRequested {
             body,
             claim_kind,
             parent,
-        } => match validate_optional_claim_ref(&state, parent.as_ref()) {
-            Ok(()) => {
-                let id = alloc_draft_id(&mut state);
-                state.drafts.push(DraftEntry {
-                    id,
-                    entry: DraftContent::Claim {
-                        body,
-                        claim_kind,
-                        parent,
-                    },
-                });
+        } => match draft_claim(state.clone(), body, claim_kind, parent, context) {
+            Ok((next_state, _draft_id)) => {
+                state = next_state;
                 state.last_notice = None;
             }
             Err(error) => {
                 state.last_notice = Some(map_notice(error));
             }
         },
-        Event::RemoveDraftRequested { draft_id } => match remove_draft(&mut state, draft_id) {
-            Ok(()) => {
-                state.last_notice = None;
+        Event::RemoveDraftRequested { draft_id } => {
+            match remove_draft(state.clone(), draft_id, context) {
+                Ok(next_state) => {
+                    state = next_state;
+                    state.last_notice = None;
+                }
+                Err(error) => {
+                    state.last_notice = Some(map_notice(error));
+                }
             }
-            Err(error) => {
-                state.last_notice = Some(map_notice(error));
-            }
-        },
+        }
     }
 
     Transition {
         state,
         effects: Vec::new(),
     }
+}
+
+pub(crate) fn draft_claim(
+    mut state: State,
+    body: String,
+    claim_kind: ClaimKind,
+    parent: Option<ClaimRef>,
+    context: Context<'_>,
+) -> Result<(State, DraftId), EngineError> {
+    let _ = context.committed_entries;
+    validate_optional_claim_ref(&state, parent.as_ref())?;
+    let id = alloc_draft_id(&mut state);
+    state.drafts.push(DraftEntry {
+        id,
+        entry: DraftContent::Claim {
+            body,
+            claim_kind,
+            parent,
+        },
+    });
+    Ok((state, id))
+}
+
+pub(crate) fn remove_draft(
+    mut state: State,
+    draft_id: DraftId,
+    context: Context<'_>,
+) -> Result<State, EngineError> {
+    let _ = context.committed_entries;
+    remove_draft_in_place(&mut state, draft_id)?;
+    Ok(state)
 }
 
 pub fn view(state: &State) -> View {
@@ -182,7 +206,7 @@ fn validate_claim_ref(state: &State, claim_ref: &ClaimRef) -> Result<(), EngineE
     }
 }
 
-fn remove_draft(state: &mut State, draft_id: DraftId) -> Result<(), EngineError> {
+fn remove_draft_in_place(state: &mut State, draft_id: DraftId) -> Result<(), EngineError> {
     let pos = state
         .drafts
         .iter()
@@ -343,6 +367,32 @@ mod tests {
     }
 
     #[test]
+    fn notice_free_draft_claim_preserves_notice_and_returns_new_id() {
+        let mut state = init();
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let (state, draft_id) = draft_claim(
+            state,
+            String::from("Use session cookies"),
+            ClaimKind::Proposal,
+            None,
+            Context::default(),
+        )
+        .unwrap();
+
+        assert_eq!(draft_id, DraftId(0));
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
+        );
+        assert_eq!(state.drafts.len(), 1);
+    }
+
+    #[test]
     fn removing_existing_middle_draft_removes_only_that_draft_and_preserves_order() {
         let mut state = init();
         for body in ["first", "second", "third"] {
@@ -374,6 +424,44 @@ mod tests {
         assert_eq!(
             draft_ids(&transition.state),
             vec![before_ids[0], before_ids[2]]
+        );
+    }
+
+    #[test]
+    fn notice_free_remove_draft_preserves_notice_and_removes_one_draft() {
+        let mut state = init();
+        state = reduce(
+            state,
+            Event::DraftClaimRequested {
+                body: String::from("first"),
+                claim_kind: ClaimKind::Fact,
+                parent: None,
+            },
+            Context::default(),
+        )
+        .state;
+        state = reduce(
+            state,
+            Event::DraftClaimRequested {
+                body: String::from("second"),
+                claim_kind: ClaimKind::Fact,
+                parent: None,
+            },
+            Context::default(),
+        )
+        .state;
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(999),
+        });
+
+        let state = remove_draft(state, DraftId(0), Context::default()).unwrap();
+
+        assert_eq!(draft_ids(&state), vec![DraftId(1)]);
+        assert_eq!(
+            state.last_notice,
+            Some(Notice::DraftNotFound {
+                draft_id: DraftId(999),
+            })
         );
     }
 
@@ -482,6 +570,39 @@ mod tests {
                 draft_id: comment_draft,
             })
         );
+    }
+
+    #[test]
+    fn notice_free_helpers_leave_state_unchanged_on_failure() {
+        let mut state = init();
+        let comment_draft = alloc_draft_id(&mut state);
+        state.drafts.push(DraftEntry {
+            id: comment_draft,
+            entry: DraftContent::Comment {
+                claim: None,
+                body: String::from("note"),
+            },
+        });
+        state.last_notice = Some(Notice::DraftNotFound {
+            draft_id: DraftId(777),
+        });
+        let original = state.clone();
+
+        assert_eq!(
+            draft_claim(
+                state.clone(),
+                String::from("child"),
+                ClaimKind::Fact,
+                Some(ClaimRef::Draft(comment_draft)),
+                Context::default(),
+            ),
+            Err(EngineError::DraftReferenceMustTargetClaim(comment_draft))
+        );
+        assert_eq!(
+            remove_draft(state.clone(), DraftId(999), Context::default()),
+            Err(EngineError::DraftNotFound(DraftId(999)))
+        );
+        assert_eq!(state, original);
     }
 
     proptest! {

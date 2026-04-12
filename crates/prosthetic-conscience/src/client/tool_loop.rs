@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::gateway_client::{ClientError, GatewayClient};
 use super::tools::{ToolError, ToolRegistry};
 use consensus::response::{
-    self as response_assembler, AssemblerError, CompletedMessage, assistant_message_value,
+    self as response_assembler, AssemblerError, CompletedAssistantMessage, assistant_message_value,
     tool_result_message,
 };
 
@@ -26,7 +26,7 @@ pub enum ToolLoopError {
 /// Run the tool use loop: send a chat request, detect tool calls, execute
 /// tools, re-request, repeat until a final answer or max rounds exceeded.
 ///
-/// On success, returns the final `CompletedMessage` (with no tool calls).
+/// On success, returns the final `CompletedAssistantMessage` (with no tool calls).
 /// The `messages` vec is updated in place with all intermediate messages
 /// (assistant tool call messages + tool result messages).
 pub async fn run(
@@ -35,7 +35,7 @@ pub async fn run(
     messages: &mut Vec<Value>,
     model: &str,
     max_rounds: usize,
-) -> Result<CompletedMessage, ToolLoopError> {
+) -> Result<CompletedAssistantMessage, ToolLoopError> {
     let tool_defs = registry.definitions();
 
     // Print available tools.
@@ -83,11 +83,11 @@ pub async fn run(
         for tc in &msg.tool_calls {
             eprintln!(
                 "\x1b[36m┌─ tool call: {}({})\x1b[0m",
-                tc.function_name, tc.arguments_json
+                tc.function.name, tc.function.arguments
             );
 
-            let arguments: Value = serde_json::from_str(&tc.arguments_json).unwrap_or_default();
-            let result = registry.execute(&tc.function_name, arguments)?;
+            let arguments: Value = serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+            let result = registry.execute(&tc.function.name, arguments)?;
 
             // Print result, indented and dimmed.
             for line in result.lines() {

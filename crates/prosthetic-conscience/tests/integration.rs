@@ -789,7 +789,10 @@ async fn tool_loop_executes_tool_and_re_requests() {
             msg.content,
             Some("The current time is 12:00 UTC.".to_owned())
         );
-        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert_eq!(
+            msg.finish_reason,
+            Some(response_assembler::FinishReason::Stop)
+        );
         assert!(msg.tool_calls.is_empty());
 
         // Conversation history should have 4 messages:
@@ -975,9 +978,8 @@ async fn gateway_client_collects_chunks_and_assembles() {
         assert_eq!(chunks.len(), 4);
 
         let msg = response_assembler::assemble(&chunks).expect("assembly failed");
-        assert_eq!(msg.role, "assistant");
         assert_eq!(msg.content, Some("Hello there".to_owned()));
-        assert_eq!(msg.finish_reason, Some("stop".to_owned()));
+        assert_eq!(msg.finish_reason, Some(response_assembler::FinishReason::Stop));
         assert!(msg.tool_calls.is_empty());
     })
     .await
