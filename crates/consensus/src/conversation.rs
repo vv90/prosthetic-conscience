@@ -1,7 +1,7 @@
 //! Pure local conversation state machine.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::response::{CompletedAssistantMessage, RawToolCall, assemble};
 
@@ -66,6 +66,83 @@ pub fn view(state: &State) -> View {
     }
 }
 
+pub fn history(state: &State) -> &[Message] {
+    &state.history
+}
+
+pub fn message_to_json(message: &Message) -> Value {
+    match message {
+        Message::User { content } => json!({
+            "role": "user",
+            "content": content,
+        }),
+        Message::Assistant {
+            content,
+            tool_calls,
+        } if tool_calls.is_empty() => json!({
+            "role": "assistant",
+            "content": content.as_deref().unwrap_or(""),
+        }),
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => json!({
+            "role": "assistant",
+            "content": content.as_deref(),
+            "tool_calls": tool_calls,
+        }),
+        Message::Tool {
+            tool_call_id,
+            content,
+        } => json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }),
+    }
+}
+
+pub fn history_to_json(history: &[Message]) -> Vec<Value> {
+    history.iter().map(message_to_json).collect()
+}
+
+pub fn truncate_history(history: &[Value], max: usize) -> Vec<Value> {
+    if history.len() <= max {
+        return history.to_vec();
+    }
+
+    let excess = history.len() - max;
+    let mut cut = excess;
+    while cut < history.len() {
+        let role = history
+            .get(cut)
+            .and_then(|value| value.get("role"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let has_tool_calls = history
+            .get(cut)
+            .and_then(|value| value.get("tool_calls"))
+            .and_then(Value::as_array)
+            .is_some_and(|array| !array.is_empty());
+
+        if role == "user" || (role == "assistant" && !has_tool_calls) {
+            break;
+        }
+        cut += 1;
+    }
+
+    if cut > 0 && cut < history.len() {
+        history[cut..].to_vec()
+    } else {
+        history.to_vec()
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn state_with_history(history: Vec<Message>) -> State {
+    State { history }
+}
+
 fn reduce_event(mut state: State, event: Event) -> Transition {
     match event {
         Event::ChatCompletionReceived { chunks } => match assemble(&chunks) {
@@ -95,6 +172,7 @@ fn map_assistant_message(message: CompletedAssistantMessage) -> Message {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::json;
 
     use super::*;
@@ -484,5 +562,247 @@ mod tests {
                 "error": "no chunks to assemble"
             })
         );
+    }
+
+    #[test]
+    fn history_accessor_returns_stored_messages() {
+        let state = state_with_history(vec![Message::User {
+            content: String::from("hello"),
+        }]);
+
+        assert_eq!(
+            history(&state),
+            vec![Message::User {
+                content: String::from("hello"),
+            }]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn message_to_json_serializes_user_message_with_exact_shape() {
+        let message = Message::User {
+            content: String::from("hello"),
+        };
+
+        assert_eq!(
+            message_to_json(&message),
+            json!({
+                "role": "user",
+                "content": "hello"
+            })
+        );
+    }
+
+    #[test]
+    fn message_to_json_serializes_plain_assistant_message_with_exact_shape() {
+        let message = Message::Assistant {
+            content: Some(String::from("hi")),
+            tool_calls: Vec::new(),
+        };
+
+        assert_eq!(
+            message_to_json(&message),
+            json!({
+                "role": "assistant",
+                "content": "hi"
+            })
+        );
+    }
+
+    #[test]
+    fn message_to_json_serializes_assistant_tool_call_message_with_exact_shape() {
+        let message = Message::Assistant {
+            content: None,
+            tool_calls: vec![RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_claim"),
+                String::from("{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"),
+            )],
+        };
+
+        assert_eq!(
+            message_to_json(&message),
+            json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_claim",
+                        "arguments": "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}"
+                    }
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn message_to_json_serializes_tool_message_with_exact_shape() {
+        let message = Message::Tool {
+            tool_call_id: String::from("call_1"),
+            content: String::from("{\"draft_id\":0}"),
+        };
+
+        assert_eq!(
+            message_to_json(&message),
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"draft_id\":0}"
+            })
+        );
+    }
+
+    #[test]
+    fn history_to_json_preserves_order() {
+        let history = vec![
+            Message::User {
+                content: String::from("hello"),
+            },
+            Message::Assistant {
+                content: Some(String::from("hi")),
+                tool_calls: Vec::new(),
+            },
+            Message::Tool {
+                tool_call_id: String::from("call_1"),
+                content: String::from("{}"),
+            },
+        ];
+
+        assert_eq!(
+            history_to_json(&history),
+            vec![
+                json!({"role": "user", "content": "hello"}),
+                json!({"role": "assistant", "content": "hi"}),
+                json!({"role": "tool", "tool_call_id": "call_1", "content": "{}"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_history_noop_when_under_limit() {
+        let history = vec![
+            json!({"role": "user", "content": "hello"}),
+            json!({"role": "assistant", "content": "hi"}),
+        ];
+
+        assert_eq!(truncate_history(&history, 5), history);
+    }
+
+    #[test]
+    fn truncate_history_drops_oldest_messages() {
+        let history: Vec<Value> = (0..10)
+            .flat_map(|i| {
+                vec![
+                    json!({"role": "user", "content": format!("msg {i}")}),
+                    json!({"role": "assistant", "content": format!("reply {i}")}),
+                ]
+            })
+            .collect();
+
+        let truncated = truncate_history(&history, 6);
+
+        assert!(truncated.len() <= 6);
+        assert_eq!(truncated[0]["role"], "user");
+    }
+
+    #[test]
+    fn truncate_history_preserves_tool_call_pairs() {
+        let history = vec![
+            json!({"role": "user", "content": "start"}),
+            json!({"role": "assistant", "content": "noted"}),
+            json!({"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "overview", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "{}"}),
+            json!({"role": "user", "content": "ok"}),
+            json!({"role": "assistant", "content": "done"}),
+        ];
+
+        assert_eq!(
+            truncate_history(&history, 4),
+            vec![
+                json!({"role": "user", "content": "ok"}),
+                json!({"role": "assistant", "content": "done"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_history_skips_tool_result_at_cut_point() {
+        let history = vec![
+            json!({"role": "user", "content": "a"}),
+            json!({"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "r"}),
+            json!({"role": "assistant", "content": "b"}),
+            json!({"role": "user", "content": "c"}),
+        ];
+
+        assert_eq!(
+            truncate_history(&history, 3),
+            vec![
+                json!({"role": "assistant", "content": "b"}),
+                json!({"role": "user", "content": "c"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_history_noop_when_no_safe_cut_point() {
+        let history = vec![
+            json!({"role": "tool", "tool_call_id": "c1", "content": "r1"}),
+            json!({"role": "tool", "tool_call_id": "c2", "content": "r2"}),
+            json!({"role": "tool", "tool_call_id": "c3", "content": "r3"}),
+        ];
+
+        assert_eq!(truncate_history(&history, 1), history);
+    }
+
+    fn history_message_json_strategy() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(json!({"role": "user", "content": "u"})),
+            Just(json!({"role": "assistant", "content": "a"})),
+            Just(json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "overview",
+                        "arguments": "{}"
+                    }
+                }]
+            })),
+            Just(json!({"role": "tool", "tool_call_id": "call_1", "content": "{}"})),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn truncate_history_returns_a_suffix_without_reordering(
+            history in prop::collection::vec(history_message_json_strategy(), 0..20),
+            max in 0usize..20,
+        ) {
+            let truncated = truncate_history(&history, max);
+
+            prop_assert!(truncated.len() <= history.len());
+            let start = history.len() - truncated.len();
+            prop_assert_eq!(truncated.as_slice(), &history[start..]);
+
+            if history.len() <= max {
+                prop_assert_eq!(truncated.as_slice(), history.as_slice());
+            }
+
+            if truncated.len() < history.len() && !truncated.is_empty() {
+                let first = &truncated[0];
+                let role = first.get("role").and_then(Value::as_str).unwrap_or("");
+                let has_tool_calls = first
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|array| !array.is_empty());
+                prop_assert!(role == "user" || (role == "assistant" && !has_tool_calls));
+            }
+        }
     }
 }

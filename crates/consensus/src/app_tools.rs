@@ -238,6 +238,28 @@ pub fn tool_definitions() -> Vec<ToolDef> {
     ]
 }
 
+pub fn format_tool_definitions(defs: &[ToolDef]) -> String {
+    defs.iter()
+        .map(|tool| format!("- {}: {}", tool.name, tool.description))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn tool_definitions_json(defs: &[ToolDef]) -> Vec<Value> {
+    defs.iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+            })
+        })
+        .collect()
+}
+
 fn empty_params() -> Value {
     json!({
         "type": "object",
@@ -527,6 +549,52 @@ mod tests {
                 },
                 "required": ["draft_id"]
             })
+        );
+    }
+
+    #[test]
+    fn format_tool_definitions_preserves_order_and_exact_shape() {
+        let defs = vec![
+            ToolDef {
+                name: "overview",
+                description: "Inspect the current state.",
+                parameters: empty_params(),
+            },
+            ToolDef {
+                name: "draft_claim",
+                description: "Record a new idea.",
+                parameters: empty_params(),
+            },
+        ];
+
+        assert_eq!(
+            format_tool_definitions(&defs),
+            "- overview: Inspect the current state.\n- draft_claim: Record a new idea."
+        );
+    }
+
+    #[test]
+    fn tool_definitions_json_matches_openai_function_tool_shape() {
+        let defs = vec![ToolDef {
+            name: "overview",
+            description: "Inspect the current state.",
+            parameters: empty_params(),
+        }];
+
+        assert_eq!(
+            tool_definitions_json(&defs),
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "overview",
+                    "description": "Inspect the current state.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
+            })]
         );
     }
 

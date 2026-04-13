@@ -11,6 +11,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::conversation;
 use crate::engine::{ClaimRef, ConsensusEngine};
 use crate::format::{format_drafts, format_impact_analysis, format_overview};
 use crate::response::{
@@ -302,34 +303,7 @@ pub fn build_system_prompt(participant: &str, engine: &ConsensusEngine) -> Strin
 /// (no tool calls), so the remaining history starts at a clean conversation
 /// boundary.
 pub fn truncate_history(history: &mut Vec<Value>, max: usize) {
-    if history.len() <= max {
-        return;
-    }
-
-    let excess = history.len() - max;
-
-    let mut cut = excess;
-    while cut < history.len() {
-        let role = history
-            .get(cut)
-            .and_then(|value| value.get("role"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let has_tool_calls = history
-            .get(cut)
-            .and_then(|value| value.get("tool_calls"))
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
-
-        if role == "user" || (role == "assistant" && !has_tool_calls) {
-            break;
-        }
-        cut += 1;
-    }
-
-    if cut > 0 && cut < history.len() {
-        history.drain(..cut);
-    }
+    *history = conversation::truncate_history(history, max);
 }
 
 // ---------------------------------------------------------------------------

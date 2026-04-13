@@ -5,6 +5,7 @@
 //! - `drafts` owns local draft creation/removal and notices
 
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::app_tools;
 use crate::conversation;
@@ -14,9 +15,11 @@ use crate::engine::{
     ClaimRef, DraftEntry, DraftId, EngineError, ImpactAnalysis, materialize_entries,
     overview_from_entries,
 };
+use crate::format::{format_drafts, format_impact_analysis, format_overview};
 use crate::preview;
 use crate::render::{ClaimDetail, OverviewData, claim_detail as render_claim_detail};
 use crate::response::RawToolCall;
+use crate::system_prompt::{self, SystemPromptInput};
 use crate::types::{ClaimId, Entry};
 
 const COORDINATOR_PAGE_LIMIT: usize = 1000;
@@ -56,6 +59,14 @@ pub struct View {
     pub drafts: Vec<DraftEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<drafts::Notice>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestConfig<'a> {
+    pub model: &'a str,
+    pub commit_instruction: &'a str,
+    pub max_history: usize,
+    pub max_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +190,48 @@ pub fn view(state: &State) -> View {
         drafts: show_drafts(state),
         notice: drafts::notice(&state.drafts).cloned(),
     }
+}
+
+pub fn build_system_prompt(state: &State, commit_instruction: &str) -> String {
+    let overview = format_overview(&overview(state));
+    let drafts = format_drafts(&show_drafts(state));
+    let impact = match impact_analysis(state) {
+        Ok(impact) => format_impact_analysis(&impact),
+        Err(error) => format!("Impact analysis unavailable: {error}"),
+    };
+    let tool_definitions = app_tools::tool_definitions();
+    let tools = app_tools::format_tool_definitions(&tool_definitions);
+
+    system_prompt::build_system_prompt(SystemPromptInput {
+        participant: participant(state),
+        commit_instruction,
+        overview: &overview,
+        drafts: &drafts,
+        impact: Some(&impact),
+        tools: &tools,
+    })
+}
+
+pub fn build_request_payload(state: &State, config: RequestConfig<'_>) -> Value {
+    let tool_definitions = app_tools::tool_definitions();
+    let serialized_history =
+        conversation::history_to_json(conversation::history(&state.conversation));
+    let truncated_history = conversation::truncate_history(&serialized_history, config.max_history);
+
+    let mut messages = Vec::with_capacity(truncated_history.len() + 1);
+    messages.push(json!({
+        "role": "system",
+        "content": build_system_prompt(state, config.commit_instruction),
+    }));
+    messages.extend(truncated_history);
+
+    json!({
+        "model": config.model,
+        "messages": messages,
+        "tools": app_tools::tool_definitions_json(&tool_definitions),
+        "tool_choice": "auto",
+        "max_tokens": config.max_tokens,
+    })
 }
 
 pub fn execute_tool_calls(mut state: State, calls: &[RawToolCall]) -> ToolBatchExecution {
@@ -427,6 +480,7 @@ mod tests {
     use crate::conversation;
     use crate::drafts::Notice;
     use crate::engine::{ClaimRef, DraftContent, DraftId};
+    use crate::format::{format_drafts, format_impact_analysis, format_overview};
     use crate::status::EpistemicStatus;
     use crate::types::{ClaimId, ClaimKind, RelationKind};
 
@@ -539,6 +593,14 @@ mod tests {
             function_name.to_owned(),
             arguments_json.to_owned(),
         )
+    }
+
+    fn assistant_text_event(content: &str) -> Event {
+        chat_completion_received_event(vec![
+            role_chunk(),
+            content_chunk(content),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ])
     }
 
     #[test]
@@ -888,6 +950,146 @@ mod tests {
             engine.impact_analysis().unwrap()
         );
         assert_eq!(show_drafts(&state), drafts);
+    }
+
+    #[test]
+    fn build_system_prompt_matches_shared_template_adapter() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        let tool_definitions = app_tools::tool_definitions();
+        let overview = format_overview(&overview(&state));
+        let drafts = format_drafts(&show_drafts(&state));
+        let impact = format_impact_analysis(&impact_analysis(&state).expect("impact available"));
+        let tools = app_tools::format_tool_definitions(&tool_definitions);
+
+        let direct = system_prompt::build_system_prompt(SystemPromptInput {
+            participant: "alice",
+            commit_instruction: "clicking Submit",
+            overview: &overview,
+            drafts: &drafts,
+            impact: Some(&impact),
+            tools: &tools,
+        });
+
+        assert_eq!(build_system_prompt(&state, "clicking Submit"), direct);
+    }
+
+    #[test]
+    fn build_system_prompt_renders_impact_failure_as_fallback_text() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![
+                DraftEntry {
+                    id: DraftId(0),
+                    entry: DraftContent::Comment {
+                        claim: None,
+                        body: String::from("note"),
+                    },
+                },
+                DraftEntry {
+                    id: DraftId(1),
+                    entry: DraftContent::Relation {
+                        source: ClaimRef::Draft(DraftId(0)),
+                        target: ClaimRef::Committed(ClaimId(String::from("c1"))),
+                        kind: RelationKind::Supports,
+                    },
+                },
+            ],
+        );
+
+        let prompt = build_system_prompt(&state, "typing /submit");
+
+        assert!(prompt.contains(
+            "Impact analysis unavailable: draft reference must target a claim: DraftId(0)"
+        ));
+    }
+
+    #[test]
+    fn build_request_payload_includes_system_history_tools_and_config() {
+        let mut state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+        state.conversation = conversation::state_with_history(vec![
+            conversation::Message::User {
+                content: String::from("Summarize the state."),
+            },
+            conversation::Message::Assistant {
+                content: Some(String::from("Here is the current state.")),
+                tool_calls: Vec::new(),
+            },
+        ]);
+
+        let payload = build_request_payload(
+            &state,
+            RequestConfig {
+                model: "gpt-5.4",
+                commit_instruction: "clicking Submit",
+                max_history: 8,
+                max_tokens: 768,
+            },
+        );
+
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(payload["model"], "gpt-5.4");
+        assert_eq!(payload["tool_choice"], "auto");
+        assert_eq!(payload["max_tokens"], 768);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[1],
+            json!({"role": "user", "content": "Summarize the state."})
+        );
+        assert_eq!(
+            messages[2],
+            json!({"role": "assistant", "content": "Here is the current state."})
+        );
+        assert_eq!(
+            payload["tools"],
+            Value::Array(app_tools::tool_definitions_json(
+                &app_tools::tool_definitions()
+            ))
+        );
+    }
+
+    #[test]
+    fn build_request_payload_truncates_history_at_same_safe_boundary() {
+        let mut state = init_state();
+        state = reduce(state, assistant_text_event("first")).state;
+        state = reduce(state, assistant_text_event("second")).state;
+        state = reduce(state, assistant_text_event("third")).state;
+
+        let payload = build_request_payload(
+            &state,
+            RequestConfig {
+                model: "gpt-5.4",
+                commit_instruction: "typing /submit",
+                max_history: 2,
+                max_tokens: 512,
+            },
+        );
+
+        assert_eq!(
+            payload["messages"],
+            json!([
+                {
+                    "role": "system",
+                    "content": build_system_prompt(&state, "typing /submit"),
+                },
+                {
+                    "role": "assistant",
+                    "content": "second",
+                },
+                {
+                    "role": "assistant",
+                    "content": "third",
+                }
+            ])
+        );
     }
 
     #[test]
