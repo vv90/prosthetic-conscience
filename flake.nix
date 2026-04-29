@@ -62,6 +62,7 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust
+            wasm-bindgen-cli
             rust-analyzer # LSP for editors
             cargo-edit # cargo add/rm/upgrade
             cargo-watch # auto rebuild/test
