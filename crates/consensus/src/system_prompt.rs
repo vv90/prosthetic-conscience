@@ -3,7 +3,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemPromptInput<'a> {
     pub participant: &'a str,
-    pub commit_instruction: &'a str,
     pub overview: &'a str,
     pub drafts: &'a str,
     pub impact: Option<&'a str>,
@@ -20,7 +19,7 @@ pub fn build_system_prompt(input: SystemPromptInput<'_>) -> String {
         "You are an AI drafting assistant helping a human participant contribute to a shared consensus log.\n\
          You are participating as \"{participant}\".\n\
          The shared log is authoritative. You may inspect committed state and manipulate only local drafts.\n\
-         Never claim a draft is committed. Only the human can commit drafts by {commit_instruction}.\n\
+         Never claim a draft is committed. Only the human can commit drafts; until then, drafts are local and pending review.\n\
          All drafts are on behalf of the current participant, \"{participant}\". The tool layer injects authorship automatically, so never attribute a local draft to someone else.\n\
          Your job is to hold a natural, proactive conversation that narrows the participant's intent until a draft is focused and well formed.\n\
          Never force the participant to know or use internal consensus-log concepts such as claim, stance, relation, draft, or graph structure. Infer those privately.\n\
@@ -52,7 +51,6 @@ pub fn build_system_prompt(input: SystemPromptInput<'_>) -> String {
          {impact_section}## Available tools\n\
          {tools}\n",
         participant = input.participant,
-        commit_instruction = input.commit_instruction,
         overview = input.overview,
         drafts = input.drafts,
         impact_section = impact_section,
@@ -65,10 +63,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_includes_participant_and_commit_instruction() {
+    fn prompt_includes_participant_and_commit_boundary() {
         let prompt = build_system_prompt(SystemPromptInput {
             participant: "alice",
-            commit_instruction: "clicking Submit",
             overview: "Overview text",
             drafts: "Draft text",
             impact: None,
@@ -76,14 +73,15 @@ mod tests {
         });
 
         assert!(prompt.contains("You are participating as \"alice\"."));
-        assert!(prompt.contains("Only the human can commit drafts by clicking Submit."));
+        assert!(prompt.contains(
+            "Only the human can commit drafts; until then, drafts are local and pending review."
+        ));
     }
 
     #[test]
     fn prompt_includes_overview_drafts_and_tools_verbatim() {
         let prompt = build_system_prompt(SystemPromptInput {
             participant: "alice",
-            commit_instruction: "typing /submit",
             overview: "Overview text",
             drafts: "Draft text",
             impact: None,
@@ -99,7 +97,6 @@ mod tests {
     fn prompt_omits_impact_section_when_absent() {
         let prompt = build_system_prompt(SystemPromptInput {
             participant: "alice",
-            commit_instruction: "typing /submit",
             overview: "Overview text",
             drafts: "Draft text",
             impact: None,
@@ -113,7 +110,6 @@ mod tests {
     fn prompt_includes_impact_section_when_present() {
         let prompt = build_system_prompt(SystemPromptInput {
             participant: "alice",
-            commit_instruction: "typing /submit",
             overview: "Overview text",
             drafts: "Draft text",
             impact: Some("Impact text"),

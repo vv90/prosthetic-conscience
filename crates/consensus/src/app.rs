@@ -4,7 +4,7 @@
 //! - `coordinator` owns committed-entry sequencing
 //! - `drafts` owns local draft creation/removal and notices
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::app_tools;
@@ -27,6 +27,7 @@ const COORDINATOR_PAGE_LIMIT: usize = 1000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     participant: String,
+    conversation_config: ConversationConfig,
     conversation: conversation::State,
     coordinator: coordinator::State<Entry>,
     drafts: drafts::State,
@@ -45,6 +46,7 @@ pub enum Event {
 pub enum Effect {
     ConversationEffect { effect: conversation::Effect },
     CoordinatorEffect { effect: coordinator::Effect<Entry> },
+    RequestChatCompletion { payload: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +63,9 @@ pub struct View {
     pub notice: Option<drafts::Notice>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestConfig<'a> {
-    pub model: &'a str,
-    pub commit_instruction: &'a str,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationConfig {
+    pub model: String,
     pub max_history: usize,
     pub max_tokens: u64,
 }
@@ -82,6 +83,7 @@ pub struct ToolExecution {
     pub outcome: ToolCallOutcome,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCallOutcome {
     Success(ToolOutput),
@@ -110,7 +112,11 @@ pub enum ToolCallError {
     Execution(EngineError),
 }
 
-pub fn init(participant: String, latest_entry_index: Option<usize>) -> Transition {
+pub fn init(
+    participant: String,
+    latest_entry_index: Option<usize>,
+    conversation_config: ConversationConfig,
+) -> Transition {
     let coordinator = coordinator::sync_to_latest(
         coordinator::State::empty(COORDINATOR_PAGE_LIMIT),
         latest_entry_index,
@@ -119,6 +125,7 @@ pub fn init(participant: String, latest_entry_index: Option<usize>) -> Transitio
     Transition {
         state: State {
             participant,
+            conversation_config,
             conversation: conversation::init(),
             coordinator: coordinator.state,
             drafts: drafts::init(),
@@ -192,7 +199,7 @@ pub fn view(state: &State) -> View {
     }
 }
 
-pub fn build_system_prompt(state: &State, commit_instruction: &str) -> String {
+pub fn build_system_prompt(state: &State) -> String {
     let overview = format_overview(&overview(state));
     let drafts = format_drafts(&show_drafts(state));
     let impact = match impact_analysis(state) {
@@ -204,7 +211,6 @@ pub fn build_system_prompt(state: &State, commit_instruction: &str) -> String {
 
     system_prompt::build_system_prompt(SystemPromptInput {
         participant: participant(state),
-        commit_instruction,
         overview: &overview,
         drafts: &drafts,
         impact: Some(&impact),
@@ -212,25 +218,26 @@ pub fn build_system_prompt(state: &State, commit_instruction: &str) -> String {
     })
 }
 
-pub fn build_request_payload(state: &State, config: RequestConfig<'_>) -> Value {
+pub fn build_request_payload(state: &State) -> Value {
     let tool_definitions = app_tools::tool_definitions();
     let serialized_history =
         conversation::history_to_json(conversation::history(&state.conversation));
-    let truncated_history = conversation::truncate_history(&serialized_history, config.max_history);
+    let truncated_history =
+        conversation::truncate_history(&serialized_history, state.conversation_config.max_history);
 
     let mut messages = Vec::with_capacity(truncated_history.len() + 1);
     messages.push(json!({
         "role": "system",
-        "content": build_system_prompt(state, config.commit_instruction),
+        "content": build_system_prompt(state),
     }));
     messages.extend(truncated_history);
 
     json!({
-        "model": config.model,
+        "model": &state.conversation_config.model,
         "messages": messages,
         "tools": app_tools::tool_definitions_json(&tool_definitions),
         "tool_choice": "auto",
-        "max_tokens": config.max_tokens,
+        "max_tokens": state.conversation_config.max_tokens,
     })
 }
 
@@ -281,6 +288,7 @@ fn reduce_drafts_event(state: State, event: drafts::Event) -> Transition {
     Transition {
         state: State {
             participant: state.participant,
+            conversation_config: state.conversation_config,
             conversation: state.conversation,
             coordinator: state.coordinator,
             drafts: transition.state,
@@ -409,15 +417,24 @@ fn execute_tool(
 
 fn reduce_conversation_event(state: State, event: conversation::Event) -> Transition {
     let transition = conversation::reduce(state.conversation, event);
+    let next_state = State {
+        participant: state.participant,
+        conversation_config: state.conversation_config,
+        conversation: transition.state,
+        coordinator: state.coordinator,
+        drafts: state.drafts,
+    };
+
+    let mut effects = map_conversation_effects(transition.effects);
+    if transition.request == Some(conversation::RequestIntent::ChatCompletion) {
+        effects.push(Effect::RequestChatCompletion {
+            payload: build_request_payload(&next_state),
+        });
+    }
 
     Transition {
-        state: State {
-            participant: state.participant,
-            conversation: transition.state,
-            coordinator: state.coordinator,
-            drafts: state.drafts,
-        },
-        effects: map_conversation_effects(transition.effects),
+        state: next_state,
+        effects,
     }
 }
 
@@ -427,6 +444,7 @@ fn reduce_coordinator_event(state: State, event: coordinator::Event<Entry>) -> T
     Transition {
         state: State {
             participant: state.participant,
+            conversation_config: state.conversation_config,
             conversation: state.conversation,
             coordinator: transition.state,
             drafts: state.drafts,
@@ -451,12 +469,26 @@ fn map_conversation_effects(effects: Vec<conversation::Effect>) -> Vec<Effect> {
 }
 
 #[cfg(test)]
+pub(crate) fn conversation_config_for_tests() -> ConversationConfig {
+    ConversationConfig {
+        model: String::from("gpt-5.4"),
+        max_history: 8,
+        max_tokens: 512,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn state_for_tests(
     participant: &str,
     committed_entries: Vec<Entry>,
     draft_entries: Vec<DraftEntry>,
 ) -> State {
-    let mut state = init(participant.to_owned(), None).state;
+    let mut state = init(
+        participant.to_owned(),
+        None,
+        conversation_config_for_tests(),
+    )
+    .state;
     for (index, entry) in committed_entries.into_iter().enumerate() {
         state = reduce(
             state,
@@ -558,6 +590,14 @@ mod tests {
         }
     }
 
+    fn user_prompt_received_event(content: impl Into<String>) -> Event {
+        Event::ConversationEvent {
+            event: conversation::Event::UserPromptReceived {
+                content: content.into(),
+            },
+        }
+    }
+
     fn received_event(index: usize, entry: Entry) -> Event {
         Event::CoordinatorEvent {
             event: coordinator::Event::Received { index, entry },
@@ -573,7 +613,7 @@ mod tests {
     }
 
     fn init_state() -> State {
-        init(String::from("alice"), None).state
+        init(String::from("alice"), None, conversation_config_for_tests()).state
     }
 
     fn draft_claim_entry(id: u64, body: &str, claim_kind: ClaimKind) -> DraftEntry {
@@ -605,7 +645,7 @@ mod tests {
 
     #[test]
     fn init_without_latest_entry_index_has_empty_view_and_no_effects() {
-        let transition = init(String::from("alice"), None);
+        let transition = init(String::from("alice"), None, conversation_config_for_tests());
         let state = transition.state;
         let app_view = view(&state);
 
@@ -693,7 +733,11 @@ mod tests {
 
     #[test]
     fn init_with_latest_entry_index_requests_missing_history() {
-        let transition = init(String::from("alice"), Some(3));
+        let transition = init(
+            String::from("alice"),
+            Some(3),
+            conversation_config_for_tests(),
+        );
 
         assert_eq!(
             transition.effects,
@@ -967,14 +1011,13 @@ mod tests {
 
         let direct = system_prompt::build_system_prompt(SystemPromptInput {
             participant: "alice",
-            commit_instruction: "clicking Submit",
             overview: &overview,
             drafts: &drafts,
             impact: Some(&impact),
             tools: &tools,
         });
 
-        assert_eq!(build_system_prompt(&state, "clicking Submit"), direct);
+        assert_eq!(build_system_prompt(&state), direct);
     }
 
     #[test]
@@ -1001,7 +1044,7 @@ mod tests {
             ],
         );
 
-        let prompt = build_system_prompt(&state, "typing /submit");
+        let prompt = build_system_prompt(&state);
 
         assert!(prompt.contains(
             "Impact analysis unavailable: draft reference must target a claim: DraftId(0)"
@@ -1025,15 +1068,13 @@ mod tests {
             },
         ]);
 
-        let payload = build_request_payload(
-            &state,
-            RequestConfig {
-                model: "gpt-5.4",
-                commit_instruction: "clicking Submit",
-                max_history: 8,
-                max_tokens: 768,
-            },
-        );
+        state.conversation_config = ConversationConfig {
+            model: String::from("gpt-5.4"),
+            max_history: 8,
+            max_tokens: 768,
+        };
+
+        let payload = build_request_payload(&state);
 
         let messages = payload["messages"].as_array().expect("messages array");
         assert_eq!(payload["model"], "gpt-5.4");
@@ -1062,23 +1103,16 @@ mod tests {
         state = reduce(state, assistant_text_event("first")).state;
         state = reduce(state, assistant_text_event("second")).state;
         state = reduce(state, assistant_text_event("third")).state;
+        state.conversation_config.max_history = 2;
 
-        let payload = build_request_payload(
-            &state,
-            RequestConfig {
-                model: "gpt-5.4",
-                commit_instruction: "typing /submit",
-                max_history: 2,
-                max_tokens: 512,
-            },
-        );
+        let payload = build_request_payload(&state);
 
         assert_eq!(
             payload["messages"],
             json!([
                 {
                     "role": "system",
-                    "content": build_system_prompt(&state, "typing /submit"),
+                    "content": build_system_prompt(&state),
                 },
                 {
                     "role": "assistant",
@@ -1089,6 +1123,52 @@ mod tests {
                     "content": "third",
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn user_prompt_event_changes_only_conversation_history_and_requests_completion() {
+        let mut state = init_state();
+        state = reduce(state, draft_claim_event("local draft", ClaimKind::Proposal)).state;
+        state = reduce(state, received_event(0, claim_entry("c1", "committed"))).state;
+
+        let participant_before = state.participant.clone();
+        let coordinator_before = state.coordinator.clone();
+        let drafts_before = state.drafts.clone();
+
+        let transition = reduce(state, user_prompt_received_event("hello there"));
+
+        assert_eq!(transition.state.participant, participant_before);
+        assert_eq!(transition.state.coordinator, coordinator_before);
+        assert_eq!(transition.state.drafts, drafts_before);
+        assert_eq!(
+            conversation::view(&transition.state.conversation).history,
+            vec![conversation::Message::User {
+                content: String::from("hello there"),
+            }]
+        );
+        assert_eq!(
+            transition.effects,
+            vec![Effect::RequestChatCompletion {
+                payload: build_request_payload(&transition.state),
+            }]
+        );
+    }
+
+    #[test]
+    fn assistant_completion_event_does_not_emit_request_payload() {
+        let state = init_state();
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![role_chunk(), content_chunk("hello")]),
+        );
+
+        assert!(
+            transition
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::RequestChatCompletion { .. }))
         );
     }
 
@@ -1595,7 +1675,11 @@ mod tests {
             participant_name in body_strategy(),
             ops in prop::collection::vec(app_op_strategy(), 0..40)
         ) {
-            let mut state = init(participant_name.clone(), None).state;
+            let mut state = init(
+                participant_name.clone(),
+                None,
+                conversation_config_for_tests(),
+            ).state;
             prop_assert_eq!(participant(&state), participant_name.as_str());
 
             for (step, op) in ops.into_iter().enumerate() {

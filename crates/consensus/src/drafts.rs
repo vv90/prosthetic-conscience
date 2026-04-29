@@ -9,17 +9,9 @@ use crate::types::{ClaimKind, Entry, Outcome, Position, RelationKind};
 ///
 /// The current local-only slice preserves the engine's existing semantics, so
 /// committed references are not validated against this context yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Context<'a> {
     pub committed_entries: &'a [&'a Entry],
-}
-
-impl<'a> Default for Context<'a> {
-    fn default() -> Self {
-        Self {
-            committed_entries: &[],
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

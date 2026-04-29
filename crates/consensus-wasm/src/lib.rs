@@ -1,7 +1,7 @@
 //! Thin wasm-bindgen wrapper for the consensus app state machine.
 
 use consensus::{app, coordinator, types::Entry};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -38,8 +38,14 @@ impl ConsensusAppHandle {
 
     #[wasm_bindgen(js_name = receiveEntry)]
     pub fn receive_entry(&mut self, index: usize, entry: JsValue) -> Result<JsValue, JsValue> {
-        let entry = from_js_entry(entry)?;
+        let entry = from_js_value(entry)?;
         let result = self.receive_entry_model(index, entry).map_err(js_error)?;
+        to_js_value(&result)
+    }
+
+    #[wasm_bindgen(js_name = submitUserPrompt)]
+    pub fn submit_user_prompt(&mut self, content: String) -> Result<JsValue, JsValue> {
+        let result = self.submit_user_prompt_model(content).map_err(js_error)?;
         to_js_value(&result)
     }
 }
@@ -49,7 +55,11 @@ impl ConsensusAppHandle {
         &mut self,
         latest_entry_index: Option<usize>,
     ) -> Result<DispatchResult, String> {
-        let transition = app::init(self.participant.clone(), latest_entry_index);
+        let transition = app::init(
+            self.participant.clone(),
+            latest_entry_index,
+            default_conversation_config(),
+        );
         let view = app::view(&transition.state);
         self.state = Some(transition.state);
 
@@ -90,6 +100,34 @@ impl ConsensusAppHandle {
             effects: transition.effects,
         })
     }
+
+    fn submit_user_prompt_model(&mut self, content: String) -> Result<DispatchResult, String> {
+        let state = self
+            .state
+            .take()
+            .ok_or_else(|| String::from("app state unavailable; call bootstrap first"))?;
+        let transition = app::reduce(
+            state,
+            app::Event::ConversationEvent {
+                event: consensus::conversation::Event::UserPromptReceived { content },
+            },
+        );
+        let view = app::view(&transition.state);
+        self.state = Some(transition.state);
+
+        Ok(DispatchResult {
+            view,
+            effects: transition.effects,
+        })
+    }
+}
+
+fn default_conversation_config() -> app::ConversationConfig {
+    app::ConversationConfig {
+        model: String::from("default"),
+        max_history: 8,
+        max_tokens: 512,
+    }
 }
 
 fn to_js_value<T>(value: &T) -> Result<JsValue, JsValue>
@@ -99,7 +137,10 @@ where
     serde_wasm_bindgen::to_value(value).map_err(js_error)
 }
 
-fn from_js_entry(value: JsValue) -> Result<Entry, JsValue> {
+fn from_js_value<T>(value: JsValue) -> Result<T, JsValue>
+where
+    T: DeserializeOwned,
+{
     serde_wasm_bindgen::from_value(value).map_err(js_error)
 }
 
@@ -219,5 +260,36 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("bootstrap"));
+    }
+
+    #[test]
+    fn submit_user_prompt_requires_bootstrap_first() {
+        let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        let error = handle
+            .submit_user_prompt_model(String::from("hello"))
+            .unwrap_err();
+
+        assert!(error.contains("bootstrap"));
+    }
+
+    #[test]
+    fn submit_user_prompt_appends_history_and_emits_request_effect() {
+        let mut handle = ConsensusAppHandle::new(String::from("alice"));
+        handle.bootstrap_model(None).unwrap();
+
+        let result = handle
+            .submit_user_prompt_model(String::from("hello"))
+            .unwrap();
+
+        assert_eq!(result.view.drafts.len(), 0);
+        assert_eq!(result.effects.len(), 1);
+        assert!(matches!(
+            &result.effects[0],
+            app::Effect::RequestChatCompletion { payload }
+                if payload["model"] == "default"
+                    && payload["max_tokens"] == 512
+                    && payload["messages"][1]["role"] == "user"
+                    && payload["messages"][1]["content"] == "hello"
+        ));
     }
 }

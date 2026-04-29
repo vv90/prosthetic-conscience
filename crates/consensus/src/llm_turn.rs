@@ -284,7 +284,6 @@ pub fn build_system_prompt(participant: &str, engine: &ConsensusEngine) -> Strin
 
     system_prompt::build_system_prompt(SystemPromptInput {
         participant,
-        commit_instruction: "typing /submit",
         overview: &overview,
         drafts: &drafts,
         impact: Some(&impact),
@@ -539,7 +538,6 @@ mod tests {
 
         let direct = system_prompt::build_system_prompt(SystemPromptInput {
             participant: "assistant",
-            commit_instruction: "typing /submit",
             overview: &overview,
             drafts: &drafts,
             impact: Some(&impact),

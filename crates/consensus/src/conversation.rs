@@ -13,6 +13,7 @@ pub struct State {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
+    UserPromptReceived { content: String },
     ChatCompletionReceived { chunks: Vec<Value> },
 }
 
@@ -26,6 +27,12 @@ pub enum Effect {
 pub struct Transition {
     pub state: State,
     pub effects: Vec<Effect>,
+    pub request: Option<RequestIntent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestIntent {
+    ChatCompletion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,12 +152,21 @@ pub(crate) fn state_with_history(history: Vec<Message>) -> State {
 
 fn reduce_event(mut state: State, event: Event) -> Transition {
     match event {
+        Event::UserPromptReceived { content } => {
+            state.history.push(Message::User { content });
+            Transition {
+                state,
+                effects: Vec::new(),
+                request: Some(RequestIntent::ChatCompletion),
+            }
+        }
         Event::ChatCompletionReceived { chunks } => match assemble(&chunks) {
             Ok(message) => {
                 state.history.push(map_assistant_message(message));
                 Transition {
                     state,
                     effects: Vec::new(),
+                    request: None,
                 }
             }
             Err(error) => Transition {
@@ -158,6 +174,7 @@ fn reduce_event(mut state: State, event: Event) -> Transition {
                 effects: vec![Effect::ChatCompletionDecodeFailed {
                     error: error.to_string(),
                 }],
+                request: None,
             },
         },
     }
@@ -376,6 +393,7 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.state.history,
             vec![Message::Assistant {
@@ -402,6 +420,7 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.state.history,
             vec![Message::Assistant {
@@ -431,6 +450,7 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.state.history,
             vec![Message::Assistant {
@@ -460,6 +480,7 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.state.history,
             vec![
@@ -488,6 +509,7 @@ mod tests {
         );
 
         assert_eq!(transition.state, state);
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.effects,
             vec![Effect::ChatCompletionDecodeFailed {
@@ -521,6 +543,7 @@ mod tests {
         );
 
         assert_eq!(transition.state, state);
+        assert_eq!(transition.request, None);
         assert_eq!(
             transition.effects,
             vec![Effect::ChatCompletionDecodeFailed {
@@ -544,6 +567,73 @@ mod tests {
                     {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]},
                     {"choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": null}]}
                 ]
+            })
+        );
+    }
+
+    #[test]
+    fn user_prompt_received_appends_user_message_and_requests_completion() {
+        let state = init();
+
+        let transition = reduce(
+            state,
+            Event::UserPromptReceived {
+                content: String::from("hello"),
+            },
+        );
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, Some(RequestIntent::ChatCompletion));
+        assert_eq!(
+            transition.state.history,
+            vec![Message::User {
+                content: String::from("hello"),
+            }]
+        );
+    }
+
+    #[test]
+    fn repeated_user_prompt_events_preserve_prefix_and_request_each_time() {
+        let state = state_with_history(vec![Message::Assistant {
+            content: Some(String::from("hi")),
+            tool_calls: Vec::new(),
+        }]);
+
+        let transition = reduce(
+            state,
+            Event::UserPromptReceived {
+                content: String::from("next"),
+            },
+        );
+
+        assert!(transition.effects.is_empty());
+        assert_eq!(transition.request, Some(RequestIntent::ChatCompletion));
+        assert_eq!(
+            transition.state.history,
+            vec![
+                Message::Assistant {
+                    content: Some(String::from("hi")),
+                    tool_calls: Vec::new(),
+                },
+                Message::User {
+                    content: String::from("next"),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn user_prompt_received_event_serde_shape() {
+        let value = serde_json::to_value(Event::UserPromptReceived {
+            content: String::from("hello"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "user_prompt_received",
+                "content": "hello"
             })
         );
     }

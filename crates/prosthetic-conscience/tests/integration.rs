@@ -415,7 +415,15 @@ async fn consensus_bootstrap_from_latest_entry_index_and_fetched_pages_reconstru
             .await
             .unwrap();
 
-        let transition = consensus_app::init(String::from("browser"), latest_entry_index);
+        let transition = consensus_app::init(
+            String::from("browser"),
+            latest_entry_index,
+            consensus_app::ConversationConfig {
+                model: String::from("gpt-5.4"),
+                max_history: 8,
+                max_tokens: 512,
+            },
+        );
         let mut state = transition.state;
         assert_eq!(transition.effects.len(), 1);
         assert!(matches!(
