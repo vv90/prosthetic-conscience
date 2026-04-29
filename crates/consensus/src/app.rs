@@ -275,6 +275,57 @@ pub fn execute_tool_calls(mut state: State, calls: &[RawToolCall]) -> ToolBatchE
     }
 }
 
+fn tool_execution_to_tool_result(execution: &ToolExecution) -> conversation::ToolResult {
+    conversation::ToolResult {
+        tool_call_id: execution.call_id.clone(),
+        content: format_tool_call_outcome(&execution.outcome),
+    }
+}
+
+fn format_tool_call_outcome(outcome: &ToolCallOutcome) -> String {
+    let value = match outcome {
+        ToolCallOutcome::Success(output) => tool_output_value(output),
+        ToolCallOutcome::Error(error) => json!({
+            "error": tool_call_error_message(error),
+        }),
+    };
+
+    serde_json::to_string_pretty(&value)
+        .unwrap_or_else(|_| String::from("{\"error\":\"failed to serialize tool result\"}"))
+}
+
+fn tool_output_value(output: &ToolOutput) -> Value {
+    match output {
+        ToolOutput::Overview(overview) => to_tool_result_value(overview),
+        ToolOutput::ClaimDetail(detail) => to_tool_result_value(detail),
+        ToolOutput::ShowDrafts(drafts) => to_tool_result_value(drafts),
+        ToolOutput::PreviewOverview(overview) => to_tool_result_value(overview),
+        ToolOutput::PreviewClaimDetail(detail) => to_tool_result_value(detail),
+        ToolOutput::ImpactAnalysis(impact) => to_tool_result_value(impact),
+        ToolOutput::DraftClaim { draft_id } => json!({ "draft_id": draft_id }),
+        ToolOutput::DraftRelation { draft_id } => json!({ "draft_id": draft_id }),
+        ToolOutput::DraftStance { draft_id } => json!({ "draft_id": draft_id }),
+        ToolOutput::DraftResolve { draft_id } => json!({ "draft_id": draft_id }),
+        ToolOutput::DraftComment { draft_id } => json!({ "draft_id": draft_id }),
+        ToolOutput::RemoveDraft { removed } => json!({ "removed": removed }),
+    }
+}
+
+fn to_tool_result_value<T: Serialize>(value: &T) -> Value {
+    serde_json::to_value(value).unwrap_or_else(|_| {
+        json!({
+            "error": "failed to serialize tool result",
+        })
+    })
+}
+
+fn tool_call_error_message(error: &ToolCallError) -> String {
+    match error {
+        ToolCallError::Decode(error) => error.to_string(),
+        ToolCallError::Execution(error) => error.to_string(),
+    }
+}
+
 fn reduce_drafts_event(state: State, event: drafts::Event) -> Transition {
     let committed_entries = state.coordinator.committed_prefix().collect::<Vec<_>>();
     let transition = drafts::reduce(
@@ -426,7 +477,45 @@ fn reduce_conversation_event(state: State, event: conversation::Event) -> Transi
     };
 
     let mut effects = map_conversation_effects(transition.effects);
-    if transition.request == Some(conversation::RequestIntent::ChatCompletion) {
+    match transition.request {
+        Some(conversation::RequestIntent::ChatCompletion) => {
+            effects.push(Effect::RequestChatCompletion {
+                payload: build_request_payload(&next_state),
+            });
+            Transition {
+                state: next_state,
+                effects,
+            }
+        }
+        Some(conversation::RequestIntent::ExecuteToolCalls(calls)) => {
+            reduce_execute_tool_calls(next_state, calls, effects)
+        }
+        None => Transition {
+            state: next_state,
+            effects,
+        },
+    }
+}
+
+fn reduce_execute_tool_calls(
+    state: State,
+    calls: Vec<RawToolCall>,
+    mut effects: Vec<Effect>,
+) -> Transition {
+    let ToolBatchExecution {
+        state: mut next_state,
+        outcomes,
+        domain_mutated,
+    } = execute_tool_calls(state, &calls);
+
+    let tool_results = outcomes
+        .iter()
+        .map(tool_execution_to_tool_result)
+        .collect::<Vec<_>>();
+    next_state.conversation =
+        conversation::with_tool_results(next_state.conversation, tool_results);
+
+    if !domain_mutated {
         effects.push(Effect::RequestChatCompletion {
             payload: build_request_payload(&next_state),
         });
@@ -612,6 +701,35 @@ mod tests {
         json!({"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}]})
     }
 
+    fn finish_chunk(reason: &str) -> serde_json::Value {
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]})
+    }
+
+    fn tool_call_chunk(
+        index: usize,
+        call_id: &str,
+        function_name: &str,
+        arguments_json: &str,
+    ) -> serde_json::Value {
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": index,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": function_name,
+                            "arguments": arguments_json,
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        })
+    }
+
     fn init_state() -> State {
         init(String::from("alice"), None, conversation_config_for_tests()).state
     }
@@ -641,6 +759,20 @@ mod tests {
             content_chunk(content),
             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
         ])
+    }
+
+    fn tool_message_content(message: &conversation::Message) -> serde_json::Value {
+        match message {
+            conversation::Message::Tool { content, .. } => serde_json::from_str(content).unwrap(),
+            other => panic!("expected tool message, got {other:?}"),
+        }
+    }
+
+    fn tool_message_id(message: &conversation::Message) -> &str {
+        match message {
+            conversation::Message::Tool { tool_call_id, .. } => tool_call_id,
+            other => panic!("expected tool message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1169,6 +1301,136 @@ mod tests {
                 .effects
                 .iter()
                 .all(|effect| !matches!(effect, Effect::RequestChatCompletion { .. }))
+        );
+    }
+
+    #[test]
+    fn assistant_tool_call_executes_read_only_tool_appends_result_and_requests_next_completion() {
+        let state = state_for_tests("alice", vec![claim_entry("c1", "committed")], vec![]);
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![
+                role_chunk(),
+                tool_call_chunk(0, "call_1", "overview", "{}"),
+                finish_chunk("tool_calls"),
+            ]),
+        );
+
+        let history = conversation::view(&transition.state.conversation).history;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[0],
+            conversation::Message::Assistant {
+                content: None,
+                tool_calls: vec![tool_call("call_1", "overview", "{}")],
+            }
+        );
+        let content = tool_message_content(&history[1]);
+        assert_eq!(tool_message_id(&history[1]), "call_1");
+        assert_eq!(content["total_claims"], 1);
+        assert_eq!(
+            transition.effects,
+            vec![Effect::RequestChatCompletion {
+                payload: build_request_payload(&transition.state),
+            }]
+        );
+    }
+
+    #[test]
+    fn assistant_tool_call_execution_error_appends_error_and_requests_next_completion() {
+        let state = init_state();
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![
+                role_chunk(),
+                tool_call_chunk(0, "call_1", "remove_draft", "{\"draft_id\":123}"),
+                finish_chunk("tool_calls"),
+            ]),
+        );
+
+        let history = conversation::view(&transition.state.conversation).history;
+        assert_eq!(history.len(), 2);
+        let content = tool_message_content(&history[1]);
+        assert_eq!(tool_message_id(&history[1]), "call_1");
+        assert!(
+            content["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("draft not found"))
+        );
+        assert_eq!(
+            transition.effects,
+            vec![Effect::RequestChatCompletion {
+                payload: build_request_payload(&transition.state),
+            }]
+        );
+    }
+
+    #[test]
+    fn assistant_tool_call_mutation_updates_drafts_appends_result_and_stops() {
+        let state = init_state();
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![
+                role_chunk(),
+                tool_call_chunk(
+                    0,
+                    "call_1",
+                    "draft_claim",
+                    "{\"body\":\"Use JWT\",\"kind\":\"proposal\"}",
+                ),
+                finish_chunk("tool_calls"),
+            ]),
+        );
+
+        let history = conversation::view(&transition.state.conversation).history;
+        assert_eq!(history.len(), 2);
+        let content = tool_message_content(&history[1]);
+        assert_eq!(tool_message_id(&history[1]), "call_1");
+        assert_eq!(content, json!({ "draft_id": 0 }));
+        assert_eq!(show_drafts(&transition.state).len(), 1);
+        assert!(
+            transition
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::RequestChatCompletion { .. }))
+        );
+    }
+
+    #[test]
+    fn assistant_multiple_tool_calls_append_results_in_order() {
+        let state = state_for_tests(
+            "alice",
+            vec![claim_entry("c1", "committed")],
+            vec![draft_claim_entry(0, "draft", ClaimKind::Proposal)],
+        );
+
+        let transition = reduce(
+            state,
+            chat_completion_received_event(vec![
+                role_chunk(),
+                tool_call_chunk(0, "call_1", "overview", "{}"),
+                tool_call_chunk(1, "call_2", "show_drafts", "{}"),
+                finish_chunk("tool_calls"),
+            ]),
+        );
+
+        let history = conversation::view(&transition.state.conversation).history;
+        assert_eq!(history.len(), 3);
+        assert_eq!(tool_message_id(&history[1]), "call_1");
+        assert_eq!(tool_message_id(&history[2]), "call_2");
+        assert_eq!(tool_message_content(&history[1])["total_claims"], 1);
+        assert_eq!(
+            tool_message_content(&history[2]).as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            transition.effects,
+            vec![Effect::RequestChatCompletion {
+                payload: build_request_payload(&transition.state),
+            }]
         );
     }
 

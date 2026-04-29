@@ -30,9 +30,10 @@ pub struct Transition {
     pub request: Option<RequestIntent>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestIntent {
     ChatCompletion,
+    ExecuteToolCalls(Vec<RawToolCall>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +51,12 @@ pub enum Message {
         tool_call_id: String,
         content: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -75,6 +82,16 @@ pub fn view(state: &State) -> View {
 
 pub fn history(state: &State) -> &[Message] {
     &state.history
+}
+
+pub fn with_tool_results(mut state: State, results: impl IntoIterator<Item = ToolResult>) -> State {
+    state
+        .history
+        .extend(results.into_iter().map(|result| Message::Tool {
+            tool_call_id: result.tool_call_id,
+            content: result.content,
+        }));
+    state
 }
 
 pub fn message_to_json(message: &Message) -> Value {
@@ -162,11 +179,16 @@ fn reduce_event(mut state: State, event: Event) -> Transition {
         }
         Event::ChatCompletionReceived { chunks } => match assemble(&chunks) {
             Ok(message) => {
+                let request = if message.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(RequestIntent::ExecuteToolCalls(message.tool_calls.clone()))
+                };
                 state.history.push(map_assistant_message(message));
                 Transition {
                     state,
                     effects: Vec::new(),
-                    request: None,
+                    request,
                 }
             }
             Err(error) => Transition {
@@ -420,7 +442,14 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
-        assert_eq!(transition.request, None);
+        assert_eq!(
+            transition.request,
+            Some(RequestIntent::ExecuteToolCalls(vec![RawToolCall::new(
+                String::from("call_1"),
+                String::from("overview"),
+                String::from("{\"claim\":\"draft:0\"}"),
+            )]))
+        );
         assert_eq!(
             transition.state.history,
             vec![Message::Assistant {
@@ -450,7 +479,14 @@ mod tests {
         );
 
         assert!(transition.effects.is_empty());
-        assert_eq!(transition.request, None);
+        assert_eq!(
+            transition.request,
+            Some(RequestIntent::ExecuteToolCalls(vec![RawToolCall::new(
+                String::from("call_1"),
+                String::from("draft_claim"),
+                String::from("{\"body\""),
+            )]))
+        );
         assert_eq!(
             transition.state.history,
             vec![Message::Assistant {
@@ -666,6 +702,113 @@ mod tests {
                 content: String::from("hello"),
             }]
             .as_slice()
+        );
+    }
+
+    #[test]
+    fn with_tool_results_appends_one_tool_result_after_assistant_tool_call() {
+        let state = state_with_history(vec![Message::Assistant {
+            content: None,
+            tool_calls: vec![RawToolCall::new(
+                String::from("call_1"),
+                String::from("overview"),
+                String::from("{}"),
+            )],
+        }]);
+
+        let state = with_tool_results(
+            state,
+            [ToolResult {
+                tool_call_id: String::from("call_1"),
+                content: String::from("{\"total_claims\":0}"),
+            }],
+        );
+
+        assert_eq!(
+            state.history,
+            vec![
+                Message::Assistant {
+                    content: None,
+                    tool_calls: vec![RawToolCall::new(
+                        String::from("call_1"),
+                        String::from("overview"),
+                        String::from("{}"),
+                    )],
+                },
+                Message::Tool {
+                    tool_call_id: String::from("call_1"),
+                    content: String::from("{\"total_claims\":0}"),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn with_tool_results_appends_multiple_tool_results_in_order() {
+        let state = state_with_history(vec![Message::User {
+            content: String::from("inspect"),
+        }]);
+
+        let state = with_tool_results(
+            state,
+            [
+                ToolResult {
+                    tool_call_id: String::from("call_1"),
+                    content: String::from("{\"a\":1}"),
+                },
+                ToolResult {
+                    tool_call_id: String::from("call_2"),
+                    content: String::from("{\"b\":2}"),
+                },
+            ],
+        );
+
+        assert_eq!(
+            state.history,
+            vec![
+                Message::User {
+                    content: String::from("inspect"),
+                },
+                Message::Tool {
+                    tool_call_id: String::from("call_1"),
+                    content: String::from("{\"a\":1}"),
+                },
+                Message::Tool {
+                    tool_call_id: String::from("call_2"),
+                    content: String::from("{\"b\":2}"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn with_tool_results_empty_results_leave_state_unchanged() {
+        let state = state_with_history(vec![Message::User {
+            content: String::from("hello"),
+        }]);
+
+        let next = with_tool_results(state.clone(), Vec::<ToolResult>::new());
+
+        assert_eq!(next, state);
+    }
+
+    #[test]
+    fn with_tool_results_history_to_json_uses_tool_message_shape() {
+        let state = with_tool_results(
+            init(),
+            [ToolResult {
+                tool_call_id: String::from("call_1"),
+                content: String::from("{\"draft_id\":0}"),
+            }],
+        );
+
+        assert_eq!(
+            history_to_json(history(&state)),
+            vec![json!({
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"draft_id\":0}"
+            })]
         );
     }
 
